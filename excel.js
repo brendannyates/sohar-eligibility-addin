@@ -1,0 +1,190 @@
+/* excel.js — everything that touches the workbook. Table and sheet names must match the template. */
+(function (root) {
+  'use strict';
+
+  const SHEETS = { import: 'Import', payerMap: 'Payer Map', sohar: 'Sohar Payers', config: 'Config',
+    patients: 'Patients', verification: 'Verification', discovery: 'Discovery', review: 'Review', dashboard: 'Dashboard' };
+  const TABLES = { payerMap: 'tblPayerMap', sohar: 'tblSoharPayers', config: 'tblConfig', locState: 'tblLocationState',
+    patients: 'tblPatients', verification: 'tblVerification', discovery: 'tblDiscovery', review: 'tblReview' };
+  const CHUNK = 1000;
+
+  async function run(fn) { return Excel.run(fn); }
+
+  async function readImportRows() {
+    return run(async (ctx) => {
+      const ws = ctx.workbook.worksheets.getItem(SHEETS.import);
+      const used = ws.getUsedRangeOrNullObject(true);
+      used.load('rowCount,columnCount,rowIndex,columnIndex,isNullObject');
+      await ctx.sync();
+      if (used.isNullObject) return [];
+      const rows = [];
+      const cols = used.columnCount;
+      for (let start = 0; start < used.rowCount; start += 5000) {
+        const n = Math.min(5000, used.rowCount - start);
+        const rg = ws.getRangeByIndexes(used.rowIndex + start, used.columnIndex, n, cols);
+        rg.load('values');
+        await ctx.sync();
+        for (const r of rg.values) rows.push(r);
+      }
+      return rows;
+    });
+  }
+
+  async function readTable(tableName) {
+    return run(async (ctx) => {
+      const t = ctx.workbook.tables.getItemOrNullObject(tableName);
+      t.load('isNullObject');
+      await ctx.sync();
+      if (t.isNullObject) throw new Error(`Table ${tableName} is missing. Use the Sohar Eligibility template workbook.`);
+      const h = t.getHeaderRowRange(); h.load('values');
+      const b = t.getDataBodyRange(); b.load('values');
+      await ctx.sync();
+      const headers = h.values[0].map((x) => String(x).trim());
+      return b.values
+        .filter((r) => r.some((v) => v !== '' && v != null))
+        .map((r) => Object.fromEntries(headers.map((k, i) => [k, r[i]])));
+    });
+  }
+
+  async function readConfig() {
+    const rows = await readTable(TABLES.config);
+    const cfg = {};
+    for (const r of rows) cfg[String(r.Setting || '').trim()] = r.Value;
+    const loc = {};
+    for (const r of await readTable(TABLES.locState)) if (r.Location) loc[String(r.Location).trim()] = String(r.State || '').trim();
+    const scope = String(cfg['Scope'] || 'upcoming').toLowerCase().startsWith('all') ? 'all' : 'upcoming';
+    let asOf = null;
+    const raw = cfg['As-of date'];
+    if (raw !== '' && raw != null) asOf = root.SoharCore.parseDate(raw);
+    return {
+      asOf, scope, locationState: loc,
+      defaultState: String(cfg['Default state'] || '').trim(),
+      teleKeywords: String(cfg['Telehealth keywords'] || 'Tele').split(/[;,]/).map((s) => s.trim()).filter(Boolean),
+      posTele: String(cfg['POS code: telehealth'] || '10').trim(),
+      posOffice: String(cfg['POS code: office'] || '11').trim(),
+      specialty: String(cfg['Specialty code'] || 'PSY').trim(),
+      useGuarantorAsSubscriber: /^y|true/i.test(String(cfg['Use guarantor as subscriber'] || 'No')),
+    };
+  }
+
+  async function readPayerMap() {
+    const rows = await readTable(TABLES.payerMap);
+    return rows.map((r) => ({
+      nextgenPayerName: r['NextGen Payer Name'], payerId: r['Sohar payerId'], payerName: r['Sohar payerName'],
+      confidence: r['Confidence'], notes: r['Notes'],
+    }));
+  }
+
+  async function readSoharPayers() {
+    const rows = await readTable(TABLES.sohar);
+    return rows.map((r) => ({ payerId: String(r.payerId || ''), payerName: String(r.payerName || ''), aliasPayerNames: String(r.aliasPayerNames || '') }));
+  }
+
+  async function upsertPayerMap(entry) {
+    return run(async (ctx) => {
+      const t = ctx.workbook.tables.getItem(TABLES.payerMap);
+      const h = t.getHeaderRowRange(); h.load('values');
+      const b = t.getDataBodyRange(); b.load('values,rowCount');
+      await ctx.sync();
+      const headers = h.values[0].map((x) => String(x).trim());
+      const col = (name) => headers.indexOf(name);
+      const today = root.SoharCore.fmtDate(new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())));
+      const rowVals = headers.map(() => '');
+      rowVals[col('NextGen Payer Name')] = entry.nextgenPayerName;
+      rowVals[col('Sohar payerId')] = entry.payerId;
+      rowVals[col('Sohar payerName')] = entry.payerName;
+      rowVals[col('Confidence')] = entry.confidence;
+      rowVals[col('Action')] = entry.payerId ? 'verification' : 'discovery';
+      rowVals[col('Notes')] = entry.notes || '';
+      if (col('Last reviewed') >= 0) rowVals[col('Last reviewed')] = today;
+      const i = b.values.findIndex((r) => String(r[col('NextGen Payer Name')]).trim().toLowerCase() === String(entry.nextgenPayerName).trim().toLowerCase());
+      if (i >= 0) {
+        b.getRow(i).values = [rowVals];
+      } else {
+        const blank = b.values.findIndex((r) => r.every((v) => v === '' || v == null));
+        if (blank >= 0 && b.rowCount === 1) b.getRow(blank).values = [rowVals];
+        else t.rows.add(null, [rowVals]);
+      }
+      await ctx.sync();
+    });
+  }
+
+  /** Replace all body rows of a table with `rows` (array of objects keyed by column header). */
+  async function replaceTable(tableName, cols, rows) {
+    return run(async (ctx) => {
+      const t = ctx.workbook.tables.getItemOrNullObject(tableName);
+      t.load('isNullObject');
+      await ctx.sync();
+      if (t.isNullObject) throw new Error(`Table ${tableName} is missing. Use the Sohar Eligibility template workbook.`);
+      const ws = t.worksheet;
+      const hdr = t.getHeaderRowRange(); hdr.load('rowIndex,columnIndex,columnCount');
+      const body = t.getDataBodyRange(); body.load('rowCount');
+      await ctx.sync();
+      if (hdr.columnCount !== cols.length) throw new Error(`${tableName} has ${hdr.columnCount} columns; this version of the add-in expects ${cols.length}. Use the matching template.`);
+      ctx.application.suspendApiCalculationUntilNextSync();
+      if (body.rowCount > 0) { body.delete(Excel.DeleteShiftDirection.up); await ctx.sync(); }
+      // Excel leaves one empty body row. Everything is written as text so member IDs and ZIPs keep leading zeros.
+      const values = rows.map((r) => cols.map((c) => { const v = r[c]; return v == null ? '' : v; }));
+      if (!values.length) { t.getDataBodyRange().numberFormat = [['@']]; await ctx.sync(); return; }
+      const canResize = Office.context.requirements.isSetSupported('ExcelApi', '1.13');
+      if (canResize) {
+        const target = ws.getRangeByIndexes(hdr.rowIndex + 1, hdr.columnIndex, values.length, cols.length);
+        target.numberFormat = values.map((r) => r.map(() => '@'));
+        await ctx.sync();
+        for (let i = 0; i < values.length; i += CHUNK) {
+          ctx.application.suspendApiCalculationUntilNextSync();
+          const chunk = values.slice(i, i + CHUNK);
+          ws.getRangeByIndexes(hdr.rowIndex + 1 + i, hdr.columnIndex, chunk.length, cols.length).values = chunk;
+          await ctx.sync();
+        }
+        t.resize(ws.getRangeByIndexes(hdr.rowIndex, hdr.columnIndex, values.length + 1, cols.length));
+        await ctx.sync();
+      } else {
+        // Older Excel: format the blank row first so appended rows inherit text format, then append and drop the blank.
+        t.getDataBodyRange().numberFormat = [['@']];
+        await ctx.sync();
+        for (let i = 0; i < values.length; i += CHUNK) {
+          ctx.application.suspendApiCalculationUntilNextSync();
+          t.rows.add(null, values.slice(i, i + CHUNK));
+          await ctx.sync();
+        }
+        const after = t.getDataBodyRange(); after.load('rowCount');
+        await ctx.sync();
+        if (after.rowCount > values.length) after.getRow(0).delete(Excel.DeleteShiftDirection.up);
+        await ctx.sync();
+      }
+    });
+  }
+
+  async function setConfigValue(setting, value) {
+    return run(async (ctx) => {
+      const t = ctx.workbook.tables.getItem(TABLES.config);
+      const b = t.getDataBodyRange(); b.load('values');
+      await ctx.sync();
+      const i = b.values.findIndex((r) => String(r[0]).trim() === setting);
+      if (i >= 0) b.getCell(i, 1).values = [[value]];
+      else t.rows.add(null, [[setting, value, '']]);
+      await ctx.sync();
+    });
+  }
+
+  async function activate(sheetName) {
+    return run(async (ctx) => {
+      const ws = ctx.workbook.worksheets.getItemOrNullObject(sheetName);
+      ws.load('isNullObject');
+      await ctx.sync();
+      if (!ws.isNullObject) { ws.activate(); await ctx.sync(); }
+    });
+  }
+
+  async function templateCheck() {
+    return run(async (ctx) => {
+      const names = Object.values(TABLES);
+      const items = names.map((n) => { const t = ctx.workbook.tables.getItemOrNullObject(n); t.load('isNullObject'); return t; });
+      await ctx.sync();
+      return names.filter((n, i) => items[i].isNullObject);
+    });
+  }
+
+  root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable, setConfigValue, activate, templateCheck };
+})(typeof self !== 'undefined' ? self : this);

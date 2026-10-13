@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
+  <title>Sohar Eligibility</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Sohar eligibility prep</h1>
+    <p id="wbStatus" class="status">Checking workbook…</p>
+  </header>
+
+  <main>
+    <ol class="steps">
+      <li class="step" id="step1" data-step="1">
+        <div class="num">1</div>
+        <div class="body">
+          <h2>Import the appointment report</h2>
+          <p class="hint">Paste the whole NextGen Appointments Listing into the <b>Import</b> sheet at A1, title rows included. The header row is found automatically.</p>
+          <div class="actions">
+            <button class="primary" id="btnScan">Scan Import sheet</button>
+            <button class="link" data-goto="Import">Open Import</button>
+          </div>
+          <div id="scanResult" class="result" hidden></div>
+        </div>
+      </li>
+
+      <li class="step" id="step2" data-step="2">
+        <div class="num">2</div>
+        <div class="body">
+          <h2>Map payers</h2>
+          <p class="hint">Each NextGen payer name needs a Sohar payer ID. Mapped names are reused every time; only new names show here.</p>
+          <div id="payerList" class="result" hidden></div>
+          <div class="actions">
+            <button class="link" data-goto="Payer Map">Open Payer Map</button>
+            <button class="link" data-goto="Sohar Payers">Open Sohar payer list</button>
+          </div>
+        </div>
+      </li>
+
+      <li class="step" id="step3" data-step="3">
+        <div class="num">3</div>
+        <div class="body">
+          <h2>Build the patient list</h2>
+          <div class="fields">
+            <label>Scope
+              <select id="scope">
+                <option value="upcoming">Patients with an upcoming appointment</option>
+                <option value="all">All patients in the report</option>
+              </select>
+            </label>
+            <label>As-of date
+              <input id="asOf" type="date">
+            </label>
+          </div>
+          <p class="hint">One row per patient. Verification when the payer is mapped and a member ID exists; discovery otherwise. Writes the Patients, Review, Verification and Discovery sheets.</p>
+          <div class="actions">
+            <button class="primary" id="btnBuild" disabled>Build patient list</button>
+            <button class="link" data-goto="Patients">Open Patients</button>
+            <button class="link" data-goto="Review">Open Review</button>
+          </div>
+          <div id="buildResult" class="result" hidden></div>
+        </div>
+      </li>
+
+      <li class="step" id="step4" data-step="4">
+        <div class="num">4</div>
+        <div class="body">
+          <h2>Export for Sohar</h2>
+          <p class="hint">Column order matches the Sohar templates. Files download from this pane; the same rows are on the Verification and Discovery sheets.</p>
+          <div id="preflight" class="result" hidden></div>
+          <div class="actions">
+            <button class="primary" id="btnDlVer" disabled>Download verification CSV</button>
+            <button class="primary alt" id="btnDlDisc" disabled>Download discovery CSV</button>
+          </div>
+        </div>
+      </li>
+    </ol>
+  </main>
+
+  <footer class="foot">
+    <p class="fine">Data stays in this workbook. The pane makes no network calls and keeps nothing after it closes.</p>
+    <p id="version" class="fine"></p>
+  </footer>
+
+  <script src="core.js"></script>
+  <script src="excel.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
