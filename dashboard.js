@@ -4,7 +4,7 @@
   'use strict';
   const C = window.SoharCore;
   const $ = (id) => document.getElementById(id);
-  let rows = [], tasks = [], irRows = [], exportsData = null, scope = 'upcoming', asOf = null, list = [], tab = 'prep';
+  let rows = [], tasks = [], irRows = [], exportsData = null, discVerify = [], scope = 'upcoming', asOf = null, list = [], tab = 'prep';
   let inOffice = false, web = false;
   const take = C.messageAssembler();
 
@@ -34,7 +34,7 @@
   }
 
   function load(m) {
-    rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; scope = m.scope || 'upcoming'; web = !!m.web;
+    rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
     $('dStatus').textContent = rows.length
       ? `${rows.length} Sohar results, ${tasks.filter(open).length} open NextGen tasks${asOf ? `, appointments from ${C.fmtDate(asOf)}` : ''}.`
@@ -219,6 +219,9 @@
       if (!exportsData) { notice('No Sohar import built yet. Run step 3 (Build) in the pane first.', false); return; }
       name = `sohar_${kind}_import_${scope}_${stamp()}.csv`;
       cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS; data = exportsData[kind] || [];
+    } else if (kind === 'discoveryVerify') {
+      if (!discVerify.length) { notice('No discovery patients are waiting for verification. Upload a discovery output with coverage found first.', false); return; }
+      name = `sohar_verification_import_from_discovery_${stamp()}.csv`; cols = C.VERIFICATION_COLS; data = discVerify;
     } else if (kind === 'tasks') { name = `nextgen_tasks_open_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks.filter(open); }
     else if (kind === 'allTasks') { name = `nextgen_tasks_all_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks; }
     else if (kind === 'benefits') { name = `sohar_benefits_${stamp()}.csv`; cols = C.BENEFITS_EXPORT_COLS; data = C.benefitsExport(rows); }

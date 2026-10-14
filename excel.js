@@ -236,6 +236,27 @@
   const writeExport = (cols, rows) => writeAddinTable('Export', 'tblExport', cols, rows, true);
   const writeIr = (cols, rows) => writeAddinTable('IR Cross-Ref', 'tblIrCrossRef', cols, rows, true);
   async function readIr() { try { return await readTable('tblIrCrossRef'); } catch (e) { return []; } }
+  // Discovery Verify: import-ready verification rows for patients discovery found coverage for. Admins can type member IDs here.
+  const writeDiscoveryVerify = (cols, rows) => writeAddinTable('Discovery Verify', 'tblDiscoveryVerify', cols, rows, false);
+  async function readDiscoveryVerify() { try { return await readTable('tblDiscoveryVerify'); } catch (e) { return []; } }
+  // Every Sohar result uploaded so far, one JSON record per row, on a hidden sheet.
+  async function readUploads() { try { return await readTable('tblSoharUploads'); } catch (e) { return []; } }
+  async function writeUploads(cols, rows) {
+    await writeAddinTable('Sohar Uploads', 'tblSoharUploads', cols, rows, false);
+    await run(async (ctx) => { ctx.workbook.worksheets.getItem('Sohar Uploads').visibility = Excel.SheetVisibility.hidden; await ctx.sync(); }).catch(() => {});
+  }
+  /** Rows in a table the add-in owns, or 0 if it does not exist yet. */
+  async function tableRowCount(tableName) {
+    return run(async (ctx) => {
+      const t = ctx.workbook.tables.getItemOrNullObject(tableName);
+      t.load('isNullObject');
+      await ctx.sync();
+      if (t.isNullObject) return 0;
+      const b = t.getDataBodyRange(); b.load('values');
+      await ctx.sync();
+      return b.values.filter((r) => r.some((v) => v !== '' && v != null)).length;
+    });
+  }
   async function readTasks() { try { return await readTable(TASKS_TABLE); } catch (e) { return []; } }
 
   /** Mark one NextGen task done (or not) by Task Key. */
@@ -325,5 +346,6 @@
   }
 
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable,
-    writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
+    writeDiscoveryVerify, readDiscoveryVerify, readUploads, writeUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

@@ -1,11 +1,11 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.5.1';
+  const VERSION = '0.6.0';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
-  const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, pendingFocus: '', demo: false };
+  const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, discoveryVerify: null, pendingFocus: '', demo: false };
   const $ = (id) => document.getElementById(id);
 
   // ---------- boot ----------
@@ -29,6 +29,35 @@
       setStatus('Template workbook detected.', 'ok');
     } catch (e) { setStatus(`Could not read the workbook: ${e.message}`, 'bad'); }
     wire();
+    await autoRefresh();
+  }
+
+  /**
+   * On open: if the Import sheet already holds a report, scan it; if a patient list was built before, rebuild it
+   * (and the Sohar imports) for today; if Sohar results were saved, match them again so next visits and tasks are current.
+   */
+  async function autoRefresh() {
+    try {
+      const rows = await X.readImportRows();
+      const det = C.detectHeader(rows);
+      if (!det || det.missing.length || rows.length <= det.headerRow + 1) return;
+      setStatus('Refreshing from the data already in this workbook…', '');
+      await loadConfig();
+      await scan();
+      const built = (await X.tableRowCount(X.TABLES.patients)) > 0;
+      if (built && !$('btnBuild').disabled) await build();
+      const saved = (await X.readUploads()).length > 0;
+      if (saved) {
+        $('resultsResult').innerHTML = '';
+        const html = await processResults([]);
+        if (html) $('resultsResult').insertAdjacentHTML('beforeend', html);
+      }
+      const did = [built ? 'patient list and Sohar imports rebuilt' : 'Import sheet scanned', saved ? 'saved Sohar results matched again' : ''].filter(Boolean).join('; ');
+      setStatus(`Refreshed on open: ${did}.`, 'ok');
+    } catch (e) {
+      console.error(e);
+      setStatus(`Opened, but the refresh stopped: ${e.message}`, 'bad');
+    }
   }
 
   function startDemo(why) {
@@ -40,6 +69,7 @@
     document.body.insertBefore(b, document.querySelector('main'));
     setStatus('Demo workbook', 'ok');
     wire();
+    autoRefresh();
   }
 
   function wire() {
@@ -55,7 +85,9 @@
     $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits'), 'resultsResult'));
     $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(`sohar_results_worklist_${stamp()}.csv`, C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
     $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(`sohar_benefits_${stamp()}.csv`, C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'resultsResult'), 'resultsResult'));
-    $('btnDlTasks').addEventListener('click', () => guard(async () => saveCSV(`nextgen_tasks_${stamp()}.csv`, C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
+    $('btnDlDiscVer').addEventListener('click', () => guard(downloadDiscoveryVerify, 'resultsResult'));
+    $('btnClearSaved').addEventListener('click', () => guard(clearSaved, 'resultsResult'));
+    $('btnDlTasks').addEventListener('click',() => guard(async () => saveCSV(`nextgen_tasks_${stamp()}.csv`, C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
     $('btnFull').addEventListener('click', () => guard(() => openFull(), 'resultsResult'));
     $('btnFull2').addEventListener('click', () => guard(() => openFull('upload'), 'resultsResult'));
     $('btnIr').addEventListener('click', () => $('fileIr').click());
@@ -287,21 +319,39 @@
       const { kind, records } = C.readResultRows(f.rows);
       step(`${f.name}: ${kind ? `${kind} output, ${records.length} rows` : 'not recognised as a Sohar verification or discovery output'}`);
     }
+    // New files are added to the results saved in the workbook, so the verification of discovery patients
+    // can be uploaded on its own later without losing the first round.
+    const acc = C.accumulateResults(await X.readUploads(), list, new Date().toISOString());
+    if (list.length && !acc.added && !acc.replaced) throw new Error(`None of these files look like a Sohar verification or discovery output${acc.unknownFiles.length ? ` (${acc.unknownFiles.join(', ')})` : ''}.`);
+    if (!acc.files.length) return '';
+    if (list.length) {
+      step(`${acc.added} new result${acc.added === 1 ? '' : 's'}${acc.replaced ? `, ${acc.replaced} replaced` : ''}; ${acc.saved.length} saved in this workbook.`);
+      await X.writeUploads(C.UPLOAD_COLS, acc.saved);
+    }
     step('Reading the appointment report on the Import sheet…');
     state.rows = await X.readImportRows();
     const cfg = await X.readConfig();
     if ($('asOf').value) cfg.asOf = new Date($('asOf').value + 'T00:00:00Z');
-    const res = C.mergeSoharResults(state.rows, list, { ...cfg, payerMap: await X.readPayerMap() });
+    const res = C.mergeSoharResults(state.rows, acc.files, { ...cfg, payerMap: await X.readPayerMap() });
     if (res.error) throw new Error(res.error);
-    if (!res.results.length) throw new Error(`None of these files look like a Sohar verification or discovery output${res.unknownFiles.length ? ` (${res.unknownFiles.join(', ')})` : ''}.`);
     step(`Matched ${res.counts.matched} results to patients (${res.counts.unmatched} unmatched). Writing the Sohar Results sheet…`);
     await X.writeResults(C.RESULTS_COLS, res.results);
     const tasks = C.keepDone(C.buildTasks(res.results), await X.readTasks());
     step(`Writing ${tasks.length} rows to the NextGen Tasks sheet…`);
     await X.writeTasks(C.TASK_COLS, tasks);
-    state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks;
+    const dv = C.keepMemberIds(res.discoveryVerification, await X.readDiscoveryVerify());
+    await X.writeDiscoveryVerify(C.VERIFICATION_COLS, dv);
+    state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv;
     for (const id of ['btnCopyMsg', 'btnCopyBen', 'btnDlWork', 'btnDlBen', 'btnDlTasks']) $(id).disabled = false;
+    $('btnDlDiscVer').disabled = !dv.length;
     markDone(5);
+    const noId = dv.filter((r) => !r.memberId).length;
+    const verifiedFromDisc = res.results.filter((r) => r['Discovery Follow-up'] === 'From discovery').length;
+    const dvHtml = (dv.length
+      ? `<p class="ok"><b>${dv.length} discovery patient${dv.length === 1 ? '' : 's'} ready to verify.</b> Click <b>Download discovery verification import</b> and upload it to Sohar as a verification batch, then bring the verification output back here; it is added to these results.</p>`
+        + (noId ? `<p class="warn">${noId} of them ha${noId === 1 ? 's' : 've'} no member ID (Sohar discovery usually leaves it blank). Open the Sohar link, type it in the memberId column on the Discovery Verify sheet, then download.</p>` : '')
+      : '')
+      + (verifiedFromDisc ? `<p class="ok">${verifiedFromDisc} plan${verifiedFromDisc === 1 ? '' : 's'} found by discovery ${verifiedFromDisc === 1 ? 'has' : 'have'} been verified; benefits are on those rows.</p>` : '');
 
     const q = res.counts.byQueue, c = res.counts;
     const n = (col, v) => res.results.filter((r) => r[col] === v).length;
@@ -316,12 +366,34 @@
         </div>
         <p>${c.matched} result${c.matched === 1 ? '' : 's'} matched to the appointment report${c.notReturned ? `; ${c.notReturned} upcoming patient${c.notReturned === 1 ? ' was' : 's were'} not in the Sohar files` : ''}.</p>
         <p><b>${open} NextGen task${open === 1 ? '' : 's'}</b> on the NextGen Tasks sheet${tasks.length - open ? ` (${tasks.length - open} already done)` : ''}.</p>
+        ${dvHtml}
         ${c.withBenefits
           ? `<p class="ok">${c.withBenefits} verified patient${c.withBenefits === 1 ? ' has' : 's have'} benefits. Deductible: ${n('Deductible Status', 'Met')} met, ${n('Deductible Status', 'Approaching')} approaching, ${n('Deductible Status', 'None')} with no deductible. OOP max: ${n('OOP Status', 'Met')} met, ${n('OOP Status', 'Approaching')} approaching.</p>
              <p class="hint">Approaching means ${pctTxt} or less remaining (Config: Benefit approaching %).</p>`
           : `<p class="warn">These files have no deductible or out-of-pocket columns, so benefit statuses are blank. Use Sohar's full verification output, which includes them.</p>`}
-        ${res.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar output): ${res.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
+        ${acc.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar output): ${acc.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
     return html;
+  }
+
+  async function currentDiscoveryVerify() {
+    if (state.demo) return state.discoveryVerify || [];
+    return X.readDiscoveryVerify(); // the sheet, so member IDs typed there go out
+  }
+  async function downloadDiscoveryVerify() {
+    const rows = await currentDiscoveryVerify();
+    if (!rows.length) throw new Error('No discovery patients are waiting for verification. Upload a discovery output with coverage found first.');
+    await saveCSV(`sohar_verification_import_from_discovery_${stamp()}.csv`, C.VERIFICATION_COLS, rows, 'resultsResult');
+    const noId = rows.filter((r) => !String(r.memberId || '').trim()).length;
+    if (noId) note('resultsResult', `${noId} row${noId === 1 ? ' has' : 's have'} no member ID. Sohar may reject ${noId === 1 ? 'it' : 'them'}; fill the memberId column on the Discovery Verify sheet and download again.`, 'warn');
+  }
+
+  let clearArmed = 0;
+  async function clearSaved() {
+    if (Date.now() - clearArmed > 5000) { clearArmed = Date.now(); $('btnClearSaved').textContent = 'Click again to clear'; setTimeout(() => { $('btnClearSaved').textContent = 'Clear saved Sohar results'; }, 5000); return; }
+    clearArmed = 0;
+    await X.writeUploads(C.UPLOAD_COLS, []);
+    $('btnClearSaved').textContent = 'Clear saved Sohar results';
+    note('resultsResult', 'Saved Sohar results cleared. The next upload starts fresh; the sheets stay as they are until then.', 'ok');
   }
 
   // ---------- step 6: IR Portal cross-check ----------
@@ -385,7 +457,7 @@
   async function payload(focus) {
     return {
       type: 'data', focus: focus || '', web: isWeb(), results: (await currentResults()) || [], tasks: await currentTasks(), ir: await currentIr(),
-      exports: state.exports || null, scope: state.cfg ? state.cfg.scope : 'upcoming',
+      exports: state.exports || null, discoveryVerify: await currentDiscoveryVerify(), scope: state.cfg ? state.cfg.scope : 'upcoming',
       asOf: state.resultsAsOf ? state.resultsAsOf.toISOString() : null,
     };
   }
@@ -559,7 +631,7 @@
       async writeImportRows(r) { rows = r; },
       async importXlsx() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
       async readXlsxRows() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
-      async writeResults() {}, async writeTasks() {}, async readTasks() { return []; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
+      async writeResults() {}, async writeTasks() {}, async readTasks() { return []; }, async readUploads() { return []; }, async writeUploads() {}, async readDiscoveryVerify() { return []; }, async writeDiscoveryVerify() {}, async tableRowCount() { return 0; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
       async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA' }, defaultState: '', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },

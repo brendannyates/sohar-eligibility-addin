@@ -20,7 +20,9 @@
     'Plan', 'Network', 'Coverage Level', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance',
     'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status',
     'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Coverage Differs', 'Match',
-    'Sohar Ref', 'Sohar Link', 'Sohar Date'];
+    'Sohar Ref', 'Sohar Link', 'Sohar Date', 'Discovery Follow-up'];
+  // Saved Sohar result records (hidden sheet), so a later upload adds to earlier ones instead of replacing them.
+  const UPLOAD_COLS = ['Kind', 'Key', 'File', 'Uploaded', 'Record'];
   // NextGen Tasks sheet (created by the add-in). Done survives rebuilds via Task Key.
   const TASK_COLS = ['Done', 'Due By', 'Next Appt', 'Next Time', 'Next Location', 'Per Nbr', 'MRN', 'Last Name', 'First Name', 'Result Type',
     'Task', 'Details', 'Choose in NextGen', 'Sohar Link', 'Sohar Ref', 'Task Key'];
@@ -581,12 +583,7 @@
       };
       for (const c of RESULTS_COLS) if (row[c] == null) row[c] = '';
       row['Benefit Flag'] = benefitFlag(row);
-      row['Work Queue'] = workQueue(row);
       results.push(row);
-      counts.byAction[row.Action] = (counts.byAction[row.Action] || 0) + 1;
-      counts.byQueue[row['Work Queue']] = (counts.byQueue[row['Work Queue']] || 0) + 1;
-      if (row['Deductible Status']) counts.deductible[row['Deductible Status']] = (counts.deductible[row['Deductible Status']] || 0) + 1;
-      if (row['OOP Status']) counts.oop[row['OOP Status']] = (counts.oop[row['OOP Status']] || 0) + 1;
       if (p) seen[kind].add(p['Per Nbr']);
     };
 
@@ -599,7 +596,8 @@
     };
 
     for (const file of files || []) {
-      const { kind, records } = readResultRows(file.rows);
+      // A file is either raw rows from an upload or saved records ({kind, records}) from earlier uploads.
+      const { kind, records } = file.records ? file : readResultRows(file.rows);
       if (!kind) { unknownFiles.push(file.name); continue; }
       kinds.add(kind);
       for (const r of records) {
@@ -680,10 +678,97 @@
       emit(p, kind, { cols: { 'Sohar Status': 'Not in Sohar file', 'Action': 'Not in the results. Check it was uploaded to Sohar.', 'Match': '' } });
     }
 
+    // Discovery follow-up: coverage Sohar found goes back to Sohar as a verification, to get benefits.
+    // A verification result for the same patient counts as that follow-up when it is for the discovered payer,
+    // or when the patient was sent to discovery (so the NextGen payer was never verified).
+    const discoveryVerification = [];
+    const specialty = cfg.specialty || 'PSY';
+    for (const d of results) {
+      if (d['Sent As'] !== 'Discovery' || d['Sohar Status'] !== 'Coverage found' || !d['Per Nbr'] || !d['Sohar payerId']) continue;
+      const p = byPer.get(d['Per Nbr']);
+      const payer = d['Sohar Payer'].toLowerCase();
+      const v = results
+        .filter((r) => r['Sent As'] === 'Verification' && r['Per Nbr'] === d['Per Nbr'] && r['Sohar Status'] !== 'Not in Sohar file'
+          && ((payer && r['Sohar Payer'].toLowerCase() === payer) || p.Route === 'discovery'))
+        .sort((a, b) => String(b['Sohar Date']).localeCompare(String(a['Sohar Date'])))[0];
+      if (!v) {
+        d['Discovery Follow-up'] = 'Ready to verify';
+        discoveryVerification.push({
+          firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State,
+          // Discovery rarely returns a member ID; the NextGen one is only safe when NextGen already has this payer.
+          memberId: d['Sohar Member ID'] || (p['Sohar payerId'] === d['Sohar payerId'] ? p['Member ID'] : ''),
+          payerId: d['Sohar payerId'], placeOfServiceCode: p.POS, specialtyCode: specialty, id: p['Per Nbr'],
+          subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'],
+        });
+        continue;
+      }
+      d['Discovery Follow-up'] = `Verified: ${v['Sohar Status']}`;
+      v['Discovery Follow-up'] = 'From discovery';
+      const inNextGen = /^Coverage found matches/.test(d.Action);
+      if (/^complete\.eligible/i.test(v['Sohar Status'])) {
+        if (inNextGen) d.Action = 'Coverage found matches NextGen. Verified eligible.';
+        else {
+          d.Action = `${d.Action.replace(', then verify.', '.')} Verified eligible; benefits are on the verification row.`;
+          if (!/^Coverage ends/.test(v.Action)) v.Action = `Eligible on ${v['Sohar Payer'] || d['Sohar Payer']}, the plan discovery found. Add it to NextGen; benefits are on this row.`;
+        }
+      } else {
+        d.Action = `${d.Action} Verification came back ${v['Sohar Status']}; see the verification row.`;
+      }
+    }
+
+    for (const row of results) {
+      row['Work Queue'] = workQueue(row);
+      counts.byAction[row.Action] = (counts.byAction[row.Action] || 0) + 1;
+      counts.byQueue[row['Work Queue']] = (counts.byQueue[row['Work Queue']] || 0) + 1;
+      if (row['Deductible Status']) counts.deductible[row['Deductible Status']] = (counts.deductible[row['Deductible Status']] || 0) + 1;
+      if (row['OOP Status']) counts.oop[row['OOP Status']] = (counts.oop[row['OOP Status']] || 0) + 1;
+    }
+
     // Soonest appointment first; rows with no upcoming appointment last.
     const t = (r) => (r['Next Appt'] ? parseDate(r['Next Appt']).getTime() : Infinity);
     results.sort((a, b) => t(a) - t(b) || a['Last Name'].localeCompare(b['Last Name']));
-    return { results, unknownFiles, counts, asOf };
+    return { results, unknownFiles, counts, asOf, discoveryVerification };
+  }
+
+  /** Stable key for one Sohar result, so a re-upload replaces it and a new file adds to the saved set. */
+  function resultKey(kind, r) {
+    if (kind === 'discovery') return `d|${str(r.id) || str(r.requestid) || `${nameKey(r.firstname, r.lastname)}|${str(r.dateofbirth)}`}`;
+    const who = str(r.id) || str(r.verificationid || r.requestid) || `${idKey(r.memberid)}|${nameKey(r.firstname, r.lastname)}`;
+    return `v|${who}|${str(r.payername).toLowerCase()}`;
+  }
+
+  /**
+   * Add newly uploaded Sohar files to the saved result records. Same key: the new upload wins.
+   * saved: rows of UPLOAD_COLS. Returns {saved, files: [{name, kind, records}], added, replaced, unknownFiles}.
+   */
+  function accumulateResults(saved, uploads, uploadedAt) {
+    const by = new Map();
+    for (const s of saved || []) {
+      let rec; try { rec = JSON.parse(s.Record); } catch (e) { continue; }
+      by.set(String(s.Key), { Kind: str(s.Kind), Key: String(s.Key), File: str(s.File), Uploaded: str(s.Uploaded), rec });
+    }
+    let added = 0, replaced = 0;
+    const unknownFiles = [];
+    for (const f of uploads || []) {
+      const { kind, records } = readResultRows(f.rows);
+      if (!kind) { unknownFiles.push(f.name); continue; }
+      for (const rec of records) {
+        const key = resultKey(kind, rec);
+        if (by.has(key)) replaced++; else added++;
+        by.set(key, { Kind: kind, Key: key, File: f.name, Uploaded: uploadedAt || '', rec });
+      }
+    }
+    const files = ['verification', 'discovery'].map((kind) => ({ name: `saved ${kind} results`, kind, records: [...by.values()].filter((x) => x.Kind === kind).map((x) => x.rec) }))
+      .filter((f) => f.records.length);
+    const out = [...by.values()].map((x) => ({ Kind: x.Kind, Key: x.Key, File: x.File, Uploaded: x.Uploaded, Record: JSON.stringify(x.rec) }));
+    return { saved: out, files, added, replaced, unknownFiles };
+  }
+
+  /** Keep member IDs an admin typed on the Discovery Verify sheet, matched on id (Per Nbr) + payerId. */
+  function keepMemberIds(rows, previous) {
+    const typed = new Map();
+    for (const p of previous || []) if (str(p.memberId)) typed.set(`${str(p.id)}|${str(p.payerId)}`, str(p.memberId));
+    return rows.map((r) => (r.memberId ? r : { ...r, memberId: typed.get(`${r.id}|${r.payerId}`) || '' }));
   }
 
   // ---------- NextGen task list ----------
@@ -722,9 +807,11 @@
         const choose = r['Choose in NextGen'] || '';
         if (/^Not in Payer Map/.test(choose)) add(r, 'Add payer to Payer Map', `${r['Sohar Payer']} (${r['Sohar payerId']}) has no NextGen insurance in the Payer Map.`);
         const pick = choose && !/^Not in Payer Map/.test(choose) ? `Choose ${choose.replace(/^One of: /, 'one of: ')}.` : `Sohar payer: ${r['Sohar Payer']}.`;
-        if (!r['NextGen Payer'] || /^self pay$/i.test(r['NextGen Payer'])) add(r, 'Add insurance in NextGen', `${pick} ${memberHint} Then send for verification to get benefits.`);
-        else if (r['Coverage Differs'] === 'Yes') add(r, 'Update insurance in NextGen', `NextGen has ${r['NextGen Payer']}; Sohar found ${r['Sohar Payer']}. Confirm with the patient. ${pick} ${memberHint}`);
-        else add(r, 'Send for verification', `Discovery matches NextGen (${r['NextGen Payer']}). Verify to get benefits.`);
+        const verified = /^Verified/.test(r['Discovery Follow-up'] || '');
+        const next = verified ? `Sohar ${r['Discovery Follow-up'].toLowerCase()}; benefits are on the verification row.` : 'Then send for verification to get benefits (step 5: discovery verification import).';
+        if (!r['NextGen Payer'] || /^self pay$/i.test(r['NextGen Payer'])) add(r, 'Add insurance in NextGen', `${pick} ${memberHint} ${next}`);
+        else if (r['Coverage Differs'] === 'Yes') add(r, 'Update insurance in NextGen', `NextGen has ${r['NextGen Payer']}; Sohar found ${r['Sohar Payer']}. Confirm with the patient. ${pick} ${memberHint}${verified ? ` ${next}` : ''}`);
+        else if (!verified) add(r, 'Send for verification', `Discovery matches NextGen (${r['NextGen Payer']}). It is on the discovery verification import.`);
         continue;
       }
       // Verification
@@ -943,7 +1030,8 @@
   }
 
   return {
-    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, BENEFITS_EXPORT_COLS, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
+    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, UPLOAD_COLS, BENEFITS_EXPORT_COLS,
+    resultKey, accumulateResults, keepMemberIds, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
     irCategory, parseIrPortal, irCrossReference, irMessage,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,

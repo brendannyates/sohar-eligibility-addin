@@ -91,7 +91,8 @@
         <div class="num">5</div>
         <div class="body">
           <h2>Bring back Sohar results</h2>
-          <p class="hint">Upload the verification and discovery result files from Sohar (.csv or .xlsx, several at once is fine). They are matched to the appointment report on the Import sheet and written to the <b>Sohar Results</b> sheet, soonest appointment first.</p>
+          <p class="hint">Upload the verification and discovery result files from Sohar (.csv or .xlsx, several at once is fine). They are matched to the appointment report on the Import sheet and written to the <b>Sohar Results</b> sheet, soonest appointment first. Uploads add to the results already saved in this workbook, so a later file only needs the new rows.</p>
+          <p class="hint">When discovery finds coverage, those patients go on the <b>Discovery Verify</b> sheet with the payer Sohar found. Download that import, run it in Sohar as a verification, and upload the output here to get their benefits.</p>
           <div class="actions">
             <input type="file" id="fileResults" accept=".csv,.xlsx,.xlsm" multiple hidden>
             <button class="primary" id="btnResults">Upload Sohar results</button>
@@ -100,14 +101,19 @@
           <div class="actions">
             <button class="link" data-goto="Sohar Results">Open Sohar Results</button>
             <button class="link" data-goto="NextGen Tasks">Open NextGen Tasks</button>
+            <button class="link" data-goto="Discovery Verify">Open Discovery Verify</button>
           </div>
           <div id="resultsResult" class="result" hidden></div>
           <div class="actions">
+            <button class="primary" id="btnDlDiscVer" disabled>Download discovery verification import</button>
             <button class="primary alt" id="btnCopyMsg" disabled>Copy action message</button>
             <button class="primary alt" id="btnCopyBen" disabled>Copy benefits message</button>
             <button class="primary alt" id="btnDlWork" disabled>Download worklist CSV</button>
             <button class="primary alt" id="btnDlBen" disabled>Download benefits CSV</button>
             <button class="primary alt" id="btnDlTasks" disabled>Download NextGen tasks CSV</button>
+          </div>
+          <div class="actions">
+            <button class="link" id="btnClearSaved">Clear saved Sohar results</button>
           </div>
           <p class="hint">Messages list patients by location with LASFIR and Per Nbr: who needs action (including which NextGen insurance to choose after discovery), or whose deductible or OOP max is met or approaching. Send inside Outlook or Teams only. The benefits CSV is for importing into the TMS Tracker.</p>
         </div>
