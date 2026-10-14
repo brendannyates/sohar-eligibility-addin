@@ -24,11 +24,11 @@
         <div class="num">1</div>
         <div class="body">
           <h2>Import the appointment report</h2>
-          <p class="hint">Upload the NextGen Appointments Listing (.csv or .xlsx), or paste the whole report into the <b>Import</b> sheet at A1, title rows included. The header row is found automatically.</p>
+          <p class="hint">Upload the NextGen Appointments Listing (.csv or .xlsx), or paste the whole report into the <b>Import</b> sheet at A1, title rows included. The header row is found automatically. Opening the pane, uploading a report, or <b>Refresh from Import sheet</b> (after pasting) builds the patient list and Sohar imports and re-matches every saved Sohar and IR upload.</p>
           <div class="actions">
             <input type="file" id="fileImport" accept=".csv,.xlsx,.xlsm" hidden>
             <button class="primary" id="btnUpload">Upload report file</button>
-            <button class="primary alt" id="btnScan">Scan Import sheet</button>
+            <button class="primary alt" id="btnScan">Refresh from Import sheet</button>
             <button class="link" data-goto="Import">Open Import</button>
           </div>
           <div id="scanResult" class="result" hidden></div>

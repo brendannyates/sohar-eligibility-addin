@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.6.1';
+  const VERSION = '0.6.2';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
@@ -41,23 +41,43 @@
       const rows = await X.readImportRows();
       const det = C.detectHeader(rows);
       if (!det || det.missing.length || rows.length <= det.headerRow + 1) return;
-      setStatus('Refreshing from the data already in this workbook…', '');
+      setStatus('Loading what is already in this workbook…', '');
       await loadConfig();
-      await scan();
-      const built = (await X.tableRowCount(X.TABLES.patients)) > 0;
-      if (built && !$('btnBuild').disabled) await build();
-      const saved = (await X.readUploads()).length > 0;
-      if (saved) {
-        $('resultsResult').innerHTML = '';
-        const html = await processResults([]);
-        if (html) $('resultsResult').insertAdjacentHTML('beforeend', html);
-      }
-      const did = [built ? 'patient list and Sohar imports rebuilt' : 'Import sheet scanned', saved ? 'saved Sohar results matched again' : ''].filter(Boolean).join('; ');
-      setStatus(`Refreshed on open: ${did}.`, 'ok');
+      await refreshAll();
     } catch (e) {
       console.error(e);
-      setStatus(`Opened, but the refresh stopped: ${e.message}`, 'bad');
+      setStatus(`Opened, but loading stopped: ${e.message}`, 'bad');
     }
+  }
+
+  /** Scan the Import sheet, build the patient list and Sohar imports, then re-match saved Sohar and IR uploads. */
+  async function refreshAll() {
+    await scan();
+    if ($('btnBuild').disabled) return;
+    await build();
+    const saved = await X.readUploads();
+    let did = 'patient list and Sohar imports built';
+    if (saved.length) {
+      $('resultsResult').innerHTML = '';
+      const html = await processResults([]);
+      if (html) $('resultsResult').insertAdjacentHTML('beforeend', html);
+      did += `; ${saved.length} saved Sohar result${saved.length === 1 ? '' : 's'} matched`;
+      const ir = await X.readIrUploads();
+      if (ir.length) { await runIr(ir); did += '; IR cross-check re-run'; }
+    }
+    const last = saved.map((s) => String(s.Uploaded || '')).sort().pop();
+    await stampUpdated(`${did}${last ? `. Last Sohar upload ${fmtStamp(new Date(last))}` : ''}`);
+  }
+
+  /** Record when the workbook was last brought up to date (Config "Last updated") and say so in the header. */
+  async function stampUpdated(what) {
+    const now = fmtStamp(new Date());
+    await X.setConfigValue('Last updated', now).catch(() => {});
+    setStatus(`Updated ${now}: ${what}.`, 'ok');
+  }
+  function fmtStamp(d) {
+    if (isNaN(d)) return '';
+    return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   }
 
   function startDemo(why) {
@@ -73,7 +93,7 @@
   }
 
   function wire() {
-    $('btnScan').addEventListener('click', () => guard(scan, 'scanResult'));
+    $('btnScan').addEventListener('click', () => guard(refreshAll, 'scanResult'));
     $('btnBuild').addEventListener('click', () => guard(build, 'buildResult'));
     $('btnDlVer').addEventListener('click', () => guard(() => download('verification'), 'preflight'));
     $('btnDlDisc').addEventListener('click', () => guard(() => download('discovery'), 'preflight'));
@@ -125,7 +145,7 @@
       else if (isXlsx(file)) await X.importXlsx(await readBase64(file));
       else throw new Error(`${file.name} is not .csv or .xlsx. In Excel, use File > Save As to change the type, then upload again.`);
     } finally { unbusy('btnUpload', 'Upload report file'); }
-    await scan();
+    await refreshAll();
   }
 
   async function scan() {
@@ -150,7 +170,7 @@
       await loadPayerStep();
       $('btnBuild').disabled = false;
       markDone(1); setCurrent(2);
-    } finally { unbusy('btnScan', 'Scan Import sheet'); }
+    } finally { unbusy('btnScan', 'Refresh from Import sheet'); }
   }
 
   // ---------- step 2 ----------
@@ -372,6 +392,12 @@
              <p class="hint">Approaching means ${pctTxt} or less remaining (Config: Benefit approaching %).</p>`
           : `<p class="warn">These files have no deductible or out-of-pocket columns, so benefit statuses are blank. Use Sohar's full verification output, which includes them.</p>`}
         ${acc.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar output): ${acc.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
+    if (list.length) {
+      // New Sohar results change the IR cross-check, so re-run it from the saved IR items.
+      const ir = await X.readIrUploads();
+      if (ir.length) { step('Re-running the IR Portal cross-check…'); await runIr(ir); }
+      await stampUpdated(`${list.map((f) => f.name).join(', ')} added to the Sohar results`);
+    }
     return html;
   }
 
@@ -412,17 +438,26 @@
       if (parsed.error) throw new Error(parsed.error);
       const results = (await currentResults()) || [];
       if (!results.length) throw new Error('Upload the Sohar results first (step 5); the IR items are matched against them.');
-      const ir = C.irCrossReference(parsed.records, results, await currentTasks());
-      await X.writeIr(C.IR_COLS, ir);
-      state.ir = ir;
-      const by = {}; for (const r of ir) by[r.Category] = (by[r.Category] || 0) + 1;
-      const insurance = parsed.records.filter((r) => C.irCategory(r.desc)).length;
-      box.innerHTML = `<p class="ok">${parsed.records.length} IR Portal rows read; ${insurance} are insurance-related, ${ir.length} of those have a Sohar result and are on the IR Cross-Ref sheet.</p>
-        <p>${Object.entries(by).map(([k, v]) => `${esc(k)}: ${v}`).join(' · ') || 'No insurance-related items with a Sohar result.'}</p>`;
-      $('btnCopyIr').disabled = false; $('btnDlIr').disabled = false;
-      markDone(6);
-      if (dlg) await sendToDialog(await payload());
+      // Only insurance-related items are kept, so the next open can re-run the cross-check without the file.
+      const insurance = parsed.records.filter((r) => C.irCategory(r.desc));
+      await X.writeIrUploads(insurance);
+      await runIr(insurance, `${parsed.records.length} IR Portal rows read; ${insurance.length} are insurance-related. `);
+      await stampUpdated(`IR Portal file ${f.name} cross-checked`);
     } finally { unbusy('btnIr', 'Upload IR Portal file'); }
+  }
+
+  /** Cross-check saved IR items against the current Sohar results; writes IR Cross-Ref. */
+  async function runIr(records, lead) {
+    const ir = C.irCrossReference(records, (await currentResults()) || [], await currentTasks());
+    await X.writeIr(C.IR_COLS, ir);
+    state.ir = ir;
+    const by = {}; for (const r of ir) by[r.Category] = (by[r.Category] || 0) + 1;
+    const box = $('irResult'); box.hidden = false;
+    box.innerHTML = `<p class="ok">${esc(lead || `${records.length} saved insurance-related IR items. `)}${ir.length} have a Sohar result and are on the IR Cross-Ref sheet.</p>
+      <p>${Object.entries(by).map(([k, v]) => `${esc(k)}: ${v}`).join(' · ') || 'No insurance-related items with a Sohar result.'}</p>`;
+    $('btnCopyIr').disabled = false; $('btnDlIr').disabled = false;
+    markDone(6);
+    if (dlg) await sendToDialog(await payload());
   }
   async function currentIr() {
     if (state.ir) return state.ir;
@@ -646,7 +681,7 @@
       async writeImportRows(r) { rows = r; },
       async importXlsx() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
       async readXlsxRows() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
-      async writeResults() {}, async writeTasks() {}, async readTasks() { return []; }, async readUploads() { return []; }, async writeUploads() {}, async readDiscoveryVerify() { return []; }, async writeDiscoveryVerify() {}, async tableRowCount() { return 0; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
+      async writeResults() {}, async writeTasks() {}, async readTasks() { return []; }, async readUploads() { return []; }, async readIrUploads() { return []; }, async writeIrUploads() {}, async writeUploads() {}, async readDiscoveryVerify() { return []; }, async writeDiscoveryVerify() {}, async tableRowCount() { return 0; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
       async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA' }, defaultState: '', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },

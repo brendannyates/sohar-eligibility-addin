@@ -245,6 +245,14 @@
     await writeAddinTable('Sohar Uploads', 'tblSoharUploads', cols, rows, false);
     await run(async (ctx) => { ctx.workbook.worksheets.getItem('Sohar Uploads').visibility = Excel.SheetVisibility.hidden; await ctx.sync(); }).catch(() => {});
   }
+  // Insurance-related IR Portal items from the last IR upload, so the cross-check re-runs on open. Hidden sheet.
+  async function readIrUploads() {
+    try { return (await readTable('tblIrUploads')).map((r) => { try { return JSON.parse(r.Record); } catch (e) { return null; } }).filter(Boolean); } catch (e) { return []; }
+  }
+  async function writeIrUploads(records) {
+    await writeAddinTable('IR Uploads', 'tblIrUploads', ['Record'], records.map((r) => ({ Record: JSON.stringify(r) })), false);
+    await run(async (ctx) => { ctx.workbook.worksheets.getItem('IR Uploads').visibility = Excel.SheetVisibility.hidden; await ctx.sync(); }).catch(() => {});
+  }
   /** Rows in a table the add-in owns, or 0 if it does not exist yet. */
   async function tableRowCount(tableName) {
     return run(async (ctx) => {
@@ -347,5 +355,5 @@
 
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
-    writeDiscoveryVerify, readDiscoveryVerify, readUploads, writeUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeDiscoveryVerify, readDiscoveryVerify, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);
