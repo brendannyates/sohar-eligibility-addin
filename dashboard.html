@@ -19,15 +19,19 @@
   </header>
 
   <main class="dash-main">
-    <section class="tiles" aria-label="Totals">
+    <section class="tiles" aria-label="Work queue">
       <button class="tile act" data-queue="Action needed"><span class="n" id="tAct">0</span><span class="l">action needed</span></button>
       <button class="tile unm" data-queue="Unmatched"><span class="n" id="tUnm">0</span><span class="l">unmatched</span></button>
       <button class="tile pen" data-queue="Pending"><span class="n" id="tPen">0</span><span class="l">pending</span></button>
       <button class="tile clr" data-queue="Clear"><span class="n" id="tClr">0</span><span class="l">clear</span></button>
-      <button class="tile ben" data-benefit="ded"><span class="n" id="tDed">0</span><span class="l">deductible met</span></button>
-      <button class="tile ben" data-benefit="oop"><span class="n" id="tOop">0</span><span class="l">OOP max met</span></button>
     </section>
-    <p id="benNote" class="hint warn-text" hidden>These Sohar files have no deductible or out-of-pocket columns, so the benefit filters have nothing to work with. Ask Sohar for an export that includes benefit accumulators.</p>
+    <section class="tiles" aria-label="Benefits">
+      <button class="tile ben" data-benefit="dedMet"><span class="n" id="tDedMet">0</span><span class="l">deductible met</span></button>
+      <button class="tile appr" data-benefit="dedAppr"><span class="n" id="tDedAppr">0</span><span class="l">deductible approaching</span></button>
+      <button class="tile ben" data-benefit="oopMet"><span class="n" id="tOopMet">0</span><span class="l">OOP max met</span></button>
+      <button class="tile appr" data-benefit="oopAppr"><span class="n" id="tOopAppr">0</span><span class="l">OOP max approaching</span></button>
+    </section>
+    <p id="benNote" class="hint warn-text" hidden>No benefit amounts in these results. Upload Sohar's full verification output to see deductible and OOP status.</p>
 
     <section class="filters" aria-label="Filters">
       <label>Work queue
@@ -39,39 +43,50 @@
       <label>Benefits
         <select id="fBen">
           <option value="">Any</option>
-          <option value="ded">Deductible met</option>
-          <option value="oop">OOP max met</option>
-          <option value="either">Either met</option>
-          <option value="notmet">Neither met</option>
+          <option value="anyFlag">Met or approaching</option>
+          <option value="dedMet">Deductible met</option>
+          <option value="dedAppr">Deductible approaching</option>
+          <option value="oopMet">OOP max met</option>
+          <option value="oopAppr">OOP max approaching</option>
+          <option value="noDed">No deductible</option>
           <option value="unknown">No benefit data</option>
         </select>
+      </label>
+      <label>Sent as
+        <select id="fSent"><option value="">Both</option><option>Verification</option><option>Discovery</option></select>
       </label>
       <label>Location
         <select id="fLoc"><option value="">All</option></select>
       </label>
       <label>Appt from <input id="fFrom" type="date"></label>
       <label>Appt to <input id="fTo" type="date"></label>
-      <label class="grow">Search <input id="fText" type="search" placeholder="Name, Per Nbr, payer"></label>
+      <label class="grow">Search <input id="fText" type="search" placeholder="Name, Per Nbr, MRN, payer, plan"></label>
     </section>
 
     <div class="actions">
-      <button class="primary" id="btnCopy">Copy admin message</button>
+      <label class="inline">Message
+        <select id="msgMode"><option value="action">Who needs action</option><option value="benefits">Deductible / OOP met or approaching</option></select>
+      </label>
+      <button class="primary" id="btnCopy">Copy message</button>
       <button class="primary alt" id="btnCsv">Download filtered CSV</button>
+      <button class="primary alt" id="btnBen">Download benefits CSV (TMS Tracker)</button>
       <span id="shown" class="hint"></span>
     </div>
 
     <div class="tablewrap">
       <table id="tbl">
         <thead><tr>
-          <th>Next appt</th><th>Location</th><th>Provider</th><th>Patient</th><th>Per Nbr</th><th>Sent as</th>
-          <th>Sohar status</th><th>Queue</th><th>Action</th><th>Ded met</th><th>Ded remaining</th><th>OOP met</th><th>OOP remaining</th>
-          <th>NextGen payer</th><th>Sohar payer</th><th>Link</th>
+          <th>Next appt</th><th>Location</th><th>Patient</th><th>Per Nbr</th><th>Sent as</th><th>Sohar status</th><th>Queue</th>
+          <th>Action</th><th>Choose in NextGen</th><th>Benefits</th><th>Copay</th><th>Coins</th>
+          <th>Deductible left</th><th>OOP left</th><th>Plan</th><th>Link</th>
         </tr></thead>
         <tbody></tbody>
       </table>
     </div>
 
-    <label class="msgbox">Admin message (only rows that need action, LASFIR + Per Nbr; send inside Outlook or Teams only)
+    <section id="detail" class="detail" hidden aria-live="polite"></section>
+
+    <label class="msgbox">Message (LASFIR + Per Nbr only; send inside Outlook or Teams only)
       <textarea id="msg" rows="8" readonly></textarea>
     </label>
   </main>

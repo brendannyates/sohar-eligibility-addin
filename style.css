@@ -170,6 +170,23 @@ select:focus-visible, input:focus-visible { outline: 2px solid var(--focus); out
 #tbl tr.q-act td:first-child { box-shadow: inset 3px 0 var(--alert); }
 #tbl tr.q-unm td:first-child { box-shadow: inset 3px 0 var(--warn); }
 #tbl tr.q-clr td:first-child { box-shadow: inset 3px 0 var(--ok); }
+.tile.appr .n { color: var(--warn); }
+#tbl td.mid { white-space: normal; min-width: 160px; }
+#tbl td.met { color: var(--ok); font-weight: 600; }
+#tbl td.appr { color: var(--warn); font-weight: 600; }
+#tbl tbody tr { cursor: pointer; }
+#tbl tbody tr:hover td, #tbl tbody tr:focus-visible td { background: color-mix(in srgb, var(--pine) 8%, transparent); }
+label.inline { display: flex; align-items: center; gap: 6px; }
+label.inline select { width: auto; }
+.detail { border: 1px solid var(--line); border-radius: 4px; background: var(--field); padding: 10px 12px; }
+.dhead { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 8px; }
+.dhead h2 { margin: 0; font-size: 15px; }
+.dhead button { margin-left: auto; }
+.dgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 16px; }
+.dgroup h3 { margin: 0 0 4px; font-size: 12.5px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.dgroup dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; font-size: 12.5px; }
+.dgroup dt { color: var(--muted); }
+.dgroup dd { margin: 0; overflow-wrap: anywhere; }
 .msgbox textarea { font: 12px/1.45 ui-monospace, Consolas, monospace; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 8px; width: 100%; resize: vertical; }
 
 .foot { padding: 10px 16px 14px; border-top: 1px solid var(--line); }

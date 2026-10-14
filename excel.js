@@ -66,6 +66,8 @@
       posOffice: String(cfg['POS code: office'] || '11').trim(),
       specialty: String(cfg['Specialty code'] || 'PSY').trim(),
       useGuarantorAsSubscriber: /^y|true/i.test(String(cfg['Use guarantor as subscriber'] || 'No')),
+      // "Approaching" = remaining at or under this share of the deductible or OOP max. Optional Config row; default 20%.
+      approachingPct: (() => { const n = parseFloat(String(cfg['Benefit approaching %'] ?? '').replace('%', '')); return isNaN(n) ? 0.2 : (n > 1 ? n / 100 : n); })(),
     };
   }
 

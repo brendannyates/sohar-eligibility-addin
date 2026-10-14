@@ -15,11 +15,16 @@
     'Subscriber First', 'Subscriber Last', 'Subscriber DOB', 'Flags'];
   const REVIEW_COLS = ['Severity', 'Issue', 'Per Nbr', 'Detail', 'Fix'];
   // Sohar Results sheet. The add-in creates this table itself, so it is not part of the template contract.
-  const RESULTS_COLS = ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'Next Provider', 'Upcoming Appts',
-    'Per Nbr', 'Last Name', 'First Name', 'DOB', 'Sent As', 'Sohar Status', 'Work Queue', 'Action',
-    'Deductible', 'Deductible Remaining', 'Deductible Met', 'OOP Max', 'OOP Remaining', 'OOP Met', 'Copay', 'Coinsurance',
+  const RESULTS_COLS = ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'Next Provider', 'Upcoming Appts', 'Upcoming Detail',
+    'Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Choose in NextGen', 'Benefit Flag',
+    'Plan', 'Network', 'Coverage Level', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance',
+    'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status',
     'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Coverage Differs', 'Match',
     'Sohar Ref', 'Sohar Link', 'Sohar Date'];
+  // Benefits CSV for the TMS Tracker. Treat as a contract: add columns at the end only.
+  const BENEFITS_EXPORT_COLS = ['Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB', 'Sohar Payer', 'Plan', 'Network', 'Coverage Level',
+    'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status',
+    'OOP Max', 'OOP Remaining', 'OOP Status', 'Benefit Flag', 'Sohar Status', 'Sohar Date', 'Sohar Ref'];
 
   // NextGen header -> canonical field. Matching ignores case, spaces and punctuation.
   const HEADER_SYNONYMS = {
@@ -350,8 +355,8 @@
   /** Identify a Sohar export by its header row: 'verification', 'discovery', or null. */
   function resultKind(headers) {
     const h = new Set((headers || []).map(normHeader));
-    if (h.has('verificationid') && h.has('status')) return 'verification';
     if (h.has('requestid') && (h.has('responsepayerid') || h.has('responsepayername'))) return 'discovery';
+    if (h.has('status') && (h.has('verificationid') || h.has('requestid'))) return 'verification';
     return null;
   }
 
@@ -375,39 +380,76 @@
   const idKey = (v) => str(v).toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/^0+/, '');
   const nameKey = (first, last) => `${str(last).toLowerCase()}|${str(first).toLowerCase()}`;
 
-  // Benefit amounts, if a Sohar export carries them. Matched loosely on normalized headers; family and
-  // out-of-network columns are skipped so the numbers are the patient's in-network individual accumulators.
-  const money = (v) => { if (isBlank(v)) return null; const n = parseFloat(String(v).replace(/[$,\s]/g, '')); return isNaN(n) ? null : n; };
-  function benefitFields(rec) {
-    const keys = Object.keys(rec).filter((k) => !/family|outofnetwork|oon/.test(k));
-    const find = (test) => { const k = keys.find((x) => test(x) && !isBlank(rec[x])); return k ? rec[k] : ''; };
-    const oop = (k) => k.includes('outofpocket') || k.includes('oop');
+  // ---------- benefits ----------
+  const money = (v) => { if (isBlank(v)) return null; const n = parseFloat(String(v).replace(/[$,%\s]/g, '')); return isNaN(n) ? null : n; };
+  const fmtMoney = (n) => (n == null ? '' : String(Math.round(n * 100) / 100));
+  const fmtPct = (v) => { const n = money(v); if (n == null) return ''; return `${Math.round((n <= 1 ? n * 100 : n) * 10) / 10}%`; };
+
+  /**
+   * Accumulator status: 'Met', 'Approaching' (remaining at or under pct of total), 'Not met', 'None' (plan has $0), or ''.
+   */
+  function accumulatorStatus(total, remaining, metFlag, pct) {
+    if (/^(true|yes|y)$/i.test(str(metFlag))) return 'Met';
+    const t = money(total), r = money(remaining);
+    if (t === 0) return 'None';
+    if (r != null) {
+      if (r <= 0) return 'Met';
+      if (t != null && t > 0 && r / t <= pct) return 'Approaching';
+      return 'Not met';
+    }
+    if (/^(false|no|n)$/i.test(str(metFlag))) return 'Not met';
+    return '';
+  }
+
+  /**
+   * Benefits from a Sohar record (normalized keys). Uses Sohar's in-network tier-one columns
+   * (innTotalDeductible, innRemainingDeductible, innOutOfPocket, innOutOfPocketRemaining, innCopay, innCoinsurance).
+   * Other exports fall back to a loose match that skips family, out-of-network and tier 2/3 columns.
+   * opts.approachingPct: fraction, default 0.2.
+   */
+  function benefitFields(rec, opts) {
+    const pct = opts && opts.approachingPct != null ? opts.approachingPct : 0.2;
+    const keys = Object.keys(rec).filter((k) => !/family|outofnetwork|^oon|oopoon|tiertwo|tierthree|coveragelevel/.test(k));
+    const exact = (k) => (k in rec && !isBlank(rec[k]) ? rec[k] : '');
+    const loose = (test) => { const k = keys.find((x) => test(x) && !isBlank(rec[x])); return k ? rec[k] : ''; };
+    const pick = (k, test) => exact(k) || loose(test);
+    const oop = (k) => k.includes('outofpocket') || k.startsWith('oop');
     const rem = (k) => k.includes('remain');
-    const met = (k) => /met$|met[^a-z]|metamount/.test(k) || k.endsWith('met');
+    const met = (k) => k.endsWith('met') || k.includes('metamount');
     const ded = {
-      total: find((k) => k.includes('deductible') && !rem(k) && !met(k)),
-      remaining: find((k) => k.includes('deductible') && rem(k)),
-      met: find((k) => k.includes('deductible') && met(k)),
+      total: pick('inntotaldeductible', (k) => k.includes('deductible') && !rem(k) && !met(k)),
+      remaining: pick('innremainingdeductible', (k) => k.includes('deductible') && rem(k)),
+      met: loose((k) => k.includes('deductible') && met(k)),
     };
     const oo = {
-      total: find((k) => oop(k) && !rem(k) && !met(k)),
-      remaining: find((k) => oop(k) && rem(k)),
-      met: find((k) => oop(k) && met(k)),
+      total: pick('innoutofpocket', (k) => oop(k) && !rem(k) && !met(k)),
+      remaining: pick('innoutofpocketremaining', (k) => oop(k) && rem(k)),
+      met: loose((k) => oop(k) && met(k)),
     };
-    const isMet = (b) => {
-      if (/^(true|yes|y)$/i.test(str(b.met))) return 'Yes';
-      if (/^(false|no|n)$/i.test(str(b.met))) return 'No';
-      const r = money(b.remaining), t = money(b.total), m = money(b.met);
-      if (r != null) return r <= 0 ? 'Yes' : 'No';
-      if (t != null && m != null) return m >= t ? 'Yes' : 'No';
-      if (t === 0) return 'Yes';
-      return '';
-    };
+    const mt = (b) => (money(b.met) != null && money(b.total) != null && money(b.remaining) == null ? fmtMoney(money(b.total) - money(b.met)) : b.remaining);
+    const dedRem = mt(ded), oopRem = mt(oo);
     return {
-      'Deductible': str(ded.total), 'Deductible Remaining': str(ded.remaining), 'Deductible Met': isMet(ded),
-      'OOP Max': str(oo.total), 'OOP Remaining': str(oo.remaining), 'OOP Met': isMet(oo),
-      'Copay': str(find((k) => k.includes('copay'))), 'Coinsurance': str(find((k) => k.includes('coinsurance'))),
+      'Copay': str(pick('inncopay', (k) => k.includes('copay'))),
+      'Coinsurance': fmtPct(pick('inncoinsurance', (k) => k.includes('coinsurance'))),
+      'Deductible': str(ded.total), 'Deductible Remaining': str(dedRem),
+      'Deductible Status': accumulatorStatus(ded.total, dedRem, money(ded.met) == null ? ded.met : '', pct),
+      'OOP Max': str(oo.total), 'OOP Remaining': str(oopRem),
+      'OOP Status': accumulatorStatus(oo.total, oopRem, money(oo.met) == null ? oo.met : '', pct),
+      'Coverage Level': str(exact('inncoveragelevelcode') || exact('oopinncoveragelevelcode')),
+      'Plan': str(exact('planname')), 'Network': str(exact('networktype')),
+      'Coverage Start': str(exact('coveragestartdate')), 'Coverage End': str(exact('coverageenddate')),
     };
+  }
+
+  /** One-line benefit note for prep: "OOP max met", "Deductible approaching", "No deductible". */
+  function benefitFlag(b) {
+    const parts = [];
+    if (b['OOP Status'] === 'Met') parts.push('OOP max met');
+    else if (b['Deductible Status'] === 'Met') parts.push('Deductible met');
+    if (b['OOP Status'] === 'Approaching') parts.push('OOP max approaching');
+    if (b['Deductible Status'] === 'Approaching' && b['OOP Status'] !== 'Met') parts.push('Deductible approaching');
+    if (!parts.length && b['Deductible Status'] === 'None') parts.push('No deductible');
+    return parts.join('; ');
   }
 
   /** Bucket a result row for the admin worklist. */
@@ -424,24 +466,41 @@
     return l(last) + l(first);
   }
 
-  /** Plain-text note for admins, grouped by location then appointment. LASFIR + Per Nbr only (minimum necessary). */
+  /**
+   * Plain-text note for admins, grouped by location then appointment. LASFIR + Per Nbr only (minimum necessary).
+   * opts.mode: 'action' (default: rows needing action) or 'benefits' (deductible/OOP met or approaching).
+   */
   function adminMessage(rows, opts) {
     const o = opts || {};
-    const todo = rows.filter((r) => r['Work Queue'] === 'Action needed' || r['Work Queue'] === 'Unmatched');
-    if (!todo.length) return 'Sohar eligibility: nothing needs action in this list.';
+    const benefits = o.mode === 'benefits';
+    const todo = benefits
+      ? rows.filter((r) => /met|approaching/i.test(r['Benefit Flag'] || '') && r['Next Appt'])
+      : rows.filter((r) => r['Work Queue'] === 'Action needed' || r['Work Queue'] === 'Unmatched');
+    if (!todo.length) return benefits ? 'Sohar benefits: no upcoming patients have a deductible or OOP max met or approaching.\n' : 'Sohar eligibility: nothing needs action in this list.\n';
     const byLoc = new Map();
     for (const r of todo) {
       const loc = r['Next Location'] || 'No upcoming appointment';
       if (!byLoc.has(loc)) byLoc.set(loc, []);
       byLoc.get(loc).push(r);
     }
-    const lines = [`Sohar eligibility follow-up${o.asOf ? ` (appointments from ${fmtDate(o.asOf)})` : ''}: ${todo.length} patient${todo.length > 1 ? 's' : ''} need action before their visit.`, ''];
+    const n = todo.length, s = n > 1 ? 's' : '';
+    const from = o.asOf ? ` (appointments from ${fmtDate(o.asOf)})` : '';
+    const head = benefits
+      ? `Sohar benefits${from}: ${n} upcoming patient${s} with a deductible or out-of-pocket max met or approaching. Check patient responsibility before the visit.`
+      : `Sohar eligibility follow-up${from}: ${n} patient${s} need${n > 1 ? '' : 's'} action before their visit.`;
+    const lines = [head, ''];
     for (const [loc, list] of [...byLoc].sort((a, b) => a[0].localeCompare(b[0]))) {
       lines.push(`${loc} (${list.length})`);
       for (const r of list) {
-        const when = r['Next Appt'] ? `${r['Next Appt'].slice(0, 5)}${r['Next Time'] ? ' ' + r['Next Time'] : ''}` : 'no appt';
-        const ben = [r['Deductible Met'] === 'Yes' ? 'deductible met' : '', r['OOP Met'] === 'Yes' ? 'OOP max met' : ''].filter(Boolean).join(', ');
-        lines.push(`- ${when} · ${lasfir(r['Last Name'], r['First Name'])} · Per ${r['Per Nbr'] || '?'} · ${r.Action}${ben ? ` (${ben})` : ''}`);
+        const when = r['Next Appt'] ? `${String(r['Next Appt']).slice(0, 5)}${r['Next Time'] ? ' ' + r['Next Time'] : ''}` : 'no appt';
+        const tag = lasfir(r['Last Name'], r['First Name']);
+        const id = r['Per Nbr'] ? `${tag} · Per ${r['Per Nbr']}` : `${tag ? tag + ' · ' : ''}Sohar ref ${r['Sohar Ref'] || '?'}`;
+        if (benefits) {
+          const amt = [r['Deductible Status'] && r['Deductible Status'] !== 'None' ? `ded remaining ${r['Deductible Remaining'] || '?'}` : '', r['OOP Remaining'] !== '' && r['OOP Remaining'] != null ? `OOP remaining ${r['OOP Remaining']}` : ''].filter(Boolean).join(', ');
+          lines.push(`- ${when} · ${id} · ${r['Benefit Flag']}${amt ? ` (${amt})` : ''}`);
+        } else {
+          lines.push(`- ${when} · ${id} · ${r.Action}${r['Benefit Flag'] ? ` (${r['Benefit Flag'].toLowerCase()})` : ''}`);
+        }
       }
       lines.push('');
     }
@@ -461,8 +520,9 @@
 
   /**
    * Join Sohar result files to the patients' upcoming appointments.
-   * importRows: Import sheet 2D array. files: [{name, rows}] (2D, header first). cfg: as for buildPatients.
-   * Returns {results, unknownFiles, counts} or {error}.
+   * importRows: Import sheet 2D array. files: [{name, rows}] (2D, header first).
+   * cfg: as for buildPatients, plus approachingPct (fraction, default 0.2).
+   * Returns {results, unknownFiles, counts, asOf} or {error}.
    */
   function mergeSoharResults(importRows, files, cfg) {
     const built = buildPatients(importRows, { ...cfg, scope: 'all' });
@@ -470,6 +530,15 @@
     const asOf = built.asOf;
     const det = built.detection, cm = det.colMap;
     const get = (row, f) => (cm[f] == null ? '' : row[cm[f]]);
+    const bopts = { approachingPct: cfg.approachingPct != null ? cfg.approachingPct : 0.2 };
+    // Sohar payerId -> NextGen payer names (from the Payer Map), so discovery can say which NextGen insurance to pick.
+    const nextgenFor = new Map();
+    for (const m of cfg.payerMap || []) {
+      const id = str(m.payerId), name = str(m.nextgenPayerName);
+      if (!id || !name || !VERIFIABLE.has(str(m.confidence).toLowerCase())) continue;
+      if (!nextgenFor.has(id)) nextgenFor.set(id, []);
+      if (!nextgenFor.get(id).includes(name)) nextgenFor.get(id).push(name);
+    }
 
     // Upcoming, still-expected appointments per patient (same rule as scope "upcoming").
     const upcoming = new Map();
@@ -493,8 +562,7 @@
     }
 
     const results = [], unknownFiles = [], kinds = new Set(), seen = { verification: new Set(), discovery: new Set() };
-    const counts = { matched: 0, unmatched: 0, notReturned: 0, withBenefits: 0, byAction: {}, byQueue: {} };
-    const BENEFIT_KEYS = ['Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining', 'Copay', 'Coinsurance'];
+    const counts = { matched: 0, unmatched: 0, notReturned: 0, withBenefits: 0, byAction: {}, byQueue: {}, deductible: {}, oop: {} };
 
     const emit = (p, kind, f) => {
       const ups = p ? upcoming.get(p['Per Nbr']) || [] : [];
@@ -502,16 +570,20 @@
       const row = {
         'Next Appt': n ? fmtDate(n.dt) : '', 'Next Time': n ? fmtTime(n.tmRaw) : '', 'Next Event': n ? n.event : '',
         'Next Location': n ? n.loc : '', 'Next Provider': n ? n.rendering : '', 'Upcoming Appts': p ? ups.length : '',
-        'Per Nbr': p ? p['Per Nbr'] : '', 'Last Name': p ? p['Last Name'] : str(f.lastName), 'First Name': p ? p['First Name'] : str(f.firstName),
+        'Upcoming Detail': ups.slice(0, 6).map((u) => `${fmtDate(u.dt).slice(0, 5)} ${u.event}`.trim()).join('; ') + (ups.length > 6 ? `; +${ups.length - 6} more` : ''),
+        'Per Nbr': p ? p['Per Nbr'] : '', 'MRN': p ? p.MRN : '', 'Last Name': p ? p['Last Name'] : str(f.lastName), 'First Name': p ? p['First Name'] : str(f.firstName),
         'DOB': p ? p.DOB : f.dob || '', 'Sent As': kind === 'verification' ? 'Verification' : 'Discovery',
         'NextGen Payer': p ? p['Primary Payer'] : '', 'NextGen Member ID': p ? p['Member ID'] : '',
         ...(f.benefits || {}), ...f.cols,
       };
       for (const c of RESULTS_COLS) if (row[c] == null) row[c] = '';
+      row['Benefit Flag'] = benefitFlag(row);
       row['Work Queue'] = workQueue(row);
       results.push(row);
       counts.byAction[row.Action] = (counts.byAction[row.Action] || 0) + 1;
       counts.byQueue[row['Work Queue']] = (counts.byQueue[row['Work Queue']] || 0) + 1;
+      if (row['Deductible Status']) counts.deductible[row['Deductible Status']] = (counts.deductible[row['Deductible Status']] || 0) + 1;
+      if (row['OOP Status']) counts.oop[row['OOP Status']] = (counts.oop[row['OOP Status']] || 0) + 1;
       if (p) seen[kind].add(p['Per Nbr']);
     };
 
@@ -529,22 +601,32 @@
       kinds.add(kind);
       for (const r of records) {
         let p = null, match = '';
-        const first = str(r.firstname), last = str(r.lastname);
+        const first = str(r.firstname || r.subscriberfirstname), last = str(r.lastname || r.subscriberlastname);
         const dob = parseDate(r.dateofbirth);
         const cols = {};
+        let benefits = {};
         if (kind === 'verification') {
-          p = pickOne(byMember.get(idKey(r.memberid)), last);
-          if (p) match = 'Member ID';
-          else { p = pickOne(byName.get(nameKey(first, last)), last); if (p) match = 'Name only. Confirm.'; }
+          // Newer exports echo our id (Per Nbr); older ones only carry member ID and name.
+          p = byPer.get(str(r.id)) || null;
+          if (p) match = 'Per Nbr';
+          if (!p) { p = pickOne(byMember.get(idKey(r.memberid)), last); if (p) match = 'Member ID'; }
+          if (!p && last) { p = pickOne(byName.get(nameKey(first, last)), last); if (p) match = 'Name only. Confirm.'; }
+          benefits = benefitFields(r, bopts);
+          let action = verificationAction(r.status);
+          const end = parseDate(r.coverageenddate);
+          const next = p && (upcoming.get(p['Per Nbr']) || [])[0];
+          if (str(r.status).toLowerCase() === 'complete.eligible' && end && next && end < next.dt) {
+            action = `Coverage ends ${fmtDate(end)}, before the next visit. Confirm new coverage with the patient.`;
+          }
           Object.assign(cols, {
-            'Sohar Status': str(r.status), 'Action': verificationAction(r.status),
+            'Sohar Status': str(r.status) + (str(r.statusreason) ? ` (${str(r.statusreason)})` : ''), 'Action': action,
             'Sohar Payer': str(r.payername), 'Sohar payerId': '', 'Sohar Member ID': str(r.memberid), 'Coverage Differs': '',
-            'Sohar Ref': str(r.verificationid), 'Sohar Link': '', 'Sohar Date': str(r.created),
+            'Sohar Ref': str(r.verificationid || r.requestid), 'Sohar Link': str(r.url), 'Sohar Date': str(r.resolved || r.created),
           });
         } else {
           p = byPer.get(str(r.id)) || null;
           if (p) match = 'Per Nbr';
-          else {
+          else if (last) {
             p = pickOne(byNameDob.get(`${nameKey(first, last)}|${fmtDate(dob)}`), last);
             if (p) match = 'Name + DOB';
           }
@@ -552,10 +634,26 @@
           const resolved = !isBlank(r.resolved);
           const status = found ? 'Coverage found' : resolved ? 'No coverage found' : 'Pending';
           const differs = found && p && (str(r.responsepayerid) !== p['Sohar payerId'] || (!isBlank(r.memberid) && idKey(r.memberid) !== idKey(p['Member ID'])));
+          const getId = isBlank(r.memberid) ? ' Get the member ID from the Sohar link.' : '';
+          const options = found ? nextgenFor.get(str(r.responsepayerid)) || [] : [];
+          const current = p && options.some((o) => o.toLowerCase() === p['Primary Payer'].toLowerCase()) ? p['Primary Payer'] : '';
+          let choose = '', pickText = '';
+          if (found) {
+            if (current) { choose = current; pickText = ` Keep "${current}" in NextGen.`; }
+            else if (options.length === 1) { choose = options[0]; pickText = ` Choose "${options[0]}" in NextGen.`; }
+            else if (options.length > 1) {
+              choose = `One of: ${options.join(' | ')}`;
+              pickText = ` Choose one of ${options.map((o) => `"${o}"`).join(', ')} in NextGen; match the plan type on the card.`;
+            } else {
+              choose = `Not in Payer Map: ${str(r.responsepayername)} (${str(r.responsepayerid)})`;
+              pickText = ' No NextGen insurance is mapped to this Sohar payer yet; add it to the Payer Map.';
+            }
+          }
+          cols['Choose in NextGen'] = choose;
           let action;
           if (!found) action = resolved ? 'No coverage found. Confirm self-pay or ask the patient for a card.' : 'Pending at Sohar. Recheck later.';
-          else if (p && !p['Primary Payer']) action = 'Coverage found. Add it to NextGen, then verify.';
-          else if (differs) action = 'Different coverage found. Confirm with the patient, update NextGen, then verify.';
+          else if (p && !p['Primary Payer']) action = `Coverage found. Add it to NextGen, then verify.${pickText}${getId}`;
+          else if (differs) action = `Different coverage found. Confirm with the patient, update NextGen, then verify.${pickText}${getId}`;
           else action = 'Coverage found matches NextGen. Verify.';
           Object.assign(cols, {
             'Sohar Status': status, 'Action': action, 'Sohar Payer': str(r.responsepayername), 'Sohar payerId': str(r.responsepayerid),
@@ -566,8 +664,7 @@
         if (!p) { match = 'No match'; cols.Action = `Not matched to a patient in the Import report. ${cols.Action}`; counts.unmatched++; }
         else counts.matched++;
         cols.Match = match;
-        const benefits = benefitFields(r);
-        if (BENEFIT_KEYS.some((k) => benefits[k])) counts.withBenefits++;
+        if (benefits['Deductible'] || benefits['OOP Max'] || benefits['Copay']) counts.withBenefits++;
         emit(p, kind, { firstName: first, lastName: last, dob: fmtDate(dob), cols, benefits });
       }
     }
@@ -577,16 +674,24 @@
       const kind = p.Route;
       if (!kinds.has(kind) || seen[kind].has(p['Per Nbr']) || !upcoming.has(p['Per Nbr'])) continue;
       counts.notReturned++;
-      emit(p, kind, { cols: {
-        'Sohar Status': 'Not in Sohar file', 'Action': 'Not in the results. Check it was uploaded to Sohar.',
-        'Sohar Payer': '', 'Sohar payerId': '', 'Sohar Member ID': '', 'Coverage Differs': '', 'Match': '', 'Sohar Ref': '', 'Sohar Link': '', 'Sohar Date': '',
-      } });
+      emit(p, kind, { cols: { 'Sohar Status': 'Not in Sohar file', 'Action': 'Not in the results. Check it was uploaded to Sohar.', 'Match': '' } });
     }
 
     // Soonest appointment first; rows with no upcoming appointment last.
     const t = (r) => (r['Next Appt'] ? parseDate(r['Next Appt']).getTime() : Infinity);
     results.sort((a, b) => t(a) - t(b) || a['Last Name'].localeCompare(b['Last Name']));
     return { results, unknownFiles, counts, asOf };
+  }
+
+  /** Verified patients' benefits, one row per Per Nbr (latest Sohar result wins). Contract for the TMS Tracker import. */
+  function benefitsExport(results) {
+    const by = new Map();
+    for (const r of results || []) {
+      if (r['Sent As'] !== 'Verification' || !r['Per Nbr'] || !r['Sohar Ref']) continue;
+      const prev = by.get(r['Per Nbr']);
+      if (!prev || String(r['Sohar Date']) > String(prev['Sohar Date'])) by.set(r['Per Nbr'], r);
+    }
+    return [...by.values()].map((r) => Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, r[c] == null ? '' : r[c]])));
   }
 
   function summarize(patients) {
@@ -600,9 +705,9 @@
   }
 
   return {
-    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, HEADER_SYNONYMS,
+    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, BENEFITS_EXPORT_COLS, HEADER_SYNONYMS,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,
-    resultKind, readResultRows, mergeSoharResults, benefitFields, workQueue, lasfir, adminMessage,
+    resultKind, readResultRows, mergeSoharResults, benefitFields, accumulatorStatus, benefitFlag, benefitsExport, workQueue, lasfir, adminMessage,
   };
 });

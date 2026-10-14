@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.2.0';
+  const VERSION = '0.3.0';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
@@ -50,8 +50,10 @@
     $('fileImport').addEventListener('change', (e) => guard(() => uploadImport(e.target)));
     $('btnResults').addEventListener('click', () => $('fileResults').click());
     $('fileResults').addEventListener('change', (e) => guard(() => uploadResults(e.target)));
-    $('btnCopyMsg').addEventListener('click', () => guard(copyAdminMessage));
-    $('btnDlWork').addEventListener('click', () => saveCSV(`sohar_results_worklist_${stamp()}.csv`, C.toCSV(C.RESULTS_COLS, state.results || [])));
+    $('btnCopyMsg').addEventListener('click', () => guard(() => copyAdminMessage('action')));
+    $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits')));
+    $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(`sohar_results_worklist_${stamp()}.csv`, C.toCSV(C.RESULTS_COLS, (await currentResults()) || []))));
+    $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(`sohar_benefits_${stamp()}.csv`, C.toCSV(C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || [])))));
     $('btnFull').addEventListener('click', () => guard(openFull));
     document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => X.activate(b.dataset.goto)));
     $('scope').addEventListener('change', () => X.setConfigValue('Scope', $('scope').value === 'all' ? 'All patients' : 'Upcoming appointments').catch(() => {}));
@@ -269,8 +271,8 @@
 
       const q = res.counts.byQueue;
       const c = res.counts;
-      const dedMet = res.results.filter((r) => r['Deductible Met'] === 'Yes').length;
-      const oopMet = res.results.filter((r) => r['OOP Met'] === 'Yes').length;
+      const n = (col, v) => res.results.filter((r) => r[col] === v).length;
+      const pctTxt = `${Math.round((cfg.approachingPct ?? 0.2) * 100)}%`;
       out.innerHTML = `
         <div class="counts q4">
           <div class="count act"><div class="n">${q['Action needed'] || 0}</div><div class="l">action needed</div></div>
@@ -280,10 +282,11 @@
         </div>
         <p>${c.matched} result${c.matched === 1 ? '' : 's'} matched to the appointment report${c.notReturned ? `; ${c.notReturned} upcoming patient${c.notReturned === 1 ? ' was' : 's were'} not in the Sohar files` : ''}.</p>
         ${c.withBenefits
-          ? `<p class="ok">${c.withBenefits} row${c.withBenefits === 1 ? ' has' : 's have'} benefit amounts: ${dedMet} deductible met, ${oopMet} out-of-pocket max met.</p>`
-          : `<p class="warn">These files have no deductible or out-of-pocket columns, so Deductible Met and OOP Met are blank. Sohar's standard exports don't include them; ask Sohar for an export with benefit accumulators.</p>`}
+          ? `<p class="ok">${c.withBenefits} verified patient${c.withBenefits === 1 ? ' has' : 's have'} benefits. Deductible: ${n('Deductible Status', 'Met')} met, ${n('Deductible Status', 'Approaching')} approaching, ${n('Deductible Status', 'None')} with no deductible. OOP max: ${n('OOP Status', 'Met')} met, ${n('OOP Status', 'Approaching')} approaching.</p>
+             <p class="hint">Approaching means ${pctTxt} or less remaining (Config: Benefit approaching %).</p>`
+          : `<p class="warn">These files have no deductible or out-of-pocket columns, so benefit statuses are blank. Use Sohar's full verification output, which includes them.</p>`}
         ${res.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar export): ${res.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
-      $('btnCopyMsg').disabled = false; $('btnDlWork').disabled = false;
+      for (const id of ['btnCopyMsg', 'btnCopyBen', 'btnDlWork', 'btnDlBen']) $(id).disabled = false;
       markDone(5);
     } finally { unbusy('btnResults', 'Upload Sohar results'); }
   }
@@ -294,11 +297,11 @@
     try { return await X.readTable('tblSoharResults'); } catch (e) { return null; }
   }
 
-  async function copyAdminMessage() {
+  async function copyAdminMessage(mode) {
     const rows = await currentResults();
     if (!rows || !rows.length) { setStatus('Upload Sohar results first (step 5).', 'bad'); return; }
-    const text = C.adminMessage(rows, { asOf: state.resultsAsOf });
-    if (await copyText(text)) setStatus('Admin message copied. Paste it into Outlook or Teams.', 'ok');
+    const text = C.adminMessage(rows, { asOf: state.resultsAsOf, mode });
+    if (await copyText(text)) setStatus(`${mode === 'benefits' ? 'Benefits' : 'Admin'} message copied. Paste it into Outlook or Teams.`, 'ok');
     else setStatus('Copy was blocked. Use Open full screen and copy from the message box.', 'bad');
   }
 
