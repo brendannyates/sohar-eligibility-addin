@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.4.0';
+  const VERSION = '0.4.1';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
@@ -53,9 +53,9 @@
     $('fileResults').addEventListener('change', (e) => guard(() => uploadResults(e.target), 'resultsResult'));
     $('btnCopyMsg').addEventListener('click', () => guard(() => copyAdminMessage('action'), 'resultsResult'));
     $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits'), 'resultsResult'));
-    $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(`sohar_results_worklist_${stamp()}.csv`, C.toCSV(C.RESULTS_COLS, (await currentResults()) || []), 'exports'), 'resultsResult'));
-    $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(`sohar_benefits_${stamp()}.csv`, C.toCSV(C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || [])), 'exports'), 'resultsResult'));
-    $('btnDlTasks').addEventListener('click', () => guard(async () => saveCSV(`nextgen_tasks_${stamp()}.csv`, C.toCSV(C.TASK_COLS, await currentTasks()), 'tasks'), 'resultsResult'));
+    $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(`sohar_results_worklist_${stamp()}.csv`, C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
+    $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(`sohar_benefits_${stamp()}.csv`, C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'resultsResult'), 'resultsResult'));
+    $('btnDlTasks').addEventListener('click', () => guard(async () => saveCSV(`nextgen_tasks_${stamp()}.csv`, C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
     $('btnFull').addEventListener('click', () => guard(() => openFull(), 'resultsResult'));
     $('btnFull2').addEventListener('click', () => guard(() => openFull('upload'), 'resultsResult'));
     diagnostics();
@@ -248,7 +248,7 @@
   async function download(kind) {
     if (!state.exports) throw new Error('Build the patient list first (step 3).');
     const cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS;
-    await saveCSV(`sohar_${kind}_import_${state.cfg.scope}_${stamp()}.csv`, C.toCSV(cols, state.exports[kind]), 'exports');
+    await saveCSV(`sohar_${kind}_import_${state.cfg.scope}_${stamp()}.csv`, cols, state.exports[kind], 'preflight');
   }
 
   // ---------- step 5 ----------
@@ -257,6 +257,8 @@
     input.value = '';
     if (!files.length) return;
     busy('btnResults', 'Matching…');
+    $('resultsResult').hidden = false; $('resultsResult').innerHTML = '<ol class="progress"></ol>';
+    progress(`Reading ${files.length} file${files.length > 1 ? 's' : ''}…`);
     try {
       const list = [];
       for (const f of files) {
@@ -265,20 +267,29 @@
         else list.push({ name: f.name, rows: [] });
       }
       const html = await processResults(list);
-      const out = $('resultsResult'); out.hidden = false; out.innerHTML = html;
+      $('resultsResult').insertAdjacentHTML('beforeend', html);
     } finally { unbusy('btnResults', 'Upload Sohar results'); }
   }
 
   /** Match Sohar files to the Import report, write Sohar Results + NextGen Tasks, return a summary (HTML). Shared by pane and full screen. */
-  async function processResults(list) {
+  async function processResults(list, onStep) {
+    const step = (m) => { progress(m); if (onStep) onStep(m); };
+    // Say what each file was recognised as, so a wrong or unreadable file is obvious.
+    for (const f of list) {
+      const { kind, records } = C.readResultRows(f.rows);
+      step(`${f.name}: ${kind ? `${kind} output, ${records.length} rows` : 'not recognised as a Sohar verification or discovery output'}`);
+    }
+    step('Reading the appointment report on the Import sheet…');
     state.rows = await X.readImportRows();
     const cfg = await X.readConfig();
     if ($('asOf').value) cfg.asOf = new Date($('asOf').value + 'T00:00:00Z');
     const res = C.mergeSoharResults(state.rows, list, { ...cfg, payerMap: await X.readPayerMap() });
     if (res.error) throw new Error(res.error);
     if (!res.results.length) throw new Error(`None of these files look like a Sohar verification or discovery output${res.unknownFiles.length ? ` (${res.unknownFiles.join(', ')})` : ''}.`);
+    step(`Matched ${res.counts.matched} results to patients (${res.counts.unmatched} unmatched). Writing the Sohar Results sheet…`);
     await X.writeResults(C.RESULTS_COLS, res.results);
     const tasks = C.keepDone(C.buildTasks(res.results), await X.readTasks());
+    step(`Writing ${tasks.length} rows to the NextGen Tasks sheet…`);
     await X.writeTasks(C.TASK_COLS, tasks);
     state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks;
     for (const id of ['btnCopyMsg', 'btnCopyBen', 'btnDlWork', 'btnDlBen', 'btnDlTasks']) $(id).disabled = false;
@@ -325,14 +336,14 @@
   }
 
   // ---------- full screen ----------
-  // A real window (not an iframe), so file pickers, downloads and copy work in Excel on the web too.
+  // Floats over the sheet (displayInIframe). Excel for Windows/Mac always shows dialogs as their own window.
   let dlg = null;
   const take = C.messageAssembler();
   const isWeb = () => !state.demo && Office.context.platform === Office.PlatformType.OfficeOnline;
 
   async function payload(focus) {
     return {
-      type: 'data', focus: focus || '', results: (await currentResults()) || [], tasks: await currentTasks(),
+      type: 'data', focus: focus || '', web: isWeb(), results: (await currentResults()) || [], tasks: await currentTasks(),
       exports: state.exports || null, scope: state.cfg ? state.cfg.scope : 'upcoming',
       asOf: state.resultsAsOf ? state.resultsAsOf.toISOString() : null,
     };
@@ -348,7 +359,7 @@
     if (!Office.context.requirements.isSetSupported('DialogApi', '1.2')) throw new Error('This version of Excel cannot open the full-screen window (needs DialogApi 1.2). Use the Sohar Results and NextGen Tasks sheets.');
     if (dlg) { await sendToDialog(await payload(focus)); return; }
     state.pendingFocus = focus || '';
-    Office.context.ui.displayDialogAsync(url, { height: 90, width: 90, displayInIframe: false }, (r) => {
+    Office.context.ui.displayDialogAsync(url, { height: 90, width: 90, displayInIframe: true }, (r) => {
       if (r.status !== Office.AsyncResultStatus.Succeeded) {
         note('resultsResult', `Could not open full screen: ${r.error.message}. If a pop-up blocker appeared, allow pop-ups for Excel and try again.`, 'bad');
         return;
@@ -367,6 +378,9 @@
     else if (m.type === 'task-done') {
       await X.setTaskDone(m.key, m.done);
       if (state.tasks) state.tasks = state.tasks.map((t) => (t['Task Key'] === m.key ? { ...t, Done: m.done ? 'Yes' : '' } : t));
+    } else if (m.type === 'export') {
+      const msg = await saveCSV(m.name, m.cols, m.rows, 'resultsResult');
+      await sendToDialog({ type: 'notice', ok: true, text: msg || `Saved ${m.name}.` });
     } else if (m.type === 'upload') {
       // Files picked in the full-screen window: CSVs arrive as text, .xlsx as base64 for Excel to open.
       try {
@@ -375,8 +389,8 @@
           if (f.text != null) list.push({ name: f.name, rows: C.parseCSV(f.text) });
           else if (f.base64) list.push({ name: f.name, rows: await X.readXlsxRows(f.base64) });
         }
-        const html = await processResults(list);
-        const out = $('resultsResult'); out.hidden = false; out.innerHTML = html;
+        $('resultsResult').innerHTML = ''; const html = await processResults(list, (s) => sendToDialog({ type: 'notice', ok: true, text: s }));
+        $('resultsResult').insertAdjacentHTML('beforeend', html);
         await sendToDialog({ ...(await payload('prep')), notice: { ok: true, text: `Loaded ${list.map((f) => f.name).join(', ')}.` } });
       } catch (e) {
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
@@ -385,9 +399,16 @@
     }
   }
 
-  // Excel on the web runs this pane in a sandboxed frame that blocks downloads, so files are saved from the full-screen window there.
-  async function saveCSV(name, csv, focus) {
-    if (isWeb()) { note('resultsResult', 'Excel on the web blocks downloads from this pane. Use the Save buttons in the full-screen window that just opened.', 'warn'); await openFull(focus || 'exports'); return; }
+  // Excel on the web runs this pane (and the full-screen view) in a sandboxed frame that blocks downloads.
+  // There the rows go to an Export sheet instead, and Excel's own File > Export > Download as CSV saves them.
+  async function saveCSV(name, cols, rows, boxId) {
+    if (isWeb()) {
+      const n = await X.writeExport(cols, rows);
+      const msg = `${n} rows are on the Export sheet. In Excel: File > Export > Download as CSV, and name it ${name}.`;
+      if (boxId) note(boxId, msg, 'ok');
+      return msg;
+    }
+    const csv = C.toCSV(cols, rows);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -438,6 +459,12 @@
       setStatus(`Something went wrong: ${msg}`, 'bad');
       if (boxId) note(boxId, `Something went wrong: ${msg}${e && e.code ? ` (${e.code})` : ''}`, 'bad');
     }
+  }
+  function progress(msg) {
+    const box = $('resultsResult'); box.hidden = false;
+    let ol = box.querySelector('ol.progress');
+    if (!ol) { ol = document.createElement('ol'); ol.className = 'progress'; box.prepend(ol); }
+    const li = document.createElement('li'); li.textContent = msg; ol.appendChild(li);
   }
   function note(boxId, msg, cls) {
     const box = $(boxId); if (!box) return;

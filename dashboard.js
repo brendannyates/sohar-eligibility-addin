@@ -5,7 +5,7 @@
   const C = window.SoharCore;
   const $ = (id) => document.getElementById(id);
   let rows = [], tasks = [], exportsData = null, scope = 'upcoming', asOf = null, list = [], tab = 'prep';
-  let inOffice = false;
+  let inOffice = false, web = false;
   const take = C.messageAssembler();
 
   const BEN = {
@@ -34,7 +34,7 @@
   }
 
   function load(m) {
-    rows = m.results || []; tasks = m.tasks || []; exportsData = m.exports || null; scope = m.scope || 'upcoming';
+    rows = m.results || []; tasks = m.tasks || []; exportsData = m.exports || null; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
     $('dStatus').textContent = rows.length
       ? `${rows.length} Sohar results, ${tasks.filter(open).length} open NextGen tasks${asOf ? `, appointments from ${C.fmtDate(asOf)}` : ''}.`
@@ -212,15 +212,18 @@
   // ---------- saving ----------
   const stamp = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
   function save(kind) {
-    let name, csv;
+    let name, cols, data;
     if (kind === 'verification' || kind === 'discovery') {
       if (!exportsData) { notice('No Sohar import built yet. Run step 3 (Build) in the pane first.', false); return; }
       name = `sohar_${kind}_import_${scope}_${stamp()}.csv`;
-      csv = C.toCSV(kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS, exportsData[kind] || []);
-    } else if (kind === 'tasks') { name = `nextgen_tasks_open_${stamp()}.csv`; csv = C.toCSV(C.TASK_COLS, tasks.filter(open)); }
-    else if (kind === 'allTasks') { name = `nextgen_tasks_all_${stamp()}.csv`; csv = C.toCSV(C.TASK_COLS, tasks); }
-    else if (kind === 'benefits') { name = `sohar_benefits_${stamp()}.csv`; csv = C.toCSV(C.BENEFITS_EXPORT_COLS, C.benefitsExport(rows)); }
-    else { name = `sohar_results_filtered_${stamp()}.csv`; csv = C.toCSV(C.RESULTS_COLS, filteredRows()); }
+      cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS; data = exportsData[kind] || [];
+    } else if (kind === 'tasks') { name = `nextgen_tasks_open_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks.filter(open); }
+    else if (kind === 'allTasks') { name = `nextgen_tasks_all_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks; }
+    else if (kind === 'benefits') { name = `sohar_benefits_${stamp()}.csv`; cols = C.BENEFITS_EXPORT_COLS; data = C.benefitsExport(rows); }
+    else { name = `sohar_results_filtered_${stamp()}.csv`; cols = C.RESULTS_COLS; data = filteredRows(); }
+    // Excel on the web blocks downloads here too, so the pane writes the rows to the Export sheet instead.
+    if (inOffice && web) { notice('Writing to the Export sheet…', true); toPane({ type: 'export', name, cols, rows: data }); return; }
+    const csv = C.toCSV(cols, data);
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const a = document.createElement('a');
     a.href = url; a.download = name;

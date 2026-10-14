@@ -127,8 +127,12 @@
       await ctx.sync();
       if (hdr.columnCount !== cols.length) throw new Error(`${tableName} has ${hdr.columnCount} columns; this version of the add-in expects ${cols.length}. Use the matching template.`);
       ctx.application.suspendApiCalculationUntilNextSync();
-      if (body.rowCount > 0) { body.delete(Excel.DeleteShiftDirection.up); await ctx.sync(); }
-      // Excel leaves one empty body row. Everything is written as text so member IDs and ZIPs keep leading zeros.
+      // Empty the body down to one blank row. Excel refuses to delete a table's last row (InsertDeleteConflict),
+      // so the first row is cleared and only rows 2..n are deleted.
+      body.clear(Excel.ClearApplyTo.contents);
+      if (body.rowCount > 1) body.getRow(1).getBoundingRect(body.getLastRow()).delete(Excel.DeleteShiftDirection.up);
+      await ctx.sync();
+      // Everything is written as text so member IDs and ZIPs keep leading zeros.
       const values = rows.map((r) => cols.map((c) => { const v = r[c]; return v == null ? '' : v; }));
       if (!values.length) { t.getDataBodyRange().numberFormat = [cols.map(() => '@')]; await ctx.sync(); return; }
       const canResize = Office.context.requirements.isSetSupported('ExcelApi', '1.13');
@@ -227,6 +231,8 @@
 
   const writeResults = (cols, rows) => writeAddinTable(SHEETS.results, RESULTS_TABLE, cols, rows, true);
   const writeTasks = (cols, rows) => writeAddinTable(SHEETS.tasks, TASKS_TABLE, cols, rows, false);
+  // Excel on the web cannot download from the pane, so files go to an Export sheet (File > Export > Download as CSV).
+  const writeExport = (cols, rows) => writeAddinTable('Export', 'tblExport', cols, rows, true);
   async function readTasks() { try { return await readTable(TASKS_TABLE); } catch (e) { return []; } }
 
   /** Mark one NextGen task done (or not) by Task Key. */
@@ -245,38 +251,44 @@
     });
   }
 
-  /** Create (or rebuild) a sheet + table the add-in owns, then fill it. Not part of the template. */
+  /**
+   * Create (or rebuild) a sheet + table the add-in owns. Not part of the template.
+   * Writes every row as plain cells first, then turns the block into a table in one step,
+   * so there is no table resize (that path left Sohar Results empty in Excel).
+   */
   async function writeAddinTable(sheetName, tableName, cols, rows, activate) {
+    const values = rows.map((r) => cols.map((c) => { const v = r[c]; return v == null ? '' : v; }));
+    const stage = (s) => (e) => { e.message = `Writing the ${sheetName} sheet (${s}): ${e.message}`; throw e; };
     await run(async (ctx) => {
-      const t = ctx.workbook.tables.getItemOrNullObject(tableName);
-      t.load('isNullObject');
-      await ctx.sync();
-      if (!t.isNullObject) {
-        const h = t.getHeaderRowRange(); h.load('values');
-        await ctx.sync();
-        if (h.values[0].join('|') === cols.join('|')) return;
-        t.delete();
-        await ctx.sync();
-      }
+      const old = ctx.workbook.tables.getItemOrNullObject(tableName);
+      old.load('isNullObject');
       let ws = ctx.workbook.worksheets.getItemOrNullObject(sheetName);
       ws.load('isNullObject');
       await ctx.sync();
+      if (!old.isNullObject) old.delete();
       if (ws.isNullObject) ws = ctx.workbook.worksheets.add(sheetName);
-      else ws.getRange().clear();
-      const hdr = ws.getRangeByIndexes(0, 0, 1, cols.length);
-      hdr.values = [cols];
-      const nt = ws.tables.add(hdr, true);
-      nt.name = tableName;
+      await ctx.sync().catch(stage('preparing the sheet'));
+      ws.getRange().clear();
+      await ctx.sync().catch(stage('clearing'));
+
+      const all = [cols, ...values];
+      for (let i = 0; i < all.length; i += CHUNK) {
+        ctx.application.suspendApiCalculationUntilNextSync();
+        const chunk = all.slice(i, i + CHUNK);
+        const rg = ws.getRangeByIndexes(i, 0, chunk.length, cols.length);
+        rg.numberFormat = chunk.map((r) => r.map(() => '@')); // text, so IDs and ZIPs keep leading zeros
+        rg.values = chunk;
+        await ctx.sync().catch(stage(`rows ${i + 1}-${i + chunk.length}`));
+      }
+      const tbl = ws.tables.add(ws.getRangeByIndexes(0, 0, Math.max(2, all.length), cols.length), true);
+      tbl.name = tableName;
       ws.freezePanes.freezeRows(1);
-      await ctx.sync();
+      await ctx.sync().catch(stage('making the table'));
+      tbl.getRange().format.autofitColumns();
+      if (activate) ws.activate();
+      await ctx.sync().catch(() => {}); // cosmetic only
     });
-    await replaceTable(tableName, cols, rows);
-    await run(async (ctx) => {
-      const t = ctx.workbook.tables.getItem(tableName);
-      t.getRange().format.autofitColumns();
-      if (activate) t.worksheet.activate();
-      await ctx.sync();
-    });
+    return values.length;
   }
 
   async function setConfigValue(setting, value) {
@@ -310,5 +322,5 @@
   }
 
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable,
-    writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, readTasks, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, readTasks, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

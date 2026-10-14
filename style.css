@@ -146,6 +146,9 @@ select:focus-visible, input:focus-visible { outline: 2px solid var(--focus); out
 .count.pen .n { color: var(--muted); }
 .count.clr .n { color: var(--ok); }
 
+ol.progress { margin: 0 0 8px; padding-left: 18px; font-size: 12px; color: var(--muted); }
+ol.progress li { margin: 1px 0; }
+ol.progress li:last-child { color: var(--ink); }
 .offscreen { position: fixed; left: -9999px; top: 0; }
 
 /* Full-screen worklist (dashboard.html) */
