@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.6.0';
+  const VERSION = '0.6.1';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
@@ -449,7 +449,22 @@
   }
 
   // ---------- full screen ----------
-  // Floats over the sheet (displayInIframe). Excel for Windows/Mac always shows dialogs as their own window.
+  // Floats over the Excel page (displayInIframe: true). Never a separate window.
+
+  // Demo only: full screen as a frame over the pane, with the pane blurred behind it.
+  function showFloat(src) {
+    hideFloat();
+    const bd = document.createElement('div'); bd.className = 'backdrop'; bd.id = 'floatBackdrop'; bd.addEventListener('click', hideFloat);
+    const box = document.createElement('div'); box.className = 'float'; box.id = 'floatBox';
+    box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true'); box.setAttribute('aria-label', 'Full screen');
+    box.innerHTML = '<div class="floatbar"><button class="small" type="button">Close</button></div><iframe title="Sohar eligibility, full screen"></iframe>';
+    box.querySelector('iframe').src = src;
+    box.querySelector('button').addEventListener('click', hideFloat);
+    document.body.append(bd, box);
+    box.querySelector('button').focus();
+  }
+  function hideFloat() { ['floatBackdrop', 'floatBox'].forEach((id) => { const el = $(id); if (el) el.remove(); }); }
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') hideFloat(); });
   let dlg = null;
   const take = C.messageAssembler();
   const isWeb = () => !state.demo && Office.context.platform === Office.PlatformType.OfficeOnline;
@@ -468,7 +483,7 @@
 
   async function openFull(focus) {
     const url = new URL('dashboard.html', location.href).href;
-    if (state.demo) { window.open(url + (focus ? `#${focus}` : ''), '_blank'); return; }
+    if (state.demo) { showFloat(url + (focus ? `#${focus}` : '')); return; } // browser preview: the same float, drawn in the page
     if (!Office.context.requirements.isSetSupported('DialogApi', '1.2')) throw new Error('This version of Excel cannot open the full-screen window (needs DialogApi 1.2). Use the Sohar Results and NextGen Tasks sheets.');
     if (dlg) { await sendToDialog(await payload(focus)); return; }
     state.pendingFocus = focus || '';
