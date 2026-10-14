@@ -1,4 +1,4 @@
-/* dashboard.js — full-screen window. Runs in an Office dialog (its own window, so uploads and downloads work on the web).
+/* dashboard.js — full screen. Runs in an Office dialog that floats over the Excel page (displayInIframe: true).
    Data comes from the pane via messageChild; uploads and Done ticks go back via messageParent. */
 (function () {
   'use strict';
@@ -169,9 +169,12 @@
         ${others.map((o) => grp(`Also: ${esc(o['Sent As'])} result`, ['Sohar Status', 'Action', 'Sohar Payer', 'Benefit Flag', 'Sohar Date'], o)).join('')}
       </div>`;
     box.hidden = false;
-    $('btnHide').addEventListener('click', () => { box.hidden = true; });
-    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    $('btnHide').addEventListener('click', hideDetail);
+    if (!$('detailBackdrop')){ const bd = document.createElement('div'); bd.className = 'backdrop'; bd.id = 'detailBackdrop'; bd.addEventListener('click', hideDetail); document.body.append(bd); }
+    $('btnHide').focus();
   }
+  // the detail card floats over the dashboard; everything behind it is blurred
+  function hideDetail() { $('detail').hidden = true; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
 
   function queueClass(q) { return { 'Action needed': 'act', Unmatched: 'unm', Pending: 'pen', Clear: 'clr' }[q] || ''; }
 
@@ -181,7 +184,7 @@
     document.querySelectorAll('[data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
     document.querySelectorAll('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== name; });
     $('sharedFilters').hidden = name === 'upload';
-    $('detail').hidden = true;
+    hideDetail();
   }
 
   // ---------- uploads ----------
@@ -255,7 +258,7 @@
     const tr = e.target.closest('tr[data-key]');
     if (tr) showDetail(tr.dataset.key);
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Enter') { const tr = e.target.closest && e.target.closest('tr[data-key]'); if (tr) showDetail(tr.dataset.key); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('detail').hidden) { hideDetail(); return; } if (e.key === 'Enter') { const tr = e.target.closest && e.target.closest('tr[data-key]'); if (tr) showDetail(tr.dataset.key); } });
   document.addEventListener('change', (e) => {
     const cb = e.target.closest && e.target.closest('input[data-task]');
     if (!cb) return;
