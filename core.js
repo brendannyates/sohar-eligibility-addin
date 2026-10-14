@@ -678,24 +678,27 @@
       emit(p, kind, { cols: { 'Sohar Status': 'Not in Sohar file', 'Action': 'Not in the results. Check it was uploaded to Sohar.', 'Match': '' } });
     }
 
-    // Discovery follow-up: coverage Sohar found goes back to Sohar as a verification, to get benefits.
-    // A verification result for the same patient counts as that follow-up when it is for the discovered payer,
-    // or when the patient was sent to discovery (so the NextGen payer was never verified).
+    // Discovery only finds the policy (payer, member ID). Copay, deductible and OOP come from a verification
+    // submission in Sohar, so every policy discovery finds goes back to Sohar as a verification.
+    // A verification result is the follow-up when it is for the same patient and the same policy:
+    // same member ID when both files have one, else the same Sohar payer.
     const discoveryVerification = [];
     const specialty = cfg.specialty || 'PSY';
     for (const d of results) {
       if (d['Sent As'] !== 'Discovery' || d['Sohar Status'] !== 'Coverage found' || !d['Per Nbr'] || !d['Sohar payerId']) continue;
       const p = byPer.get(d['Per Nbr']);
       const payer = d['Sohar Payer'].toLowerCase();
+      const member = idKey(d['Sohar Member ID']);
+      const samePolicy = (r) => (member && idKey(r['Sohar Member ID']) ? idKey(r['Sohar Member ID']) === member : !!payer && r['Sohar Payer'].toLowerCase() === payer);
       const v = results
-        .filter((r) => r['Sent As'] === 'Verification' && r['Per Nbr'] === d['Per Nbr'] && r['Sohar Status'] !== 'Not in Sohar file'
-          && ((payer && r['Sohar Payer'].toLowerCase() === payer) || p.Route === 'discovery'))
+        .filter((r) => r['Sent As'] === 'Verification' && r['Per Nbr'] === d['Per Nbr'] && r['Sohar Status'] !== 'Not in Sohar file' && samePolicy(r))
         .sort((a, b) => String(b['Sohar Date']).localeCompare(String(a['Sohar Date'])))[0];
       if (!v) {
         d['Discovery Follow-up'] = 'Ready to verify';
+        d.Action = `${d.Action} Copay, deductible and OOP need a Sohar verification: this patient is on the discovery verification import.`;
         discoveryVerification.push({
           firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State,
-          // Discovery rarely returns a member ID; the NextGen one is only safe when NextGen already has this payer.
+          // Member ID from discovery; NextGen's only when NextGen already has this payer.
           memberId: d['Sohar Member ID'] || (p['Sohar payerId'] === d['Sohar payerId'] ? p['Member ID'] : ''),
           payerId: d['Sohar payerId'], placeOfServiceCode: p.POS, specialtyCode: specialty, id: p['Per Nbr'],
           subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'],

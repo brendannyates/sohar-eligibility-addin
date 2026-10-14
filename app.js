@@ -349,7 +349,7 @@
     const verifiedFromDisc = res.results.filter((r) => r['Discovery Follow-up'] === 'From discovery').length;
     const dvHtml = (dv.length
       ? `<p class="ok"><b>${dv.length} discovery patient${dv.length === 1 ? '' : 's'} ready to verify.</b> Click <b>Download discovery verification import</b> and upload it to Sohar as a verification batch, then bring the verification output back here; it is added to these results.</p>`
-        + (noId ? `<p class="warn">${noId} of them ha${noId === 1 ? 's' : 've'} no member ID (Sohar discovery usually leaves it blank). Open the Sohar link, type it in the memberId column on the Discovery Verify sheet, then download.</p>` : '')
+        + (noId ? `<p class="warn">${noId} of them ha${noId === 1 ? 's' : 've'} no member ID. Open the Sohar link, type it in the memberId column on the Discovery Verify sheet, then download.</p>` : '')
       : '')
       + (verifiedFromDisc ? `<p class="ok">${verifiedFromDisc} plan${verifiedFromDisc === 1 ? '' : 's'} found by discovery ${verifiedFromDisc === 1 ? 'has' : 'have'} been verified; benefits are on those rows.</p>` : '');
 

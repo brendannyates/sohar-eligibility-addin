@@ -232,8 +232,9 @@ test('taskMessage lists open tasks only, LASFIR not names', () => {
 function rawFiles() {
   const v = [VER_HDR, ver({ requestId: 'q-1', id: '100', resolved: '2026-10-14T01:00:00.000Z', payerName: 'Blue Shield of California', status: 'complete.eligible' })];
   const d = [DISC_HDR,
-    disc({ requestId: 'r-1', id: '101', url: 'https://example.test/r-1', resolved: '2026-10-14', state: 'CA', responsePayerId: '62308', responsePayerName: 'Cigna' }),
-    disc({ requestId: 'r-2', id: '103', resolved: '2026-10-14', state: 'CA', responsePayerId: '87726', responsePayerName: 'UnitedHealthcare' }),
+    // Live discovery output carries the member ID; the 103 row leaves it out to cover the blank case.
+    disc({ requestId: 'r-1', id: '101', url: 'https://example.test/r-1', resolved: '2026-10-14', firstName: 'Chidi', lastName: 'Okafor', dateOfBirth: '01/01/1990', state: 'CA', memberId: 'CG101', responsePayerId: '62308', responsePayerName: 'Cigna' }),
+    disc({ requestId: 'r-2', id: '103', resolved: '2026-10-14', state: 'CA', memberId: 'UH103', responsePayerId: '87726', responsePayerName: 'UnitedHealthcare' }),
     disc({ requestId: 'r-4', id: '104', resolved: '2026-10-14', state: 'CA', memberId: 'C77', responsePayerId: '62308', responsePayerName: 'Cigna' }),
   ];
   return [{ name: 'verification output.csv', rows: v }, { name: 'discovery output.csv', rows: d }];
@@ -246,7 +247,8 @@ test('discovery coverage found becomes a verification import with the discovered
   assert.equal(byId['101'].payerId, '62308');
   assert.equal(byId['101'].firstName, 'Chidi');
   assert.equal(byId['101'].dateOfBirth, '01/01/1990');
-  assert.equal(byId['101'].memberId, '', 'discovery returned no member ID and NextGen has none');
+  assert.equal(byId['101'].memberId, 'CG101', 'member ID from the discovery output');
+  assert.equal(byId['103'].memberId, 'UH103');
   assert.equal(byId['101'].placeOfServiceCode, '11');
   assert.equal(byId['103'].placeOfServiceCode, '10');
   assert.equal(byId['104'].memberId, 'C77');
@@ -254,19 +256,23 @@ test('discovery coverage found becomes a verification import with the discovered
   assert.equal(csv.split('\r\n')[0], C.VERIFICATION_COLS.join(','));
   const d101 = res.results.find((r) => r['Per Nbr'] === '101' && r['Sent As'] === 'Discovery');
   assert.equal(d101['Discovery Follow-up'], 'Ready to verify');
+  assert.match(d101.Action, /Copay, deductible and OOP need a Sohar verification/);
+  assert.equal(d101.Copay, '', 'discovery carries no benefits');
 });
 
 test('a later verification upload is added to saved results and closes the discovery loop', () => {
   const first = C.accumulateResults([], rawFiles(), '2026-10-14');
   assert.equal(first.added, 4);
-  const v2 = [VER_HDR, ver({ requestId: 'q-9', id: '101', resolved: '2026-10-15T01:00:00.000Z', payerName: 'Cigna', status: 'complete.eligible',
-    planName: 'SYNTH OPEN ACCESS', innCopay: '30', innTotalDeductible: '1000', innRemainingDeductible: '100', innOutOfPocket: '4000', innOutOfPocketRemaining: '2500' })];
+  const v2 = [VER_HDR, ver({ requestId: 'q-9', id: '101', resolved: '2026-10-15T01:00:00.000Z', memberId: 'CG101', payerName: 'Cigna', status: 'complete.eligible',
+    planName: 'SYNTH OPEN ACCESS', innCopay: '30', innTotalDeductible: '1000', innRemainingDeductible: '100', innOutOfPocket: '4000', innOutOfPocketRemaining: '2500' }),
+    // Same patient and payer but another member ID: a different policy, so it does not close 103's discovery.
+    ver({ requestId: 'q-10', id: '103', resolved: '2026-10-15T01:00:00.000Z', memberId: 'UH-OTHER', payerName: 'UnitedHealthcare', status: 'complete.eligible' })];
   const second = C.accumulateResults(first.saved, [{ name: 'verification output 2.csv', rows: v2 }], '2026-10-15');
-  assert.equal(second.added, 1);
-  assert.equal(second.saved.length, 5);
+  assert.equal(second.added, 2);
+  assert.equal(second.saved.length, 6);
   const again = C.accumulateResults(second.saved, [{ name: 'verification output 2.csv', rows: v2 }], '2026-10-15');
-  assert.equal(again.replaced, 1, 'same file twice replaces, does not duplicate');
-  assert.equal(again.saved.length, 5);
+  assert.equal(again.replaced, 2, 'same file twice replaces, does not duplicate');
+  assert.equal(again.saved.length, 6);
 
   const res = C.mergeSoharResults(MERGE_ROWS(), second.files, CFG);
   assert.ok(res.results.some((r) => r['Per Nbr'] === '100' && r['Sent As'] === 'Verification'), 'first upload still there');
