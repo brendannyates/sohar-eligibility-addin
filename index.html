@@ -112,6 +112,24 @@
           <p class="hint">Messages list patients by location with LASFIR and Per Nbr: who needs action (including which NextGen insurance to choose after discovery), or whose deductible or OOP max is met or approaching. Send inside Outlook or Teams only. The benefits CSV is for importing into the TMS Tracker.</p>
         </div>
       </li>
+
+      <li class="step" id="step6" data-step="6">
+        <div class="num">6</div>
+        <div class="body">
+          <h2>Cross-check the IR Portal</h2>
+          <p class="hint">Upload the IR Portal workbook (its <b>Filtered</b> tab is read) or a CSV of it. Insurance items (missing insurance, missing demographics or verify insurance, out of network, authorization) are matched to the Sohar results by MRN, then name and DOB, with a suggested fix. Written to the <b>IR Cross-Ref</b> sheet.</p>
+          <div class="actions">
+            <input type="file" id="fileIr" accept=".csv,.xlsx,.xlsm" hidden>
+            <button class="primary" id="btnIr">Upload IR Portal file</button>
+            <button class="link" data-goto="IR Cross-Ref">Open IR Cross-Ref</button>
+          </div>
+          <div id="irResult" class="result" hidden></div>
+          <div class="actions">
+            <button class="primary alt" id="btnCopyIr" disabled>Copy IR message</button>
+            <button class="primary alt" id="btnDlIr" disabled>Download IR cross-reference CSV</button>
+          </div>
+        </div>
+      </li>
     </ol>
   </main>
 

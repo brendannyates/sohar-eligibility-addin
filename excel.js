@@ -188,8 +188,8 @@
     });
   }
 
-  /** Insert the first sheet of an .xlsx (base64) as a temporary sheet, hand its used range to fn, then remove it. */
-  async function withTempSheet(base64, fn) {
+  /** Insert an .xlsx (base64) as temporary sheets, hand the used range of the first (or the one matching prefer) to fn, then remove them. */
+  async function withTempSheet(base64, fn, prefer) {
     if (!canInsertWorkbook()) throw new Error('This version of Excel cannot open .xlsx files from the pane. Save the file as CSV and upload that, or paste it into the sheet.');
     return run(async (ctx) => {
       const inserted = ctx.workbook.insertWorksheetsFromBase64(base64, { positionType: Excel.WorksheetPositionType.end });
@@ -197,7 +197,8 @@
       const names = inserted.value || [];
       if (!names.length) throw new Error('That workbook has no sheets.');
       try {
-        const used = ctx.workbook.worksheets.getItem(names[0]).getUsedRangeOrNullObject(true);
+        const pick = (prefer && names.find((n) => prefer.test(n))) || names[0];
+        const used = ctx.workbook.worksheets.getItem(pick).getUsedRangeOrNullObject(true);
         used.load('isNullObject,rowCount,columnCount');
         await ctx.sync();
         return await fn(ctx, used);
@@ -219,20 +220,22 @@
     });
   }
 
-  /** Values of the first sheet of an uploaded .xlsx (Sohar results saved from Excel). */
-  async function readXlsxRows(base64) {
+  /** Values of the first sheet of an uploaded .xlsx (or the sheet whose name matches prefer, e.g. the IR Portal's Filtered tab). */
+  async function readXlsxRows(base64, prefer) {
     return withTempSheet(base64, async (ctx, used) => {
       if (used.isNullObject) return [];
       used.load('values');
       await ctx.sync();
       return used.values;
-    });
+    }, prefer);
   }
 
   const writeResults = (cols, rows) => writeAddinTable(SHEETS.results, RESULTS_TABLE, cols, rows, true);
   const writeTasks = (cols, rows) => writeAddinTable(SHEETS.tasks, TASKS_TABLE, cols, rows, false);
   // Excel on the web cannot download from the pane, so files go to an Export sheet (File > Export > Download as CSV).
   const writeExport = (cols, rows) => writeAddinTable('Export', 'tblExport', cols, rows, true);
+  const writeIr = (cols, rows) => writeAddinTable('IR Cross-Ref', 'tblIrCrossRef', cols, rows, true);
+  async function readIr() { try { return await readTable('tblIrCrossRef'); } catch (e) { return []; } }
   async function readTasks() { try { return await readTable(TASKS_TABLE); } catch (e) { return []; } }
 
   /** Mark one NextGen task done (or not) by Task Key. */
@@ -322,5 +325,5 @@
   }
 
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable,
-    writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, readTasks, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

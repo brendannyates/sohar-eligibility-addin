@@ -798,6 +798,128 @@
     };
   }
 
+  // ---------- IR Portal cross-reference ----------
+  // Column names follow the IR Portal Tracker add-in (Filtered tab; headers in row 1, data may start in column C).
+  const IR_HEADERS = {
+    id: ['incident id', 'incident'], last: ['last name', 'last'], first: ['first name', 'first'], dob: ['dob', 'date of birth'],
+    desc: ['description', 'description option', 'description type'], fac: ['facility', 'location'], mrn: ['mrn'],
+    dos: ['dos', 'date of service'], prov: ['provider', 'rendering provider'], due: ['due date', 'due'], act: ['last activity'],
+  };
+  const IR_COLS = ['Category', 'Description', 'Incident ID', 'DOS', 'Due Date', 'Facility', 'Provider', 'MRN', 'Last Name', 'First Name',
+    'Per Nbr', 'Next Appt', 'Next Location', 'Sohar Result', 'Sohar Payer', 'Plan', 'Coverage Start', 'Coverage End', 'Benefit Flag',
+    'Choose in NextGen', 'Open NextGen Tasks', 'Suggested Action', 'Match'];
+
+  /** Insurance-relevant IR Portal descriptions only; everything else (signatures, charts, Dx) returns ''. */
+  function irCategory(desc) {
+    const d = str(desc).toLowerCase();
+    if (/missing insurance/.test(d)) return 'Missing insurance';
+    if (/verify insurance|insurance on file inactive|member not found/.test(d)) return 'Verify insurance';
+    if (/missing demo/.test(d)) return 'Missing demographics';
+    if (/out of network/.test(d)) return 'Out of network';
+    if (/auth/.test(d)) return 'Authorization';
+    return '';
+  }
+
+  /** IR Portal rows (2D) -> {records} or {error}. Finds the header row by name, wherever the columns start. */
+  function parseIrPortal(rows) {
+    const want = (h) => Object.keys(IR_HEADERS).find((k) => IR_HEADERS[k].includes(str(h).toLowerCase()));
+    const hi = (rows || []).slice(0, 30).findIndex((r) => { const ks = (r || []).map(want); return ks.includes('mrn') && ks.includes('desc'); });
+    if (hi < 0) return { error: 'This does not look like the IR Portal Filtered tab: it needs MRN and Description columns.' };
+    const idx = {};
+    rows[hi].forEach((h, i) => { const k = want(h); if (k && idx[k] == null) idx[k] = i; });
+    const records = [];
+    for (const r of rows.slice(hi + 1)) {
+      if (!(r || []).some((v) => !isBlank(v))) continue;
+      const o = {};
+      for (const [k, i] of Object.entries(idx)) o[k] = r[i];
+      if (isBlank(o.mrn) && isBlank(o.last)) continue;
+      records.push(o);
+    }
+    return { records };
+  }
+
+  function irAction(cat, ver, disc, dos) {
+    const payer = (r) => r['Sohar Payer'] || r['NextGen Payer'] || 'the payer';
+    const verOk = ver && /^complete\.eligible/i.test(ver['Sohar Status']);
+    const verBad = ver && /^complete\.ineligible/i.test(ver['Sohar Status']);
+    const found = disc && disc['Sohar Status'] === 'Coverage found';
+    const none = disc && disc['Sohar Status'] === 'No coverage found';
+    const start = ver ? parseDate(ver['Coverage Start']) : null;
+    const lateStart = start && dos && start > dos ? ` Coverage started ${fmtDate(start)}, after the ${fmtDate(dos)} DOS.` : '';
+    const pick = found && disc['Choose in NextGen'] ? ` (${disc['Choose in NextGen']})` : '';
+    if (!ver && !disc) return 'Not in this Sohar run. Send for discovery (no insurance) or verification (insurance on file).';
+    if (cat === 'Missing insurance' || cat === 'Missing demographics') {
+      if (found) return `Sohar found ${payer(disc)}. Add it in NextGen${pick}, then resolve the IR item.`;
+      if (verOk) return `Sohar verified ${payer(ver)} active${ver.Plan ? ` (${ver.Plan})` : ''}. Confirm it is on the patient in NextGen and on the claim, then resolve the IR item.${lateStart}`;
+      if (none) return 'Sohar found no coverage. Confirm self-pay or get the card from the patient.';
+      if (verBad) return `Sohar shows ${payer(ver)} inactive. Get current insurance from the patient.`;
+    }
+    if (cat === 'Verify insurance') {
+      if (verOk) return `Sohar shows ${payer(ver)} active now. Check it covered the DOS before rebilling.${lateStart}`;
+      if (verBad) return `Sohar agrees ${payer(ver)} is inactive. Run discovery or get new insurance from the patient.`;
+      if (found) return `Sohar found ${payer(disc)}. Update NextGen${pick} and rebill.`;
+      if (none) return 'Sohar found no coverage. Confirm self-pay or get the card.';
+    }
+    if (cat === 'Out of network') return `Sohar shows ${payer(ver || disc)}${ver && ver.Network ? `, network type ${ver.Network}` : ''}. Sohar does not check provider participation; confirm the network with the payer.`;
+    if (cat === 'Authorization') return `Insurance per Sohar: ${payer(ver || disc)}${ver && ver.Plan ? ` (${ver.Plan})` : ''}. Sohar does not check authorizations; request or update the auth.`;
+    return (ver || disc).Action || 'Review.';
+  }
+
+  /**
+   * IR Portal items that touch insurance, joined to Sohar results and open NextGen tasks for the same patient.
+   * Match: MRN (ignoring punctuation and leading zeros), else last + first name + DOB.
+   */
+  function irCrossReference(irRecords, results, tasks) {
+    const mk = (v) => str(v).toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/^0+/, '');
+    const byMrn = new Map(), byName = new Map();
+    for (const r of results || []) {
+      if (r.Match === 'No match') continue;
+      const m = mk(r.MRN);
+      if (m) { if (!byMrn.has(m)) byMrn.set(m, []); byMrn.get(m).push(r); }
+      if (r['Last Name'] && r.DOB) { const k = `${nameKey(r['First Name'], r['Last Name'])}|${r.DOB}`; if (!byName.has(k)) byName.set(k, []); byName.get(k).push(r); }
+    }
+    const openTasks = (per) => (tasks || []).filter((t) => t['Per Nbr'] === per && !str(t.Done)).map((t) => t.Task);
+    const out = [];
+    for (const ir of irRecords || []) {
+      const cat = irCategory(ir.desc);
+      if (!cat) continue;
+      const dos = parseDate(ir.dos), due = parseDate(ir.due), dob = parseDate(ir.dob);
+      let rs = byMrn.get(mk(ir.mrn)) || [], match = rs.length ? 'MRN' : '';
+      if (!rs.length && dob) { rs = byName.get(`${nameKey(ir.first, ir.last)}|${fmtDate(dob)}`) || []; if (rs.length) match = 'Name + DOB'; }
+      const latest = (kind) => rs.filter((r) => r['Sent As'] === kind && r['Sohar Status'] !== 'Not in Sohar file').sort((a, b) => String(b['Sohar Date']).localeCompare(String(a['Sohar Date'])))[0];
+      const ver = latest('Verification'), disc = latest('Discovery'), any = ver || disc || rs[0] || {};
+      out.push({
+        'Category': cat, 'Description': str(ir.desc), 'Incident ID': str(ir.id), 'DOS': fmtDate(dos), 'Due Date': fmtDate(due),
+        'Facility': str(ir.fac), 'Provider': str(ir.prov), 'MRN': str(ir.mrn), 'Last Name': str(ir.last), 'First Name': str(ir.first),
+        'Per Nbr': any['Per Nbr'] || '', 'Next Appt': any['Next Appt'] || '', 'Next Location': any['Next Location'] || '',
+        'Sohar Result': [ver ? `Verification: ${ver['Sohar Status']}` : '', disc ? `Discovery: ${disc['Sohar Status']}` : ''].filter(Boolean).join('; ') || (rs.length ? 'Not in Sohar file' : 'No Sohar result'),
+        'Sohar Payer': (ver && ver['Sohar Payer']) || (disc && disc['Sohar Payer']) || '', 'Plan': (ver && ver.Plan) || '',
+        'Coverage Start': (ver && ver['Coverage Start']) || '', 'Coverage End': (ver && ver['Coverage End']) || '',
+        'Benefit Flag': (ver && ver['Benefit Flag']) || '', 'Choose in NextGen': (disc && disc['Choose in NextGen']) || '',
+        'Open NextGen Tasks': any['Per Nbr'] ? openTasks(any['Per Nbr']).join('; ') : '',
+        'Suggested Action': irAction(cat, ver, disc, dos), 'Match': match || 'No Sohar result',
+      });
+    }
+    // Most urgent first: due date, then DOS.
+    const t = (s) => (s ? parseDate(s).getTime() : Infinity);
+    out.sort((a, b) => t(a['Due Date']) - t(b['Due Date']) || t(a.DOS) - t(b.DOS) || a.Facility.localeCompare(b.Facility));
+    return out;
+  }
+
+  /** Cross-reference as a note for admins, by facility. LASFIR + MRN last 4 only. */
+  function irMessage(rows) {
+    if (!rows.length) return 'IR Portal cross-check: no insurance-related IR items.\n';
+    const byFac = new Map();
+    for (const r of rows) { const f = r.Facility || 'No facility'; if (!byFac.has(f)) byFac.set(f, []); byFac.get(f).push(r); }
+    const lines = [`IR Portal cross-check with Sohar: ${rows.length} insurance-related item${rows.length > 1 ? 's' : ''}.`, ''];
+    for (const [f, list] of [...byFac].sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`${f} (${list.length})`);
+      for (const r of list) lines.push(`- ${lasfir(r['Last Name'], r['First Name'])} · MRN ...${String(r.MRN).slice(-4)} · DOS ${r.DOS || '?'} · ${r.Category}: ${r['Suggested Action']}`);
+      lines.push('');
+    }
+    return lines.join('\n').trim() + '\n';
+  }
+
   /** Verified patients' benefits, one row per Per Nbr (latest Sohar result wins). Contract for the TMS Tracker import. */
   function benefitsExport(results) {
     const by = new Map();
@@ -820,7 +942,8 @@
   }
 
   return {
-    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, BENEFITS_EXPORT_COLS, TASK_COLS, TASK_TYPES, HEADER_SYNONYMS,
+    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, BENEFITS_EXPORT_COLS, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
+    irCategory, parseIrPortal, irCrossReference, irMessage,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,
     resultKind, readResultRows, mergeSoharResults, benefitFields, accumulatorStatus, benefitFlag, benefitsExport, buildTasks, taskMessage, keepDone, chunkMessage, messageAssembler, workQueue, lasfir, adminMessage,

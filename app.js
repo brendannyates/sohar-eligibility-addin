@@ -1,11 +1,11 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.4.1';
+  const VERSION = '0.5.0';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
-  const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, pendingFocus: '', demo: false };
+  const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, pendingFocus: '', demo: false };
   const $ = (id) => document.getElementById(id);
 
   // ---------- boot ----------
@@ -58,6 +58,14 @@
     $('btnDlTasks').addEventListener('click', () => guard(async () => saveCSV(`nextgen_tasks_${stamp()}.csv`, C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
     $('btnFull').addEventListener('click', () => guard(() => openFull(), 'resultsResult'));
     $('btnFull2').addEventListener('click', () => guard(() => openFull('upload'), 'resultsResult'));
+    $('btnIr').addEventListener('click', () => $('fileIr').click());
+    $('fileIr').addEventListener('change', (e) => guard(() => uploadIr(e.target), 'irResult'));
+    $('btnCopyIr').addEventListener('click', () => guard(async () => {
+      const text = C.irMessage(await currentIr());
+      if (await copyText(text)) note('irResult', 'IR message copied. Paste it into Outlook or Teams.', 'ok');
+      else note('irResult', 'Copy is blocked here. Open full screen > Messages to copy it.', 'warn');
+    }, 'irResult'));
+    $('btnDlIr').addEventListener('click', () => guard(async () => saveCSV(`ir_portal_cross_reference_${stamp()}.csv`, C.IR_COLS, await currentIr(), 'irResult'), 'irResult'));
     diagnostics();
     document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => X.activate(b.dataset.goto)));
     $('scope').addEventListener('change', () => X.setConfigValue('Scope', $('scope').value === 'all' ? 'All patients' : 'Upcoming appointments').catch(() => {}));
@@ -316,6 +324,40 @@
     return html;
   }
 
+  // ---------- step 6: IR Portal cross-check ----------
+  async function uploadIr(input) {
+    const f = input.files && input.files[0];
+    input.value = '';
+    if (!f) return;
+    busy('btnIr', 'Matching…');
+    const box = $('irResult'); box.hidden = false; box.innerHTML = '';
+    try {
+      let rows;
+      if (isCSV(f)) rows = C.parseCSV(await readText(f));
+      else if (isXlsx(f)) rows = await X.readXlsxRows(await readBase64(f), /^filtered/i);
+      else throw new Error(`${f.name} is not .csv or .xlsx.`);
+      const parsed = C.parseIrPortal(rows);
+      if (parsed.error) throw new Error(parsed.error);
+      const results = (await currentResults()) || [];
+      if (!results.length) throw new Error('Upload the Sohar results first (step 5); the IR items are matched against them.');
+      const ir = C.irCrossReference(parsed.records, results, await currentTasks());
+      await X.writeIr(C.IR_COLS, ir);
+      state.ir = ir;
+      const by = {}; for (const r of ir) by[r.Category] = (by[r.Category] || 0) + 1;
+      const matched = ir.filter((r) => r.Match !== 'No Sohar result').length;
+      box.innerHTML = `<p class="ok">${parsed.records.length} IR Portal rows read; ${ir.length} are insurance-related, ${matched} matched to a Sohar result.</p>
+        <p>${Object.entries(by).map(([k, v]) => `${esc(k)}: ${v}`).join(' · ') || 'No insurance-related items.'}</p>
+        ${ir.length - matched ? `<p class="warn">${ir.length - matched} item${ir.length - matched > 1 ? 's have' : ' has'} no Sohar result; the IR Cross-Ref sheet says to send them to Sohar.</p>` : ''}`;
+      $('btnCopyIr').disabled = false; $('btnDlIr').disabled = false;
+      markDone(6);
+      if (dlg) await sendToDialog(await payload());
+    } finally { unbusy('btnIr', 'Upload IR Portal file'); }
+  }
+  async function currentIr() {
+    if (state.ir) return state.ir;
+    return state.demo ? [] : X.readIr();
+  }
+
   async function currentResults() {
     if (state.results) return state.results;
     if (state.demo) return null;
@@ -343,7 +385,7 @@
 
   async function payload(focus) {
     return {
-      type: 'data', focus: focus || '', web: isWeb(), results: (await currentResults()) || [], tasks: await currentTasks(),
+      type: 'data', focus: focus || '', web: isWeb(), results: (await currentResults()) || [], tasks: await currentTasks(), ir: await currentIr(),
       exports: state.exports || null, scope: state.cfg ? state.cfg.scope : 'upcoming',
       asOf: state.resultsAsOf ? state.resultsAsOf.toISOString() : null,
     };
@@ -518,7 +560,7 @@
       async writeImportRows(r) { rows = r; },
       async importXlsx() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
       async readXlsxRows() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
-      async writeResults() {}, async writeTasks() {}, async readTasks() { return []; }, async setTaskDone() {},
+      async writeResults() {}, async writeTasks() {}, async readTasks() { return []; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
       async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA' }, defaultState: '', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },

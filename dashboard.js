@@ -4,7 +4,7 @@
   'use strict';
   const C = window.SoharCore;
   const $ = (id) => document.getElementById(id);
-  let rows = [], tasks = [], exportsData = null, scope = 'upcoming', asOf = null, list = [], tab = 'prep';
+  let rows = [], tasks = [], irRows = [], exportsData = null, scope = 'upcoming', asOf = null, list = [], tab = 'prep';
   let inOffice = false, web = false;
   const take = C.messageAssembler();
 
@@ -34,7 +34,7 @@
   }
 
   function load(m) {
-    rows = m.results || []; tasks = m.tasks || []; exportsData = m.exports || null; scope = m.scope || 'upcoming'; web = !!m.web;
+    rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
     $('dStatus').textContent = rows.length
       ? `${rows.length} Sohar results, ${tasks.filter(open).length} open NextGen tasks${asOf ? `, appointments from ${C.fmtDate(asOf)}` : ''}.`
@@ -145,7 +145,9 @@
 
   function renderMessage() {
     const mode = $('msgMode').value;
-    $('msg').value = mode === 'tasks' ? C.taskMessage(filteredTasks().filter(open), { asOf }) : C.adminMessage(rows.filter(shared), { asOf, mode });
+    $('msg').value = mode === 'tasks' ? C.taskMessage(filteredTasks().filter(open), { asOf })
+      : mode === 'ir' ? (irRows.length ? C.irMessage(irRows) : 'No IR Portal cross-check yet. Upload the IR Portal file in step 6 of the pane.\n')
+      : C.adminMessage(rows.filter(shared), { asOf, mode });
   }
 
   // ---------- patient view ----------
@@ -220,6 +222,10 @@
     } else if (kind === 'tasks') { name = `nextgen_tasks_open_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks.filter(open); }
     else if (kind === 'allTasks') { name = `nextgen_tasks_all_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks; }
     else if (kind === 'benefits') { name = `sohar_benefits_${stamp()}.csv`; cols = C.BENEFITS_EXPORT_COLS; data = C.benefitsExport(rows); }
+    else if (kind === 'ir') {
+      if (!irRows.length) { notice('No IR Portal cross-check yet. Upload the IR Portal file in step 6 of the pane.', false); return; }
+      name = `ir_portal_cross_reference_${stamp()}.csv`; cols = C.IR_COLS; data = irRows;
+    }
     else { name = `sohar_results_filtered_${stamp()}.csv`; cols = C.RESULTS_COLS; data = filteredRows(); }
     // Excel on the web blocks downloads here too, so the pane writes the rows to the Export sheet instead.
     if (inOffice && web) { notice('Writing to the Export sheet…', true); toPane({ type: 'export', name, cols, rows: data }); return; }
