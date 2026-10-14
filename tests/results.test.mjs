@@ -184,3 +184,46 @@ test('adminMessage: action list and benefits list, LASFIR not full names', () =>
   assert.doesNotMatch(ben, /LINSVE|BYRNIA/, 'not-met and ineligible patients are left out');
   assert.equal(C.lasfir("O'Neil", 'Al'), 'ONEAL');
 });
+
+test('buildTasks lists what to add or update in NextGen, soonest visit first', () => {
+  const tasks = C.buildTasks(merged().results);
+  for (const t of tasks) assert.deepEqual(Object.keys(t), C.TASK_COLS);
+  const of = (per) => tasks.filter((t) => t['Per Nbr'] === per).map((t) => t.Task);
+  assert.deepEqual(of('100'), ['Update benefits in NextGen']);
+  assert.match(tasks.find((t) => t['Per Nbr'] === '100').Details, /Copay 40; Coinsurance 20%; Deductible 1500 \(0 left, Met\); OOP max 5000 \(800 left, Approaching\); Level IND; Plan SYNTH GOLD PPO/);
+  assert.deepEqual(of('101'), ['Add insurance in NextGen'], 'discovery found coverage, NextGen has none');
+  assert.match(tasks.find((t) => t['Per Nbr'] === '101').Details, /Choose Cigna\. Member ID: open the Sohar link\./);
+  assert.deepEqual(of('102'), ['Update insurance in NextGen'], 'ineligible');
+  assert.deepEqual(of('103'), ['Add insurance in NextGen']);
+  assert.deepEqual(of('105'), ['Update insurance in NextGen', 'Update benefits in NextGen'], 'coverage ends before visit, plus benefits');
+  const refs = tasks.filter((t) => !t['Per Nbr']).map((t) => t.Task).sort();
+  assert.deepEqual(refs, ['Find patient for Sohar result', 'Find patient for Sohar result']);
+  assert.equal(tasks[0]['Due By'], '10/20/2026');
+  assert.equal(tasks[0]['Per Nbr'], '100', 'same day sorts by time: 12:00 PM before later visits');
+});
+
+test('keepDone carries Done marks across rebuilds by Task Key', () => {
+  const tasks = C.buildTasks(merged().results);
+  const prev = [{ 'Task Key': '100|Update benefits in NextGen', Done: 'Yes' }, { 'Task Key': 'gone|x', Done: 'Yes' }];
+  const kept = C.keepDone(tasks, prev);
+  assert.equal(kept.find((t) => t['Task Key'] === '100|Update benefits in NextGen').Done, 'Yes');
+  assert.equal(kept.filter((t) => t.Done).length, 1);
+});
+
+test('chunkMessage and messageAssembler round-trip a large payload in pieces', () => {
+  const big = { type: 'data', results: Array.from({ length: 500 }, (_, i) => ({ 'Per Nbr': String(i), Action: 'x'.repeat(100) })) };
+  const pieces = C.chunkMessage(big, 5000);
+  assert.ok(pieces.length > 5);
+  const take = C.messageAssembler();
+  let out = null;
+  for (const p of pieces.reverse()) out = take(p) || out; // order does not matter
+  assert.deepEqual(out, big);
+  assert.deepEqual(take(JSON.stringify({ type: 'ready' })), { type: 'ready' });
+});
+
+test('taskMessage lists open tasks only, LASFIR not names', () => {
+  const tasks = C.keepDone(C.buildTasks(merged().results), [{ 'Task Key': '100|Update benefits in NextGen', Done: 'Yes' }]);
+  const msg = C.taskMessage(tasks);
+  assert.match(msg, /OKACHI · Per 101 · Add insurance in NextGen: Choose Cigna\./);
+  assert.doesNotMatch(msg, /RIVANA|Okafor|Chidi/, 'done task and full names left out');
+});

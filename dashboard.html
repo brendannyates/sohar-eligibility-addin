@@ -5,54 +5,32 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
-  <title>Sohar Results worklist</title>
+  <title>Sohar eligibility, full screen</title>
   <link rel="stylesheet" href="style.css">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
   <header class="top">
     <div class="titlebar">
-      <h1>Sohar results worklist</h1>
+      <h1>Sohar eligibility</h1>
       <button class="small" id="btnClose" hidden>Close</button>
     </div>
     <p id="dStatus" class="status">Waiting for data from the pane…</p>
   </header>
 
-  <main class="dash-main">
-    <section class="tiles" aria-label="Work queue">
-      <button class="tile act" data-queue="Action needed"><span class="n" id="tAct">0</span><span class="l">action needed</span></button>
-      <button class="tile unm" data-queue="Unmatched"><span class="n" id="tUnm">0</span><span class="l">unmatched</span></button>
-      <button class="tile pen" data-queue="Pending"><span class="n" id="tPen">0</span><span class="l">pending</span></button>
-      <button class="tile clr" data-queue="Clear"><span class="n" id="tClr">0</span><span class="l">clear</span></button>
-    </section>
-    <section class="tiles" aria-label="Benefits">
-      <button class="tile ben" data-benefit="dedMet"><span class="n" id="tDedMet">0</span><span class="l">deductible met</span></button>
-      <button class="tile appr" data-benefit="dedAppr"><span class="n" id="tDedAppr">0</span><span class="l">deductible approaching</span></button>
-      <button class="tile ben" data-benefit="oopMet"><span class="n" id="tOopMet">0</span><span class="l">OOP max met</span></button>
-      <button class="tile appr" data-benefit="oopAppr"><span class="n" id="tOopAppr">0</span><span class="l">OOP max approaching</span></button>
-    </section>
-    <p id="benNote" class="hint warn-text" hidden>No benefit amounts in these results. Upload Sohar's full verification output to see deductible and OOP status.</p>
+  <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" data-tab="prep" aria-selected="true">Prep by appointment</button>
+    <button role="tab" data-tab="worklist">Worklist</button>
+    <button role="tab" data-tab="tasks">NextGen tasks <span id="taskCount" class="badge"></span></button>
+    <button role="tab" data-tab="messages">Messages</button>
+    <button role="tab" data-tab="upload">Upload &amp; save</button>
+  </nav>
 
-    <section class="filters" aria-label="Filters">
-      <label>Work queue
-        <select id="fQueue">
-          <option value="">All</option>
-          <option>Action needed</option><option>Unmatched</option><option>Pending</option><option>Clear</option>
-        </select>
-      </label>
-      <label>Benefits
-        <select id="fBen">
-          <option value="">Any</option>
-          <option value="anyFlag">Met or approaching</option>
-          <option value="dedMet">Deductible met</option>
-          <option value="dedAppr">Deductible approaching</option>
-          <option value="oopMet">OOP max met</option>
-          <option value="oopAppr">OOP max approaching</option>
-          <option value="noDed">No deductible</option>
-          <option value="unknown">No benefit data</option>
-        </select>
-      </label>
-      <label>Sent as
+  <main class="dash-main">
+    <p id="notice" class="notice" hidden></p>
+
+    <section class="filters" id="sharedFilters" aria-label="Filters">
+      <label>Result type
         <select id="fSent"><option value="">Both</option><option>Verification</option><option>Discovery</option></select>
       </label>
       <label>Location
@@ -63,32 +41,118 @@
       <label class="grow">Search <input id="fText" type="search" placeholder="Name, Per Nbr, MRN, payer, plan"></label>
     </section>
 
-    <div class="actions">
-      <label class="inline">Message
-        <select id="msgMode"><option value="action">Who needs action</option><option value="benefits">Deductible / OOP met or approaching</option></select>
-      </label>
-      <button class="primary" id="btnCopy">Copy message</button>
-      <button class="primary alt" id="btnCsv">Download filtered CSV</button>
-      <button class="primary alt" id="btnBen">Download benefits CSV (TMS Tracker)</button>
-      <span id="shown" class="hint"></span>
-    </div>
+    <!-- Prep by appointment -->
+    <section class="panel" data-panel="prep">
+      <p class="hint">Each upcoming visit day, soonest first, with what Sohar returned and what still has to change in NextGen. Click a patient for the full view.</p>
+      <div id="prepList"></div>
+    </section>
 
-    <div class="tablewrap">
-      <table id="tbl">
-        <thead><tr>
-          <th>Next appt</th><th>Location</th><th>Patient</th><th>Per Nbr</th><th>Sent as</th><th>Sohar status</th><th>Queue</th>
-          <th>Action</th><th>Choose in NextGen</th><th>Benefits</th><th>Copay</th><th>Coins</th>
-          <th>Deductible left</th><th>OOP left</th><th>Plan</th><th>Link</th>
-        </tr></thead>
-        <tbody></tbody>
-      </table>
-    </div>
+    <!-- Worklist -->
+    <section class="panel" data-panel="worklist" hidden>
+      <section class="tiles" aria-label="Work queue">
+        <button class="tile act" data-queue="Action needed"><span class="n" id="tAct">0</span><span class="l">action needed</span></button>
+        <button class="tile unm" data-queue="Unmatched"><span class="n" id="tUnm">0</span><span class="l">unmatched</span></button>
+        <button class="tile pen" data-queue="Pending"><span class="n" id="tPen">0</span><span class="l">pending</span></button>
+        <button class="tile clr" data-queue="Clear"><span class="n" id="tClr">0</span><span class="l">clear</span></button>
+        <button class="tile ben" data-benefit="dedMet"><span class="n" id="tDedMet">0</span><span class="l">deductible met</span></button>
+        <button class="tile appr" data-benefit="dedAppr"><span class="n" id="tDedAppr">0</span><span class="l">deductible approaching</span></button>
+        <button class="tile ben" data-benefit="oopMet"><span class="n" id="tOopMet">0</span><span class="l">OOP max met</span></button>
+        <button class="tile appr" data-benefit="oopAppr"><span class="n" id="tOopAppr">0</span><span class="l">OOP max approaching</span></button>
+      </section>
+      <p id="benNote" class="hint warn-text" hidden>No benefit amounts in these results. Upload Sohar's full verification output to see deductible and OOP status.</p>
+      <div class="filters">
+        <label>Work queue
+          <select id="fQueue"><option value="">All</option><option>Action needed</option><option>Unmatched</option><option>Pending</option><option>Clear</option></select>
+        </label>
+        <label>Benefits
+          <select id="fBen">
+            <option value="">Any</option>
+            <option value="anyFlag">Met or approaching</option>
+            <option value="dedMet">Deductible met</option>
+            <option value="dedAppr">Deductible approaching</option>
+            <option value="oopMet">OOP max met</option>
+            <option value="oopAppr">OOP max approaching</option>
+            <option value="noDed">No deductible</option>
+            <option value="unknown">No benefit data</option>
+          </select>
+        </label>
+        <span id="shown" class="hint"></span>
+      </div>
+      <div class="tablewrap">
+        <table id="tbl">
+          <thead><tr>
+            <th>Next appt</th><th>Location</th><th>Patient</th><th>Per Nbr</th><th>Result</th><th>Sohar status</th><th>Queue</th>
+            <th>Action</th><th>Choose in NextGen</th><th>Benefits</th><th>Copay</th><th>Coins</th>
+            <th>Deductible left</th><th>OOP left</th><th>Plan</th><th>Link</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- NextGen tasks -->
+    <section class="panel" data-panel="tasks" hidden>
+      <div class="filters">
+        <label>Show
+          <select id="fDone"><option value="open">Open</option><option value="done">Done</option><option value="">All</option></select>
+        </label>
+        <label>Task
+          <select id="fTask"><option value="">All tasks</option></select>
+        </label>
+        <span id="taskShown" class="hint"></span>
+      </div>
+      <p class="hint">Ticking Done writes "Yes" to the NextGen Tasks sheet. Done marks stay when results are uploaded again.</p>
+      <div class="tablewrap">
+        <table id="tasksTbl">
+          <thead><tr><th>Done</th><th>Due by</th><th>Location</th><th>Patient</th><th>Per Nbr</th><th>Result</th><th>Task</th><th>Details</th><th>Choose in NextGen</th><th>Link</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Messages -->
+    <section class="panel" data-panel="messages" hidden>
+      <div class="actions">
+        <label class="inline">Message
+          <select id="msgMode">
+            <option value="tasks">Open NextGen tasks</option>
+            <option value="action">Who needs action</option>
+            <option value="benefits">Deductible / OOP met or approaching</option>
+          </select>
+        </label>
+        <button class="primary" id="btnCopy">Copy message</button>
+      </div>
+      <label class="msgbox">Uses the filters above. LASFIR + Per Nbr only; send inside Outlook or Teams only.
+        <textarea id="msg" rows="16" readonly></textarea>
+      </label>
+    </section>
+
+    <!-- Upload & save -->
+    <section class="panel" data-panel="upload" hidden>
+      <div class="cols2">
+        <div>
+          <h2>Upload Sohar outputs</h2>
+          <p class="hint">Verification output and discovery output from the Sohar run (.csv or .xlsx; both at once is fine). They are matched to the appointment report on the Import sheet, and the Sohar Results and NextGen Tasks sheets are rebuilt. Done marks are kept.</p>
+          <input type="file" id="fileUp" accept=".csv,.xlsx,.xlsm" multiple hidden>
+          <div id="drop" class="drop" tabindex="0" role="button">Drop files here, or <u>choose files</u></div>
+          <p id="upState" class="hint"></p>
+        </div>
+        <div>
+          <h2>Save files</h2>
+          <p class="hint">Sohar imports come from the last Build in the pane. The rest come from the results loaded here.</p>
+          <div class="savelist">
+            <button class="primary alt" data-save="verification">Verification import (for Sohar)</button>
+            <button class="primary alt" data-save="discovery">Discovery import (for Sohar)</button>
+            <button class="primary alt" data-save="tasks">NextGen tasks (open)</button>
+            <button class="primary alt" data-save="allTasks">NextGen tasks (all)</button>
+            <button class="primary alt" data-save="benefits">Benefits (TMS Tracker)</button>
+            <button class="primary alt" data-save="worklist">Worklist (filtered)</button>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <section id="detail" class="detail" hidden aria-live="polite"></section>
-
-    <label class="msgbox">Message (LASFIR + Per Nbr only; send inside Outlook or Teams only)
-      <textarea id="msg" rows="8" readonly></textarea>
-    </label>
   </main>
 
   <script src="core.js"></script>

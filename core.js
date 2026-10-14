@@ -21,6 +21,9 @@
     'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status',
     'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Coverage Differs', 'Match',
     'Sohar Ref', 'Sohar Link', 'Sohar Date'];
+  // NextGen Tasks sheet (created by the add-in). Done survives rebuilds via Task Key.
+  const TASK_COLS = ['Done', 'Due By', 'Next Appt', 'Next Time', 'Next Location', 'Per Nbr', 'MRN', 'Last Name', 'First Name', 'Result Type',
+    'Task', 'Details', 'Choose in NextGen', 'Sohar Link', 'Sohar Ref', 'Task Key'];
   // Benefits CSV for the TMS Tracker. Treat as a contract: add columns at the end only.
   const BENEFITS_EXPORT_COLS = ['Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB', 'Sohar Payer', 'Plan', 'Network', 'Coverage Level',
     'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status',
@@ -683,6 +686,118 @@
     return { results, unknownFiles, counts, asOf };
   }
 
+  // ---------- NextGen task list ----------
+  const TASK_TYPES = ['Add insurance in NextGen', 'Update insurance in NextGen', 'Fix member ID in NextGen', 'Fix name in NextGen',
+    'Update benefits in NextGen', 'Add payer to Payer Map', 'Confirm self-pay or get card', 'Find patient for Sohar result', 'Resend to Sohar', 'Send for verification'];
+
+  /**
+   * One task per thing an admin has to do in NextGen (or the Payer Map) before the visit.
+   * Every eligible verification with benefits gets an "Update benefits" task with the values to enter,
+   * because the appointment report does not show what NextGen currently holds.
+   */
+  function buildTasks(results) {
+    const tasks = [];
+    const add = (r, task, details) => {
+      const key = `${r['Per Nbr'] || 'ref:' + r['Sohar Ref']}|${task}`;
+      tasks.push({
+        'Done': '', 'Due By': r['Next Appt'], 'Next Appt': r['Next Appt'], 'Next Time': r['Next Time'], 'Next Location': r['Next Location'],
+        'Per Nbr': r['Per Nbr'], 'MRN': r.MRN, 'Last Name': r['Last Name'], 'First Name': r['First Name'], 'Result Type': r['Sent As'],
+        'Task': task, 'Details': details, 'Choose in NextGen': r['Choose in NextGen'] || '', 'Sohar Link': r['Sohar Link'], 'Sohar Ref': r['Sohar Ref'], 'Task Key': key,
+      });
+    };
+    const benefitText = (r) => [
+      r.Copay !== '' ? `Copay ${r.Copay}` : '', r.Coinsurance ? `Coinsurance ${r.Coinsurance}` : '',
+      r.Deductible !== '' ? `Deductible ${r.Deductible} (${r['Deductible Remaining'] || 0} left, ${r['Deductible Status'] || '?'})` : '',
+      r['OOP Max'] !== '' ? `OOP max ${r['OOP Max']} (${r['OOP Remaining'] || 0} left, ${r['OOP Status'] || '?'})` : '',
+      r['Coverage Level'] ? `Level ${r['Coverage Level']}` : '', r.Plan ? `Plan ${r.Plan}` : '',
+      r['Coverage Start'] || r['Coverage End'] ? `Coverage ${r['Coverage Start'] || '?'} to ${r['Coverage End'] || 'open'}` : '',
+    ].filter(Boolean).join('; ');
+    for (const r of results || []) {
+      const status = String(r['Sohar Status'] || '').toLowerCase();
+      const memberHint = r['Sohar Member ID'] ? `Member ID ${r['Sohar Member ID']}.` : 'Member ID: open the Sohar link.';
+      if (r.Match === 'No match') { add(r, 'Find patient for Sohar result', `Sohar ${r['Sent As'].toLowerCase()} result did not match the Import report. ${r.Action}`); continue; }
+      if (status === 'not in sohar file') { add(r, 'Resend to Sohar', 'Upcoming patient missing from the Sohar results.'); continue; }
+      if (r['Sent As'] === 'Discovery') {
+        if (status !== 'coverage found') { if (status === 'no coverage found') add(r, 'Confirm self-pay or get card', 'Sohar found no coverage.'); continue; }
+        const choose = r['Choose in NextGen'] || '';
+        if (/^Not in Payer Map/.test(choose)) add(r, 'Add payer to Payer Map', `${r['Sohar Payer']} (${r['Sohar payerId']}) has no NextGen insurance in the Payer Map.`);
+        const pick = choose && !/^Not in Payer Map/.test(choose) ? `Choose ${choose.replace(/^One of: /, 'one of: ')}.` : `Sohar payer: ${r['Sohar Payer']}.`;
+        if (!r['NextGen Payer'] || /^self pay$/i.test(r['NextGen Payer'])) add(r, 'Add insurance in NextGen', `${pick} ${memberHint} Then send for verification to get benefits.`);
+        else if (r['Coverage Differs'] === 'Yes') add(r, 'Update insurance in NextGen', `NextGen has ${r['NextGen Payer']}; Sohar found ${r['Sohar Payer']}. Confirm with the patient. ${pick} ${memberHint}`);
+        else add(r, 'Send for verification', `Discovery matches NextGen (${r['NextGen Payer']}). Verify to get benefits.`);
+        continue;
+      }
+      // Verification
+      if (status.startsWith('complete.ineligible')) add(r, 'Update insurance in NextGen', `Sohar: ${r['Sohar Status']} for ${r['Sohar Payer'] || r['NextGen Payer']}. Confirm current coverage with the patient; consider discovery.`);
+      else if (status === 'error.member.id') add(r, 'Fix member ID in NextGen', `Sohar rejected member ID ${r['NextGen Member ID'] || '(blank)'} for ${r['NextGen Payer']}. Check the card, then re-verify.`);
+      else if (status === 'error.member.name') add(r, 'Fix name in NextGen', 'Sohar rejected the name. Match it to the insurance card, then re-verify.');
+      else if (status === 'complete.eligible') {
+        if (/^Coverage ends/.test(r.Action)) add(r, 'Update insurance in NextGen', r.Action);
+        const ben = benefitText(r);
+        if (ben) add(r, 'Update benefits in NextGen', ben);
+      }
+    }
+    const t = (x) => (x['Due By'] ? parseDate(x['Due By']).getTime() : Infinity);
+    const mins = (x) => { const m = String(x['Next Time'] || '').match(/(\d+):(\d+)\s*(AM|PM)/i); return m ? ((+m[1] % 12) + (/pm/i.test(m[3]) ? 12 : 0)) * 60 + +m[2] : 9999; };
+    tasks.sort((a, b) => t(a) - t(b) || mins(a) - mins(b) || String(a['Next Location']).localeCompare(String(b['Next Location'])) || String(a['Last Name']).localeCompare(String(b['Last Name'])) || TASK_TYPES.indexOf(a.Task) - TASK_TYPES.indexOf(b.Task));
+    return tasks;
+  }
+
+  /** Open tasks as a note for admins, by location then visit. LASFIR + Per Nbr only. */
+  function taskMessage(tasks, opts) {
+    const open = (tasks || []).filter((t) => !String(t.Done || '').trim());
+    if (!open.length) return 'NextGen tasks: nothing open.\n';
+    const byLoc = new Map();
+    for (const t of open) {
+      const loc = t['Next Location'] || 'No upcoming appointment';
+      if (!byLoc.has(loc)) byLoc.set(loc, []);
+      byLoc.get(loc).push(t);
+    }
+    const o = opts || {};
+    const lines = [`NextGen updates before the visit${o.asOf ? ` (appointments from ${fmtDate(o.asOf)})` : ''}: ${open.length} open task${open.length > 1 ? 's' : ''}.`, ''];
+    for (const [loc, list] of [...byLoc].sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`${loc} (${list.length})`);
+      for (const t of list) {
+        const when = t['Next Appt'] ? `${String(t['Next Appt']).slice(0, 5)}${t['Next Time'] ? ' ' + t['Next Time'] : ''}` : 'no appt';
+        const tag = lasfir(t['Last Name'], t['First Name']);
+        const who = t['Per Nbr'] ? `${tag} · Per ${t['Per Nbr']}` : `Sohar ref ${t['Sohar Ref'] || '?'}`;
+        lines.push(`- ${when} · ${who} · ${t.Task}: ${t.Details}`);
+      }
+      lines.push('');
+    }
+    return lines.join('\n').trim() + '\n';
+  }
+
+  /** Carry Done marks over from the previous task table, matched on Task Key. */
+  function keepDone(tasks, previous) {
+    const done = new Map();
+    for (const p of previous || []) if (String(p['Done'] || '').trim()) done.set(String(p['Task Key']), String(p['Done']).trim());
+    return tasks.map((t) => (done.has(t['Task Key']) ? { ...t, Done: done.get(t['Task Key']) } : t));
+  }
+
+  // ---------- pane <-> dialog messages ----------
+  // Office caps the size of one dialog message, so payloads travel as numbered pieces.
+  function chunkMessage(obj, size) {
+    const s = JSON.stringify(obj), n = Math.max(1, Math.ceil(s.length / (size || 20000)));
+    const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+    const out = [];
+    for (let i = 0; i < n; i++) out.push(JSON.stringify({ type: 'chunk', id, i, n, data: s.slice(i * (size || 20000), (i + 1) * (size || 20000)) }));
+    return out;
+  }
+  /** Returns a function that takes one raw message and returns the whole object once every piece has arrived, else null. */
+  function messageAssembler() {
+    const parts = new Map();
+    return (raw) => {
+      let m; try { m = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (e) { return null; }
+      if (!m || m.type !== 'chunk') return m || null;
+      if (!parts.has(m.id)) parts.set(m.id, []);
+      const list = parts.get(m.id); list[m.i] = m.data;
+      if (list.filter((x) => x != null).length < m.n) return null;
+      parts.delete(m.id);
+      return JSON.parse(list.join(''));
+    };
+  }
+
   /** Verified patients' benefits, one row per Per Nbr (latest Sohar result wins). Contract for the TMS Tracker import. */
   function benefitsExport(results) {
     const by = new Map();
@@ -705,9 +820,9 @@
   }
 
   return {
-    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, BENEFITS_EXPORT_COLS, HEADER_SYNONYMS,
+    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, BENEFITS_EXPORT_COLS, TASK_COLS, TASK_TYPES, HEADER_SYNONYMS,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,
-    resultKind, readResultRows, mergeSoharResults, benefitFields, accumulatorStatus, benefitFlag, benefitsExport, workQueue, lasfir, adminMessage,
+    resultKind, readResultRows, mergeSoharResults, benefitFields, accumulatorStatus, benefitFlag, benefitsExport, buildTasks, taskMessage, keepDone, chunkMessage, messageAssembler, workQueue, lasfir, adminMessage,
   };
 });

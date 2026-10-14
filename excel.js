@@ -3,11 +3,12 @@
   'use strict';
 
   const SHEETS = { import: 'Import', payerMap: 'Payer Map', sohar: 'Sohar Payers', config: 'Config',
-    patients: 'Patients', verification: 'Verification', discovery: 'Discovery', review: 'Review', dashboard: 'Dashboard', results: 'Sohar Results' };
+    patients: 'Patients', verification: 'Verification', discovery: 'Discovery', review: 'Review', dashboard: 'Dashboard', results: 'Sohar Results', tasks: 'NextGen Tasks' };
   const TABLES = { payerMap: 'tblPayerMap', sohar: 'tblSoharPayers', config: 'tblConfig', locState: 'tblLocationState',
     patients: 'tblPatients', verification: 'tblVerification', discovery: 'tblDiscovery', review: 'tblReview' };
   // Created by the add-in on first use; not checked by templateCheck.
   const RESULTS_TABLE = 'tblSoharResults';
+  const TASKS_TABLE = 'tblNextGenTasks';
   const CHUNK = 1000;
 
   async function run(fn) { return Excel.run(fn); }
@@ -129,7 +130,7 @@
       if (body.rowCount > 0) { body.delete(Excel.DeleteShiftDirection.up); await ctx.sync(); }
       // Excel leaves one empty body row. Everything is written as text so member IDs and ZIPs keep leading zeros.
       const values = rows.map((r) => cols.map((c) => { const v = r[c]; return v == null ? '' : v; }));
-      if (!values.length) { t.getDataBodyRange().numberFormat = [['@']]; await ctx.sync(); return; }
+      if (!values.length) { t.getDataBodyRange().numberFormat = [cols.map(() => '@')]; await ctx.sync(); return; }
       const canResize = Office.context.requirements.isSetSupported('ExcelApi', '1.13');
       if (canResize) {
         const target = ws.getRangeByIndexes(hdr.rowIndex + 1, hdr.columnIndex, values.length, cols.length);
@@ -145,7 +146,7 @@
         await ctx.sync();
       } else {
         // Older Excel: format the blank row first so appended rows inherit text format, then append and drop the blank.
-        t.getDataBodyRange().numberFormat = [['@']];
+        t.getDataBodyRange().numberFormat = [cols.map(() => '@')]; // one blank row, one '@' per column
         await ctx.sync();
         for (let i = 0; i < values.length; i += CHUNK) {
           ctx.application.suspendApiCalculationUntilNextSync();
@@ -224,10 +225,30 @@
     });
   }
 
-  /** Create (or rebuild) the Sohar Results sheet and table, then fill it. Not part of the template. */
-  async function writeResults(cols, rows) {
+  const writeResults = (cols, rows) => writeAddinTable(SHEETS.results, RESULTS_TABLE, cols, rows, true);
+  const writeTasks = (cols, rows) => writeAddinTable(SHEETS.tasks, TASKS_TABLE, cols, rows, false);
+  async function readTasks() { try { return await readTable(TASKS_TABLE); } catch (e) { return []; } }
+
+  /** Mark one NextGen task done (or not) by Task Key. */
+  async function setTaskDone(key, done) {
+    return run(async (ctx) => {
+      const t = ctx.workbook.tables.getItemOrNullObject(TASKS_TABLE);
+      t.load('isNullObject');
+      await ctx.sync();
+      if (t.isNullObject) return;
+      const h = t.getHeaderRowRange(); h.load('values');
+      const b = t.getDataBodyRange(); b.load('values');
+      await ctx.sync();
+      const hd = h.values[0].map(String), kc = hd.indexOf('Task Key'), dc = hd.indexOf('Done');
+      const i = b.values.findIndex((r) => String(r[kc]) === key);
+      if (i >= 0 && dc >= 0) { b.getCell(i, dc).values = [[done ? 'Yes' : '']]; await ctx.sync(); }
+    });
+  }
+
+  /** Create (or rebuild) a sheet + table the add-in owns, then fill it. Not part of the template. */
+  async function writeAddinTable(sheetName, tableName, cols, rows, activate) {
     await run(async (ctx) => {
-      const t = ctx.workbook.tables.getItemOrNullObject(RESULTS_TABLE);
+      const t = ctx.workbook.tables.getItemOrNullObject(tableName);
       t.load('isNullObject');
       await ctx.sync();
       if (!t.isNullObject) {
@@ -237,23 +258,23 @@
         t.delete();
         await ctx.sync();
       }
-      let ws = ctx.workbook.worksheets.getItemOrNullObject(SHEETS.results);
+      let ws = ctx.workbook.worksheets.getItemOrNullObject(sheetName);
       ws.load('isNullObject');
       await ctx.sync();
-      if (ws.isNullObject) ws = ctx.workbook.worksheets.add(SHEETS.results);
+      if (ws.isNullObject) ws = ctx.workbook.worksheets.add(sheetName);
       else ws.getRange().clear();
       const hdr = ws.getRangeByIndexes(0, 0, 1, cols.length);
       hdr.values = [cols];
       const nt = ws.tables.add(hdr, true);
-      nt.name = RESULTS_TABLE;
+      nt.name = tableName;
       ws.freezePanes.freezeRows(1);
       await ctx.sync();
     });
-    await replaceTable(RESULTS_TABLE, cols, rows);
+    await replaceTable(tableName, cols, rows);
     await run(async (ctx) => {
-      const ws = ctx.workbook.worksheets.getItem(SHEETS.results);
-      ws.getRange().format.autofitColumns();
-      ws.activate();
+      const t = ctx.workbook.tables.getItem(tableName);
+      t.getRange().format.autofitColumns();
+      if (activate) t.worksheet.activate();
       await ctx.sync();
     });
   }
@@ -289,5 +310,5 @@
   }
 
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable,
-    writeImportRows, importXlsx, readXlsxRows, writeResults, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, readTasks, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

@@ -19,7 +19,11 @@ Same stack as the Billing Tickets add-in: static files on GitHub Pages, Office.j
    - **Copy action message** and **Copy benefits message** build notes grouped by location (LASFIR + Per Nbr only). Send inside Outlook or Teams only.
    - **Download benefits CSV** is one row per verified patient in `BENEFITS_EXPORT_COLS` order (`core.js`). This is the contract for the TMS Tracker import: add columns at the end only.
 
-**Open full screen** opens the results worklist in an Office dialog (floating over the sheet in Excel on the web, a separate window on desktop) with work-queue and benefit tiles, filters (queue, deductible/OOP met or approaching, verification/discovery, location, dates, search) and a click-a-row patient view for visit prep. It needs DialogApi 1.2. Data goes to the dialog over `messageChild`; nothing leaves Excel.
+**NextGen Tasks** (`tblNextGenTasks`, created by the add-in) is rebuilt with every results upload: one row per thing to change before the visit (add or update insurance, fix member ID or name, update benefits with the values to enter, add a payer to the Payer Map, find an unmatched result, resend to Sohar). `Done` marks carry over between uploads by `Task Key`.
+
+**Open full screen** opens a separate window (an Office dialog with `displayInIframe: false`, so file pickers, downloads and copy work in Excel on the web). Tabs: Prep by appointment (each visit day, soonest first, with result type, status, benefits and open tasks), Worklist (queue and benefit tiles and filters), NextGen tasks (tick Done; it writes to the sheet), Messages (open tasks, who needs action, deductible/OOP met or approaching), and Upload & save (drop the Sohar verification and discovery outputs; save every CSV). Needs DialogApi 1.2. Data moves between pane and window with `messageChild` / `messageParent` in pieces; nothing leaves Excel.
+
+Excel on the web blocks downloads from the task pane, so on the web every Download button opens the full-screen window to save from there. The pane footer shows the platform and API support; include it when reporting a problem.
 
 Scope `upcoming` keeps patients with a non-cancelled, non-no-show appointment on or after the as-of date. POS is `10` when the next appointment's Event contains a telehealth keyword (`Tele`), else `11`. State comes from a patient state column if the report has one, else Config > Location to State, else Default state.
 
@@ -55,7 +59,7 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 | `core.js` | Pure logic: header detection, name/date parsing, routing, exports, CSV. Shared with tests. |
 | `excel.js` | Everything that reads or writes the workbook. Table names must match the template. |
 | `app.js` | Pane behaviour, step flow, payer mapping UI, uploads, downloads, demo mode. |
-| `dashboard.html`, `dashboard.js` | Full-screen results worklist shown in the Office dialog. |
+| `dashboard.html`, `dashboard.js` | Full-screen window (Office dialog): prep, worklist, NextGen tasks, messages, upload and save. |
 | `index.html`, `style.css` | Pane markup and styles. |
 | `manifest.xml` | Ribbon button and host URL. |
 | `tests/*.test.mjs` | `node --test` suite. |
