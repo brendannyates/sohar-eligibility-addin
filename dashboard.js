@@ -227,6 +227,12 @@
       name = `sohar_verification_import_from_discovery_${stamp()}.csv`; cols = C.VERIFICATION_COLS; data = discVerify;
     } else if (kind === 'tasks') { name = `nextgen_tasks_open_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks.filter(open); }
     else if (kind === 'allTasks') { name = `nextgen_tasks_all_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks; }
+    else if (kind === 'tracker') {
+      const out = C.trackerExport(rows, new Date().toLocaleString());
+      if (!out.rows.length) { notice('No verified patients yet. The final file needs at least one Sohar verification result.', false); return; }
+      name = `sohar_tracker_import_${stamp()}.csv`; cols = C.TRACKER_EXPORT_COLS; data = out.rows;
+      if (out.pending.length) setTimeout(() => notice(`${out.rows.length} patients saved. ${out.pending.length} left out, still waiting on a discovery verification (see Prep).`, true), 50);
+    }
     else if (kind === 'benefits') { name = `sohar_benefits_${stamp()}.csv`; cols = C.BENEFITS_EXPORT_COLS; data = C.benefitsExport(rows); }
     else if (kind === 'ir') {
       if (!irRows.length) { notice('No IR Portal cross-check yet. Upload the IR Portal file in step 6 of the pane.', false); return; }

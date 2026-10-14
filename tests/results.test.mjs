@@ -298,3 +298,22 @@ test('keepMemberIds keeps IDs typed on the Discovery Verify sheet', () => {
   assert.equal(kept[0].memberId, 'TYPED1');
   assert.equal(kept[1].memberId, '', 'a different payer does not carry the ID over');
 });
+
+test('trackerExport: one final row per verified patient, pending discovery left out, service from events', () => {
+  const first = C.accumulateResults([], rawFiles(), '2026-10-14');
+  const v2 = [VER_HDR, ver({ requestId: 'q-9', id: '101', resolved: '2026-10-15T01:00:00.000Z', memberId: 'CG101', payerName: 'Cigna', status: 'complete.eligible', innTotalDeductible: '1000', innRemainingDeductible: '100' })];
+  const res = C.mergeSoharResults(MERGE_ROWS(), C.accumulateResults(first.saved, [{ name: 'v2.csv', rows: v2 }], '2026-10-15').files, CFG);
+  const out = C.trackerExport(res.results, '10/15/2026 9:00 AM');
+  const by = Object.fromEntries(out.rows.map((r) => [r['Per Nbr'], r]));
+  assert.deepEqual(Object.keys(by).sort(), ['100', '101']);
+  assert.equal(by['101'].Source, 'Discovery, then verification');
+  assert.equal(by['100'].Source, 'Verification');
+  assert.equal(by['101'].Service, 'TMS');
+  assert.equal(by['100'].Service, 'TMS');
+  assert.equal(by['101'].Exported, '10/15/2026 9:00 AM');
+  assert.deepEqual(out.pending.map((r) => r['Per Nbr']).sort(), ['103', '104']);
+  const header = C.toCSV(C.TRACKER_EXPORT_COLS, out.rows).split('\r\n')[0].split(',');
+  assert.deepEqual(header.slice(0, C.BENEFITS_EXPORT_COLS.length), C.BENEFITS_EXPORT_COLS, 'benefits columns first, so the TMS import still reads it');
+  assert.equal(C.serviceLine('10/20 Esketamine Follow Up; 10/21 TMS Treatment Unilateral'), 'TMS; ESK');
+  assert.equal(C.serviceLine('Telepsych'), '');
+});

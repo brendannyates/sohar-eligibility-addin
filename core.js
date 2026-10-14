@@ -1022,6 +1022,39 @@
     return [...by.values()].map((r) => Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, r[c] == null ? '' : r[c]])));
   }
 
+  // Final file for the TMS Tracker and ESK Tracker imports: the benefits columns, then these. Add columns at the end only.
+  const TRACKER_EXPORT_COLS = [...BENEFITS_EXPORT_COLS, 'Service', 'Source', 'Exported'];
+
+  /** "TMS", "ESK", "TMS; ESK" or '' from a patient's upcoming NextGen events. */
+  function serviceLine(text) {
+    const s = String(text || '');
+    return [/\btms\b|magv|\bmt\b/i.test(s) ? 'TMS' : '', /esketamine|spravato|\besk\b/i.test(s) ? 'ESK' : ''].filter(Boolean).join('; ');
+  }
+
+  /**
+   * One row per patient with a Sohar verification, for the tracker imports. Patients whose discovered coverage
+   * is still waiting on a verification are left out and returned as pending, so their benefits are not stale.
+   */
+  function trackerExport(results, exportedAt) {
+    const pendingPer = new Set((results || []).filter((r) => r['Discovery Follow-up'] === 'Ready to verify' && r['Per Nbr']).map((r) => r['Per Nbr']));
+    const events = new Map();
+    for (const r of results || []) if (r['Per Nbr']) events.set(r['Per Nbr'], `${events.get(r['Per Nbr']) || ''} ${r['Next Event']} ${r['Upcoming Detail']}`);
+    const by = new Map();
+    for (const r of results || []) {
+      if (r['Sent As'] !== 'Verification' || !r['Per Nbr'] || !r['Sohar Ref'] || pendingPer.has(r['Per Nbr'])) continue;
+      const prev = by.get(r['Per Nbr']);
+      if (!prev || String(r['Sohar Date']) > String(prev['Sohar Date'])) by.set(r['Per Nbr'], r);
+    }
+    const rows = [...by.values()].map((r) => ({
+      ...Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, r[c] == null ? '' : r[c]])),
+      'Service': serviceLine(events.get(r['Per Nbr'])),
+      'Source': r['Discovery Follow-up'] === 'From discovery' ? 'Discovery, then verification' : 'Verification',
+      'Exported': exportedAt || '',
+    }));
+    const pending = (results || []).filter((r) => r['Discovery Follow-up'] === 'Ready to verify' && r['Per Nbr']);
+    return { rows, pending };
+  }
+
   function summarize(patients) {
     const s = { patients: patients.length, inScope: 0, verification: 0, discovery: 0, exclude: 0, highIssues: 0 };
     for (const p of patients) {
@@ -1034,7 +1067,7 @@
 
   return {
     VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, UPLOAD_COLS, BENEFITS_EXPORT_COLS,
-    resultKey, accumulateResults, keepMemberIds, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
+    resultKey, accumulateResults, keepMemberIds, TRACKER_EXPORT_COLS, serviceLine, trackerExport, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
     irCategory, parseIrPortal, irCrossReference, irMessage,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,

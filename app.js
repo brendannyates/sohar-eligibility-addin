@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.6.2';
+  const VERSION = '0.6.3';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
@@ -106,6 +106,7 @@
     $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(`sohar_results_worklist_${stamp()}.csv`, C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
     $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(`sohar_benefits_${stamp()}.csv`, C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'resultsResult'), 'resultsResult'));
     $('btnDlDiscVer').addEventListener('click', () => guard(downloadDiscoveryVerify, 'resultsResult'));
+    $('btnDlFinal').addEventListener('click', () => guard(downloadTrackerFile, 'resultsResult'));
     $('btnClearSaved').addEventListener('click', () => guard(clearSaved, 'resultsResult'));
     $('btnDlTasks').addEventListener('click',() => guard(async () => saveCSV(`nextgen_tasks_${stamp()}.csv`, C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
     $('btnFull').addEventListener('click', () => guard(() => openFull(), 'resultsResult'));
@@ -362,7 +363,7 @@
     const dv = C.keepMemberIds(res.discoveryVerification, await X.readDiscoveryVerify());
     await X.writeDiscoveryVerify(C.VERIFICATION_COLS, dv);
     state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv;
-    for (const id of ['btnCopyMsg', 'btnCopyBen', 'btnDlWork', 'btnDlBen', 'btnDlTasks']) $(id).disabled = false;
+    for (const id of ['btnCopyMsg', 'btnCopyBen', 'btnDlWork', 'btnDlBen', 'btnDlTasks', 'btnDlFinal']) $(id).disabled = false;
     $('btnDlDiscVer').disabled = !dv.length;
     markDone(5);
     const noId = dv.filter((r) => !r.memberId).length;
@@ -411,6 +412,20 @@
     await saveCSV(`sohar_verification_import_from_discovery_${stamp()}.csv`, C.VERIFICATION_COLS, rows, 'resultsResult');
     const noId = rows.filter((r) => !String(r.memberId || '').trim()).length;
     if (noId) note('resultsResult', `${noId} row${noId === 1 ? ' has' : 's have'} no member ID. Sohar may reject ${noId === 1 ? 'it' : 'them'}; fill the memberId column on the Discovery Verify sheet and download again.`, 'warn');
+  }
+
+  /** Final file for the TMS Tracker and ESK Tracker: verified benefits; patients still waiting on a discovery verification are listed, not included. */
+  async function downloadTrackerFile() {
+    const rows = (await currentResults()) || [];
+    if (!rows.length) throw new Error('Upload Sohar results first.');
+    const out = C.trackerExport(rows, fmtStamp(new Date()));
+    if (!out.rows.length) throw new Error('No verified patients yet. The final file needs at least one Sohar verification result.');
+    await saveCSV(`sohar_tracker_import_${stamp()}.csv`, C.TRACKER_EXPORT_COLS, out.rows, 'resultsResult');
+    const n = `${out.rows.length} patient${out.rows.length === 1 ? '' : 's'}`;
+    if (out.pending.length) {
+      const who = out.pending.map((r) => `${C.lasfir(r['Last Name'], r['First Name'])} · Per ${r['Per Nbr']}`).join(', ');
+      note('resultsResult', `${n} in the file. Left out, still waiting on a discovery verification: ${who}. Run the discovery verification import in Sohar, upload the output, then download the final file again.`, 'warn');
+    } else note('resultsResult', `${n} in the final tracker file. Import it in the TMS Tracker and the ESK Tracker.`, 'ok');
   }
 
   let clearArmed = 0;
