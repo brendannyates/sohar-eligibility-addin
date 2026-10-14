@@ -14,6 +14,12 @@
     'Member ID Mismatch', 'Secondary Payer', 'Secondary Sohar payerId', 'Appt Count', 'First Appt', 'Last Appt',
     'Subscriber First', 'Subscriber Last', 'Subscriber DOB', 'Flags'];
   const REVIEW_COLS = ['Severity', 'Issue', 'Per Nbr', 'Detail', 'Fix'];
+  // Sohar Results sheet. The add-in creates this table itself, so it is not part of the template contract.
+  const RESULTS_COLS = ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'Next Provider', 'Upcoming Appts',
+    'Per Nbr', 'Last Name', 'First Name', 'DOB', 'Sent As', 'Sohar Status', 'Work Queue', 'Action',
+    'Deductible', 'Deductible Remaining', 'Deductible Met', 'OOP Max', 'OOP Remaining', 'OOP Met', 'Copay', 'Coinsurance',
+    'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Coverage Differs', 'Match',
+    'Sohar Ref', 'Sohar Link', 'Sohar Date'];
 
   // NextGen header -> canonical field. Matching ignores case, spaces and punctuation.
   const HEADER_SYNONYMS = {
@@ -308,6 +314,281 @@
     for (const r of rows) lines.push(cols.map((c) => csvCell(r[c])).join(','));
     return lines.join('\r\n') + '\r\n';
   }
+  /** RFC 4180 CSV -> 2D array of strings. Handles quotes, embedded newlines, CRLF and a UTF-8 BOM. */
+  function parseCSV(text) {
+    const s = String(text || '').replace(/^﻿/, '');
+    const rows = [];
+    let row = [], cell = '', q = false;
+    for (let i = 0; i < s.length; i++) {
+      const ch = s[i];
+      if (q) {
+        if (ch === '"') { if (s[i + 1] === '"') { cell += '"'; i++; } else q = false; }
+        else cell += ch;
+      } else if (ch === '"') q = true;
+      else if (ch === ',') { row.push(cell); cell = ''; }
+      else if (ch === '\n' || ch === '\r') {
+        if (ch === '\r' && s[i + 1] === '\n') i++;
+        row.push(cell); rows.push(row); row = []; cell = '';
+      } else cell += ch;
+    }
+    if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+
+  /** Excel time fraction, Date, or text -> "h:mm AM". */
+  function fmtTime(v) {
+    if (v == null || v === '') return '';
+    let mins;
+    if (typeof v === 'number') mins = Math.round((v % 1) * 1440);
+    else if (v instanceof Date) mins = v.getUTCHours() * 60 + v.getUTCMinutes();
+    else return str(v);
+    const h = Math.floor(mins / 60) % 24, m = mins % 60;
+    return `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h < 12 ? 'AM' : 'PM'}`;
+  }
+
+  // ---------- Sohar results ----------
+  /** Identify a Sohar export by its header row: 'verification', 'discovery', or null. */
+  function resultKind(headers) {
+    const h = new Set((headers || []).map(normHeader));
+    if (h.has('verificationid') && h.has('status')) return 'verification';
+    if (h.has('requestid') && (h.has('responsepayerid') || h.has('responsepayername'))) return 'discovery';
+    return null;
+  }
+
+  /** 2D rows from a Sohar export -> {kind, records: [{header: value}]}. Header keys are normalized. */
+  function readResultRows(rows) {
+    const start = (rows || []).findIndex((r) => (r || []).some((v) => !isBlank(v)));
+    if (start < 0) return { kind: null, records: [] };
+    const headers = rows[start].map(normHeader);
+    const records = [];
+    for (let i = start + 1; i < rows.length; i++) {
+      const r = rows[i] || [];
+      if (!r.some((v) => !isBlank(v))) continue;
+      const o = {};
+      headers.forEach((k, j) => { if (k) o[k] = r[j]; });
+      records.push(o);
+    }
+    return { kind: resultKind(rows[start]), records };
+  }
+
+  // Member IDs are compared without punctuation, case or leading zeros (Excel drops zeros from numeric IDs).
+  const idKey = (v) => str(v).toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/^0+/, '');
+  const nameKey = (first, last) => `${str(last).toLowerCase()}|${str(first).toLowerCase()}`;
+
+  // Benefit amounts, if a Sohar export carries them. Matched loosely on normalized headers; family and
+  // out-of-network columns are skipped so the numbers are the patient's in-network individual accumulators.
+  const money = (v) => { if (isBlank(v)) return null; const n = parseFloat(String(v).replace(/[$,\s]/g, '')); return isNaN(n) ? null : n; };
+  function benefitFields(rec) {
+    const keys = Object.keys(rec).filter((k) => !/family|outofnetwork|oon/.test(k));
+    const find = (test) => { const k = keys.find((x) => test(x) && !isBlank(rec[x])); return k ? rec[k] : ''; };
+    const oop = (k) => k.includes('outofpocket') || k.includes('oop');
+    const rem = (k) => k.includes('remain');
+    const met = (k) => /met$|met[^a-z]|metamount/.test(k) || k.endsWith('met');
+    const ded = {
+      total: find((k) => k.includes('deductible') && !rem(k) && !met(k)),
+      remaining: find((k) => k.includes('deductible') && rem(k)),
+      met: find((k) => k.includes('deductible') && met(k)),
+    };
+    const oo = {
+      total: find((k) => oop(k) && !rem(k) && !met(k)),
+      remaining: find((k) => oop(k) && rem(k)),
+      met: find((k) => oop(k) && met(k)),
+    };
+    const isMet = (b) => {
+      if (/^(true|yes|y)$/i.test(str(b.met))) return 'Yes';
+      if (/^(false|no|n)$/i.test(str(b.met))) return 'No';
+      const r = money(b.remaining), t = money(b.total), m = money(b.met);
+      if (r != null) return r <= 0 ? 'Yes' : 'No';
+      if (t != null && m != null) return m >= t ? 'Yes' : 'No';
+      if (t === 0) return 'Yes';
+      return '';
+    };
+    return {
+      'Deductible': str(ded.total), 'Deductible Remaining': str(ded.remaining), 'Deductible Met': isMet(ded),
+      'OOP Max': str(oo.total), 'OOP Remaining': str(oo.remaining), 'OOP Met': isMet(oo),
+      'Copay': str(find((k) => k.includes('copay'))), 'Coinsurance': str(find((k) => k.includes('coinsurance'))),
+    };
+  }
+
+  /** Bucket a result row for the admin worklist. */
+  function workQueue(row) {
+    if (row.Match === 'No match') return 'Unmatched';
+    if (/^Pending/.test(row.Action)) return 'Pending';
+    if (/^Eligible\. No action|^Coverage found matches/.test(row.Action)) return 'Clear';
+    return 'Action needed';
+  }
+
+  /** LASFIR: first three letters of last name + first three of first name. */
+  function lasfir(last, first) {
+    const l = (s) => str(s).toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3);
+    return l(last) + l(first);
+  }
+
+  /** Plain-text note for admins, grouped by location then appointment. LASFIR + Per Nbr only (minimum necessary). */
+  function adminMessage(rows, opts) {
+    const o = opts || {};
+    const todo = rows.filter((r) => r['Work Queue'] === 'Action needed' || r['Work Queue'] === 'Unmatched');
+    if (!todo.length) return 'Sohar eligibility: nothing needs action in this list.';
+    const byLoc = new Map();
+    for (const r of todo) {
+      const loc = r['Next Location'] || 'No upcoming appointment';
+      if (!byLoc.has(loc)) byLoc.set(loc, []);
+      byLoc.get(loc).push(r);
+    }
+    const lines = [`Sohar eligibility follow-up${o.asOf ? ` (appointments from ${fmtDate(o.asOf)})` : ''}: ${todo.length} patient${todo.length > 1 ? 's' : ''} need action before their visit.`, ''];
+    for (const [loc, list] of [...byLoc].sort((a, b) => a[0].localeCompare(b[0]))) {
+      lines.push(`${loc} (${list.length})`);
+      for (const r of list) {
+        const when = r['Next Appt'] ? `${r['Next Appt'].slice(0, 5)}${r['Next Time'] ? ' ' + r['Next Time'] : ''}` : 'no appt';
+        const ben = [r['Deductible Met'] === 'Yes' ? 'deductible met' : '', r['OOP Met'] === 'Yes' ? 'OOP max met' : ''].filter(Boolean).join(', ');
+        lines.push(`- ${when} · ${lasfir(r['Last Name'], r['First Name'])} · Per ${r['Per Nbr'] || '?'} · ${r.Action}${ben ? ` (${ben})` : ''}`);
+      }
+      lines.push('');
+    }
+    return lines.join('\n').trim() + '\n';
+  }
+
+  function verificationAction(status) {
+    const s = str(status).toLowerCase();
+    if (s === 'complete.eligible') return 'Eligible. No action.';
+    if (s === 'complete.ineligible') return 'Ineligible. Confirm coverage with the patient before the visit; consider discovery.';
+    if (s === 'error.member.id') return 'Member ID rejected. Check the card, fix in NextGen, re-verify.';
+    if (s === 'error.member.name') return 'Name rejected. Match the name to the card, re-verify.';
+    if (s.startsWith('error')) return 'Sohar error. Review the request and re-verify.';
+    if (s === 'pending' || !s) return 'Pending at Sohar. Recheck later.';
+    return 'Review.';
+  }
+
+  /**
+   * Join Sohar result files to the patients' upcoming appointments.
+   * importRows: Import sheet 2D array. files: [{name, rows}] (2D, header first). cfg: as for buildPatients.
+   * Returns {results, unknownFiles, counts} or {error}.
+   */
+  function mergeSoharResults(importRows, files, cfg) {
+    const built = buildPatients(importRows, { ...cfg, scope: 'all' });
+    if (built.error) return { error: `The Import sheet has to hold the appointment report to combine results. ${built.error}` };
+    const asOf = built.asOf;
+    const det = built.detection, cm = det.colMap;
+    const get = (row, f) => (cm[f] == null ? '' : row[cm[f]]);
+
+    // Upcoming, still-expected appointments per patient (same rule as scope "upcoming").
+    const upcoming = new Map();
+    for (let r = det.headerRow + 1; r < importRows.length; r++) {
+      const row = importRows[r] || [];
+      const per = str(get(row, 'perNbr')); const dt = parseDate(get(row, 'apptDt'));
+      if (!per || !dt || dt < asOf || NOT_KEPT_FUTURE.has(str(get(row, 'sts')).toLowerCase())) continue;
+      if (!upcoming.has(per)) upcoming.set(per, []);
+      upcoming.get(per).push({ dt, tmRaw: get(row, 'begTm'), event: str(get(row, 'event')), loc: str(get(row, 'loc')), rendering: str(get(row, 'rendering')) });
+    }
+    for (const list of upcoming.values()) list.sort((a, b) => a.dt - b.dt || String(a.tmRaw).localeCompare(String(b.tmRaw)));
+
+    const byPer = new Map(), byMember = new Map(), byName = new Map(), byNameDob = new Map();
+    const push = (m, k, p) => { if (!k) return; if (!m.has(k)) m.set(k, []); if (!m.get(k).includes(p)) m.get(k).push(p); };
+    for (const p of built.patients) {
+      byPer.set(p['Per Nbr'], p);
+      push(byMember, idKey(p['Member ID']), p);
+      push(byMember, idKey(p['Member ID (Lst Enc)']), p);
+      if (p['Last Name']) push(byName, nameKey(p['First Name'], p['Last Name']), p);
+      if (p['Last Name'] && p.DOB) push(byNameDob, `${nameKey(p['First Name'], p['Last Name'])}|${p.DOB}`, p);
+    }
+
+    const results = [], unknownFiles = [], kinds = new Set(), seen = { verification: new Set(), discovery: new Set() };
+    const counts = { matched: 0, unmatched: 0, notReturned: 0, withBenefits: 0, byAction: {}, byQueue: {} };
+    const BENEFIT_KEYS = ['Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining', 'Copay', 'Coinsurance'];
+
+    const emit = (p, kind, f) => {
+      const ups = p ? upcoming.get(p['Per Nbr']) || [] : [];
+      const n = ups[0];
+      const row = {
+        'Next Appt': n ? fmtDate(n.dt) : '', 'Next Time': n ? fmtTime(n.tmRaw) : '', 'Next Event': n ? n.event : '',
+        'Next Location': n ? n.loc : '', 'Next Provider': n ? n.rendering : '', 'Upcoming Appts': p ? ups.length : '',
+        'Per Nbr': p ? p['Per Nbr'] : '', 'Last Name': p ? p['Last Name'] : str(f.lastName), 'First Name': p ? p['First Name'] : str(f.firstName),
+        'DOB': p ? p.DOB : f.dob || '', 'Sent As': kind === 'verification' ? 'Verification' : 'Discovery',
+        'NextGen Payer': p ? p['Primary Payer'] : '', 'NextGen Member ID': p ? p['Member ID'] : '',
+        ...(f.benefits || {}), ...f.cols,
+      };
+      for (const c of RESULTS_COLS) if (row[c] == null) row[c] = '';
+      row['Work Queue'] = workQueue(row);
+      results.push(row);
+      counts.byAction[row.Action] = (counts.byAction[row.Action] || 0) + 1;
+      counts.byQueue[row['Work Queue']] = (counts.byQueue[row['Work Queue']] || 0) + 1;
+      if (p) seen[kind].add(p['Per Nbr']);
+    };
+
+    const pickOne = (list, last) => {
+      if (!list || !list.length) return null;
+      if (list.length === 1) return list[0];
+      const l = str(last).toLowerCase();
+      const hits = list.filter((p) => p['Last Name'].toLowerCase() === l);
+      return hits.length === 1 ? hits[0] : null;
+    };
+
+    for (const file of files || []) {
+      const { kind, records } = readResultRows(file.rows);
+      if (!kind) { unknownFiles.push(file.name); continue; }
+      kinds.add(kind);
+      for (const r of records) {
+        let p = null, match = '';
+        const first = str(r.firstname), last = str(r.lastname);
+        const dob = parseDate(r.dateofbirth);
+        const cols = {};
+        if (kind === 'verification') {
+          p = pickOne(byMember.get(idKey(r.memberid)), last);
+          if (p) match = 'Member ID';
+          else { p = pickOne(byName.get(nameKey(first, last)), last); if (p) match = 'Name only. Confirm.'; }
+          Object.assign(cols, {
+            'Sohar Status': str(r.status), 'Action': verificationAction(r.status),
+            'Sohar Payer': str(r.payername), 'Sohar payerId': '', 'Sohar Member ID': str(r.memberid), 'Coverage Differs': '',
+            'Sohar Ref': str(r.verificationid), 'Sohar Link': '', 'Sohar Date': str(r.created),
+          });
+        } else {
+          p = byPer.get(str(r.id)) || null;
+          if (p) match = 'Per Nbr';
+          else {
+            p = pickOne(byNameDob.get(`${nameKey(first, last)}|${fmtDate(dob)}`), last);
+            if (p) match = 'Name + DOB';
+          }
+          const found = !isBlank(r.responsepayerid) || !isBlank(r.responsepayername);
+          const resolved = !isBlank(r.resolved);
+          const status = found ? 'Coverage found' : resolved ? 'No coverage found' : 'Pending';
+          const differs = found && p && (str(r.responsepayerid) !== p['Sohar payerId'] || (!isBlank(r.memberid) && idKey(r.memberid) !== idKey(p['Member ID'])));
+          let action;
+          if (!found) action = resolved ? 'No coverage found. Confirm self-pay or ask the patient for a card.' : 'Pending at Sohar. Recheck later.';
+          else if (p && !p['Primary Payer']) action = 'Coverage found. Add it to NextGen, then verify.';
+          else if (differs) action = 'Different coverage found. Confirm with the patient, update NextGen, then verify.';
+          else action = 'Coverage found matches NextGen. Verify.';
+          Object.assign(cols, {
+            'Sohar Status': status, 'Action': action, 'Sohar Payer': str(r.responsepayername), 'Sohar payerId': str(r.responsepayerid),
+            'Sohar Member ID': str(r.memberid), 'Coverage Differs': found ? (differs ? 'Yes' : 'No') : '',
+            'Sohar Ref': str(r.requestid), 'Sohar Link': str(r.url), 'Sohar Date': str(r.resolved || r.created),
+          });
+        }
+        if (!p) { match = 'No match'; cols.Action = `Not matched to a patient in the Import report. ${cols.Action}`; counts.unmatched++; }
+        else counts.matched++;
+        cols.Match = match;
+        const benefits = benefitFields(r);
+        if (BENEFIT_KEYS.some((k) => benefits[k])) counts.withBenefits++;
+        emit(p, kind, { firstName: first, lastName: last, dob: fmtDate(dob), cols, benefits });
+      }
+    }
+
+    // Patients who would have been sent for an uploaded file type but came back with nothing.
+    for (const p of built.patients) {
+      const kind = p.Route;
+      if (!kinds.has(kind) || seen[kind].has(p['Per Nbr']) || !upcoming.has(p['Per Nbr'])) continue;
+      counts.notReturned++;
+      emit(p, kind, { cols: {
+        'Sohar Status': 'Not in Sohar file', 'Action': 'Not in the results. Check it was uploaded to Sohar.',
+        'Sohar Payer': '', 'Sohar payerId': '', 'Sohar Member ID': '', 'Coverage Differs': '', 'Match': '', 'Sohar Ref': '', 'Sohar Link': '', 'Sohar Date': '',
+      } });
+    }
+
+    // Soonest appointment first; rows with no upcoming appointment last.
+    const t = (r) => (r['Next Appt'] ? parseDate(r['Next Appt']).getTime() : Infinity);
+    results.sort((a, b) => t(a) - t(b) || a['Last Name'].localeCompare(b['Last Name']));
+    return { results, unknownFiles, counts, asOf };
+  }
+
   function summarize(patients) {
     const s = { patients: patients.length, inScope: 0, verification: 0, discovery: 0, exclude: 0, highIssues: 0 };
     for (const p of patients) {
@@ -319,8 +600,9 @@
   }
 
   return {
-    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, HEADER_SYNONYMS,
-    normHeader, detectHeader, parseDate, fmtDate, excelSerialToDate, parseName,
-    payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, summarize,
+    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, HEADER_SYNONYMS,
+    normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,
+    payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,
+    resultKind, readResultRows, mergeSoharResults, benefitFields, workQueue, lasfir, adminMessage,
   };
 });

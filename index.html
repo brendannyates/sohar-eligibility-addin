@@ -11,7 +11,10 @@
 </head>
 <body>
   <header class="top">
-    <h1>Sohar eligibility prep</h1>
+    <div class="titlebar">
+      <h1>Sohar eligibility prep</h1>
+      <button class="small" id="btnFull" title="Open the results worklist in a larger window over the sheet">Open full screen</button>
+    </div>
     <p id="wbStatus" class="status">Checking workbook…</p>
   </header>
 
@@ -21,9 +24,11 @@
         <div class="num">1</div>
         <div class="body">
           <h2>Import the appointment report</h2>
-          <p class="hint">Paste the whole NextGen Appointments Listing into the <b>Import</b> sheet at A1, title rows included. The header row is found automatically.</p>
+          <p class="hint">Upload the NextGen Appointments Listing (.csv or .xlsx), or paste the whole report into the <b>Import</b> sheet at A1, title rows included. The header row is found automatically.</p>
           <div class="actions">
-            <button class="primary" id="btnScan">Scan Import sheet</button>
+            <input type="file" id="fileImport" accept=".csv,.xlsx,.xlsm" hidden>
+            <button class="primary" id="btnUpload">Upload report file</button>
+            <button class="primary alt" id="btnScan">Scan Import sheet</button>
             <button class="link" data-goto="Import">Open Import</button>
           </div>
           <div id="scanResult" class="result" hidden></div>
@@ -78,6 +83,25 @@
             <button class="primary" id="btnDlVer" disabled>Download verification CSV</button>
             <button class="primary alt" id="btnDlDisc" disabled>Download discovery CSV</button>
           </div>
+        </div>
+      </li>
+
+      <li class="step" id="step5" data-step="5">
+        <div class="num">5</div>
+        <div class="body">
+          <h2>Bring back Sohar results</h2>
+          <p class="hint">Upload the verification and discovery result files from Sohar (.csv or .xlsx, several at once is fine). They are matched to the appointment report on the Import sheet and written to the <b>Sohar Results</b> sheet, soonest appointment first.</p>
+          <div class="actions">
+            <input type="file" id="fileResults" accept=".csv,.xlsx,.xlsm" multiple hidden>
+            <button class="primary" id="btnResults">Upload Sohar results</button>
+            <button class="link" data-goto="Sohar Results">Open Sohar Results</button>
+          </div>
+          <div id="resultsResult" class="result" hidden></div>
+          <div class="actions">
+            <button class="primary alt" id="btnCopyMsg" disabled>Copy admin message</button>
+            <button class="primary alt" id="btnDlWork" disabled>Download worklist CSV</button>
+          </div>
+          <p class="hint">The admin message lists only patients who need action, by location, with LASFIR and Per Nbr. Send it inside Outlook or Teams only.</p>
         </div>
       </li>
     </ol>

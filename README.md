@@ -6,10 +6,18 @@ Same stack as the Billing Tickets add-in: static files on GitHub Pages, Office.j
 
 ## What it does
 
-1. **Scan** the `Import` sheet. Finds the NextGen header row under the title block, maps columns by name (synonyms live in `core.js`), and reports which fields are present.
+1. **Upload or paste** the report. **Upload report file** takes `.csv` or `.xlsx` (xlsx needs ExcelApi 1.13) and replaces the `Import` sheet; pasting still works. Then it **scans** the `Import` sheet. Finds the NextGen header row under the title block, maps columns by name (synonyms live in `core.js`), and reports which fields are present.
 2. **Map payers.** Any NextGen payer name not in `tblPayerMap` is listed with Sohar suggestions. Picking one writes the row to the Payer Map sheet, so it is remembered next time.
 3. **Build.** One row per `Per Nbr`. Routing: verification when the primary payer maps (Exact, Probable, Confirmed) and `Pol Nbr (Cht Guar)` exists; discovery otherwise (no payer, Self Pay, unmapped, Review, or no member ID). Writes `Patients`, `Review`, `Verification`, `Discovery`.
 4. **Export.** Downloads `sohar_verification_import_*.csv` and `sohar_discovery_import_*.csv` with the exact Sohar template columns. The same rows are on the sheets.
+5. **Bring back results.** Upload the Sohar verification and discovery result files. Each row is matched to the appointment report on the `Import` sheet and written to `Sohar Results` (`tblSoharResults`, created by the add-in), soonest appointment first, with a `Work Queue` (Action needed, Unmatched, Pending, Clear) and a plain-English `Action`.
+   - Verification results have no `id` column, so they match on member ID (ignoring case, punctuation and leading zeros), then on first + last name (marked "Name only. Confirm.").
+   - Discovery results match on `id` (Per Nbr), then name + DOB.
+   - Upcoming patients routed to an uploaded file type who are missing from it show as "Not in Sohar file".
+   - Deductible and out-of-pocket columns are picked up if a Sohar file has them (in-network individual only; family and out-of-network columns are skipped). Sohar's standard verification and discovery exports don't include them today, so those columns stay blank until Sohar provides an export that does.
+   - **Copy admin message** builds a note grouped by location listing only patients who need action, identified by LASFIR and Per Nbr. Send it inside Outlook or Teams only.
+
+**Open full screen** opens the results worklist in an Office dialog (floating over the sheet in Excel on the web, a separate window on desktop) with filters for work queue, deductible/OOP met, location, appointment dates and search. It needs DialogApi 1.2. Data goes to the dialog over `messageChild`; nothing leaves Excel.
 
 Scope `upcoming` keeps patients with a non-cancelled, non-no-show appointment on or after the as-of date. POS is `10` when the next appointment's Event contains a telehealth keyword (`Tele`), else `11`. State comes from a patient state column if the report has one, else Config > Location to State, else Default state.
 
@@ -44,10 +52,11 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 |---|---|
 | `core.js` | Pure logic: header detection, name/date parsing, routing, exports, CSV. Shared with tests. |
 | `excel.js` | Everything that reads or writes the workbook. Table names must match the template. |
-| `app.js` | Pane behaviour, step flow, payer mapping UI, downloads, demo mode. |
+| `app.js` | Pane behaviour, step flow, payer mapping UI, uploads, downloads, demo mode. |
+| `dashboard.html`, `dashboard.js` | Full-screen results worklist shown in the Office dialog. |
 | `index.html`, `style.css` | Pane markup and styles. |
 | `manifest.xml` | Ribbon button and host URL. |
-| `tests/core.test.mjs` | `node --test` suite. |
+| `tests/*.test.mjs` | `node --test` suite. |
 | `scripts/serve.mjs` | Static server for demo mode. |
 
 ## Template contract

@@ -3,9 +3,11 @@
   'use strict';
 
   const SHEETS = { import: 'Import', payerMap: 'Payer Map', sohar: 'Sohar Payers', config: 'Config',
-    patients: 'Patients', verification: 'Verification', discovery: 'Discovery', review: 'Review', dashboard: 'Dashboard' };
+    patients: 'Patients', verification: 'Verification', discovery: 'Discovery', review: 'Review', dashboard: 'Dashboard', results: 'Sohar Results' };
   const TABLES = { payerMap: 'tblPayerMap', sohar: 'tblSoharPayers', config: 'tblConfig', locState: 'tblLocationState',
     patients: 'tblPatients', verification: 'tblVerification', discovery: 'tblDiscovery', review: 'tblReview' };
+  // Created by the add-in on first use; not checked by templateCheck.
+  const RESULTS_TABLE = 'tblSoharResults';
   const CHUNK = 1000;
 
   async function run(fn) { return Excel.run(fn); }
@@ -156,6 +158,104 @@
     });
   }
 
+  // ---------- file upload ----------
+  const canInsertWorkbook = () => Office.context.requirements.isSetSupported('ExcelApi', '1.13');
+
+  /** Replace the Import sheet with CSV rows, written as text so IDs and ZIPs keep leading zeros. */
+  async function writeImportRows(rows) {
+    return run(async (ctx) => {
+      const ws = ctx.workbook.worksheets.getItem(SHEETS.import);
+      ws.getRange().clear();
+      await ctx.sync();
+      const width = rows.reduce((m, r) => Math.max(m, r.length), 0);
+      if (!rows.length || !width) return;
+      const grid = rows.map((r) => { const o = r.slice(); while (o.length < width) o.push(''); return o; });
+      for (let i = 0; i < grid.length; i += CHUNK) {
+        ctx.application.suspendApiCalculationUntilNextSync();
+        const chunk = grid.slice(i, i + CHUNK);
+        const rg = ws.getRangeByIndexes(i, 0, chunk.length, width);
+        rg.numberFormat = chunk.map((r) => r.map(() => '@'));
+        rg.values = chunk;
+        await ctx.sync();
+      }
+    });
+  }
+
+  /** Insert the first sheet of an .xlsx (base64) as a temporary sheet, hand its used range to fn, then remove it. */
+  async function withTempSheet(base64, fn) {
+    if (!canInsertWorkbook()) throw new Error('This version of Excel cannot open .xlsx files from the pane. Save the file as CSV and upload that, or paste it into the sheet.');
+    return run(async (ctx) => {
+      const inserted = ctx.workbook.insertWorksheetsFromBase64(base64, { positionType: Excel.WorksheetPositionType.end });
+      await ctx.sync();
+      const names = inserted.value || [];
+      if (!names.length) throw new Error('That workbook has no sheets.');
+      try {
+        const used = ctx.workbook.worksheets.getItem(names[0]).getUsedRangeOrNullObject(true);
+        used.load('isNullObject,rowCount,columnCount');
+        await ctx.sync();
+        return await fn(ctx, used);
+      } finally {
+        for (const n of names) ctx.workbook.worksheets.getItem(n).delete();
+        await ctx.sync();
+      }
+    });
+  }
+
+  /** Copy an uploaded appointment report (.xlsx) onto the Import sheet, formats included, as if pasted. */
+  async function importXlsx(base64) {
+    return withTempSheet(base64, async (ctx, used) => {
+      const ws = ctx.workbook.worksheets.getItem(SHEETS.import);
+      ws.getRange().clear();
+      if (used.isNullObject) { await ctx.sync(); return; }
+      ws.getRangeByIndexes(0, 0, used.rowCount, used.columnCount).copyFrom(used, Excel.RangeCopyType.all);
+      await ctx.sync();
+    });
+  }
+
+  /** Values of the first sheet of an uploaded .xlsx (Sohar results saved from Excel). */
+  async function readXlsxRows(base64) {
+    return withTempSheet(base64, async (ctx, used) => {
+      if (used.isNullObject) return [];
+      used.load('values');
+      await ctx.sync();
+      return used.values;
+    });
+  }
+
+  /** Create (or rebuild) the Sohar Results sheet and table, then fill it. Not part of the template. */
+  async function writeResults(cols, rows) {
+    await run(async (ctx) => {
+      const t = ctx.workbook.tables.getItemOrNullObject(RESULTS_TABLE);
+      t.load('isNullObject');
+      await ctx.sync();
+      if (!t.isNullObject) {
+        const h = t.getHeaderRowRange(); h.load('values');
+        await ctx.sync();
+        if (h.values[0].join('|') === cols.join('|')) return;
+        t.delete();
+        await ctx.sync();
+      }
+      let ws = ctx.workbook.worksheets.getItemOrNullObject(SHEETS.results);
+      ws.load('isNullObject');
+      await ctx.sync();
+      if (ws.isNullObject) ws = ctx.workbook.worksheets.add(SHEETS.results);
+      else ws.getRange().clear();
+      const hdr = ws.getRangeByIndexes(0, 0, 1, cols.length);
+      hdr.values = [cols];
+      const nt = ws.tables.add(hdr, true);
+      nt.name = RESULTS_TABLE;
+      ws.freezePanes.freezeRows(1);
+      await ctx.sync();
+    });
+    await replaceTable(RESULTS_TABLE, cols, rows);
+    await run(async (ctx) => {
+      const ws = ctx.workbook.worksheets.getItem(SHEETS.results);
+      ws.getRange().format.autofitColumns();
+      ws.activate();
+      await ctx.sync();
+    });
+  }
+
   async function setConfigValue(setting, value) {
     return run(async (ctx) => {
       const t = ctx.workbook.tables.getItem(TABLES.config);
@@ -186,5 +286,6 @@
     });
   }
 
-  root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable, setConfigValue, activate, templateCheck };
+  root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable,
+    writeImportRows, importXlsx, readXlsxRows, writeResults, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

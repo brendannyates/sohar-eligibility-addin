@@ -1,11 +1,11 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
-  const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null };
+  const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, demo: false };
   const $ = (id) => document.getElementById(id);
 
   // ---------- boot ----------
@@ -32,6 +32,7 @@
 
   function startDemo(why) {
     X = demoAdapter();
+    state.demo = true;
     const b = document.createElement('div');
     b.className = 'banner';
     b.textContent = `Demo mode (${why}) Synthetic data only; nothing is written anywhere.`;
@@ -45,6 +46,13 @@
     $('btnBuild').addEventListener('click', () => guard(build));
     $('btnDlVer').addEventListener('click', () => download('verification'));
     $('btnDlDisc').addEventListener('click', () => download('discovery'));
+    $('btnUpload').addEventListener('click', () => $('fileImport').click());
+    $('fileImport').addEventListener('change', (e) => guard(() => uploadImport(e.target)));
+    $('btnResults').addEventListener('click', () => $('fileResults').click());
+    $('fileResults').addEventListener('change', (e) => guard(() => uploadResults(e.target)));
+    $('btnCopyMsg').addEventListener('click', () => guard(copyAdminMessage));
+    $('btnDlWork').addEventListener('click', () => saveCSV(`sohar_results_worklist_${stamp()}.csv`, C.toCSV(C.RESULTS_COLS, state.results || [])));
+    $('btnFull').addEventListener('click', () => guard(openFull));
     document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => X.activate(b.dataset.goto)));
     $('scope').addEventListener('change', () => X.setConfigValue('Scope', $('scope').value === 'all' ? 'All patients' : 'Upcoming appointments').catch(() => {}));
     $('asOf').addEventListener('change', () => X.setConfigValue('As-of date', $('asOf').value ? isoToUs($('asOf').value) : '').catch(() => {}));
@@ -61,6 +69,19 @@
   }
 
   // ---------- step 1 ----------
+  async function uploadImport(input) {
+    const file = input.files && input.files[0];
+    input.value = ''; // so choosing the same file again still fires
+    if (!file) return;
+    busy('btnUpload', 'Loading…');
+    try {
+      if (isCSV(file)) await X.writeImportRows(C.parseCSV(await readText(file)));
+      else if (isXlsx(file)) await X.importXlsx(await readBase64(file));
+      else throw new Error(`${file.name} is not .csv or .xlsx. In Excel, use File > Save As to change the type, then upload again.`);
+    } finally { unbusy('btnUpload', 'Upload report file'); }
+    await scan();
+  }
+
   async function scan() {
     busy('btnScan', 'Scanning…');
     try {
@@ -220,9 +241,91 @@
 
   function download(kind) {
     const cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS;
-    const csv = C.toCSV(cols, state.exports[kind]);
-    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const name = `sohar_${kind}_import_${state.cfg.scope}_${stamp}.csv`;
+    saveCSV(`sohar_${kind}_import_${state.cfg.scope}_${stamp()}.csv`, C.toCSV(cols, state.exports[kind]));
+  }
+
+  // ---------- step 5 ----------
+  async function uploadResults(input) {
+    const files = [...(input.files || [])];
+    input.value = '';
+    if (!files.length) return;
+    busy('btnResults', 'Matching…');
+    try {
+      const list = [];
+      for (const f of files) {
+        if (isCSV(f)) list.push({ name: f.name, rows: C.parseCSV(await readText(f)) });
+        else if (isXlsx(f)) list.push({ name: f.name, rows: await X.readXlsxRows(await readBase64(f)) });
+        else list.push({ name: f.name, rows: [] });
+      }
+      state.rows = await X.readImportRows();
+      const cfg = await X.readConfig();
+      if ($('asOf').value) cfg.asOf = new Date($('asOf').value + 'T00:00:00Z');
+      const res = C.mergeSoharResults(state.rows, list, { ...cfg, payerMap: await X.readPayerMap() });
+      const out = $('resultsResult'); out.hidden = false;
+      if (res.error) { out.innerHTML = `<p class="bad">${esc(res.error)}</p>`; return; }
+      if (!res.results.length) { out.innerHTML = `<p class="bad">None of these files look like a Sohar verification or discovery export.</p>`; return; }
+      await X.writeResults(C.RESULTS_COLS, res.results);
+      state.results = res.results; state.resultsAsOf = res.asOf;
+
+      const q = res.counts.byQueue;
+      const c = res.counts;
+      const dedMet = res.results.filter((r) => r['Deductible Met'] === 'Yes').length;
+      const oopMet = res.results.filter((r) => r['OOP Met'] === 'Yes').length;
+      out.innerHTML = `
+        <div class="counts q4">
+          <div class="count act"><div class="n">${q['Action needed'] || 0}</div><div class="l">action needed</div></div>
+          <div class="count unm"><div class="n">${q.Unmatched || 0}</div><div class="l">unmatched</div></div>
+          <div class="count pen"><div class="n">${q.Pending || 0}</div><div class="l">pending</div></div>
+          <div class="count clr"><div class="n">${q.Clear || 0}</div><div class="l">clear</div></div>
+        </div>
+        <p>${c.matched} result${c.matched === 1 ? '' : 's'} matched to the appointment report${c.notReturned ? `; ${c.notReturned} upcoming patient${c.notReturned === 1 ? ' was' : 's were'} not in the Sohar files` : ''}.</p>
+        ${c.withBenefits
+          ? `<p class="ok">${c.withBenefits} row${c.withBenefits === 1 ? ' has' : 's have'} benefit amounts: ${dedMet} deductible met, ${oopMet} out-of-pocket max met.</p>`
+          : `<p class="warn">These files have no deductible or out-of-pocket columns, so Deductible Met and OOP Met are blank. Sohar's standard exports don't include them; ask Sohar for an export with benefit accumulators.</p>`}
+        ${res.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar export): ${res.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
+      $('btnCopyMsg').disabled = false; $('btnDlWork').disabled = false;
+      markDone(5);
+    } finally { unbusy('btnResults', 'Upload Sohar results'); }
+  }
+
+  async function currentResults() {
+    if (state.results) return state.results;
+    if (state.demo) return null;
+    try { return await X.readTable('tblSoharResults'); } catch (e) { return null; }
+  }
+
+  async function copyAdminMessage() {
+    const rows = await currentResults();
+    if (!rows || !rows.length) { setStatus('Upload Sohar results first (step 5).', 'bad'); return; }
+    const text = C.adminMessage(rows, { asOf: state.resultsAsOf });
+    if (await copyText(text)) setStatus('Admin message copied. Paste it into Outlook or Teams.', 'ok');
+    else setStatus('Copy was blocked. Use Open full screen and copy from the message box.', 'bad');
+  }
+
+  // Full-screen worklist in an Office dialog: floats over the sheet in Excel on the web, its own window on desktop.
+  async function openFull() {
+    const url = new URL('dashboard.html', location.href).href;
+    if (state.demo) { window.open(url, '_blank'); return; }
+    if (!Office.context.requirements.isSetSupported('DialogApi', '1.2')) {
+      setStatus('This version of Excel cannot open the full-screen view. Use the Sohar Results sheet.', 'bad'); return;
+    }
+    const rows = (await currentResults()) || [];
+    const payload = JSON.stringify({ type: 'data', results: rows, asOf: state.resultsAsOf ? state.resultsAsOf.toISOString() : null });
+    Office.context.ui.displayDialogAsync(url, { height: 85, width: 85, displayInIframe: true }, (r) => {
+      if (r.status !== Office.AsyncResultStatus.Succeeded) { setStatus(`Could not open full screen: ${r.error.message}`, 'bad'); return; }
+      const dlg = r.value;
+      dlg.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => {
+        let m; try { m = JSON.parse(arg.message); } catch (e) { return; }
+        if (m.type === 'ready') {
+          // messageChild has a size cap, so the data goes over in pieces.
+          const size = 20000, n = Math.max(1, Math.ceil(payload.length / size));
+          for (let i = 0; i < n; i++) dlg.messageChild(JSON.stringify({ type: 'chunk', i, n, data: payload.slice(i * size, (i + 1) * size) }));
+        } else if (m.type === 'close') dlg.close();
+      });
+    });
+  }
+
+  function saveCSV(name, csv) {
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -238,6 +341,29 @@
   function busy(id, text) { const b = $(id); b.dataset.label = b.textContent; b.textContent = text; b.disabled = true; }
   function unbusy(id, text) { const b = $(id); b.textContent = text || b.dataset.label; b.disabled = false; }
   function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+  function stamp() { return new Date().toISOString().slice(0, 10).replace(/-/g, ''); }
+  const isCSV = (f) => /\.csv$/i.test(f.name);
+  const isXlsx = (f) => /\.xls[xm]$/i.test(f.name);
+  async function readText(file) {
+    // NextGen and Excel CSVs are often Windows-1252; fall back when the bytes are not valid UTF-8.
+    const buf = await file.arrayBuffer();
+    try { return new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch (e) { return new TextDecoder('windows-1252').decode(buf); }
+  }
+  async function readBase64(file) {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(bin);
+  }
+  async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall through */ }
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.className = 'offscreen';
+    document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
   function isoToUs(iso) { const [y, m, d] = iso.split('-'); return `${m}/${d}/${y}`; }
   function label(f) {
     return { patName: 'Patient name', dob: 'DOB', perNbr: 'Per Nbr', mrn: 'MRN', apptDt: 'Appt date', begTm: 'Start time', event: 'Event', loc: 'Location', sts: 'Status', patSts: 'Patient status', payer: 'Payer', secPayer: 'Secondary payer', polNbr: 'Member ID', polNbrLstEnc: 'Member ID (last enc)', zip: 'ZIP', state: 'State', guarName: 'Guarantor', rendering: 'Rendering' }[f] || f;
@@ -281,6 +407,10 @@
     return {
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
+      async writeImportRows(r) { rows = r; },
+      async importXlsx() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
+      async readXlsxRows() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
+      async writeResults() {},
       async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA' }, defaultState: '', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },
