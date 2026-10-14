@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.5.0';
+  const VERSION = '0.5.1';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
@@ -344,10 +344,9 @@
       await X.writeIr(C.IR_COLS, ir);
       state.ir = ir;
       const by = {}; for (const r of ir) by[r.Category] = (by[r.Category] || 0) + 1;
-      const matched = ir.filter((r) => r.Match !== 'No Sohar result').length;
-      box.innerHTML = `<p class="ok">${parsed.records.length} IR Portal rows read; ${ir.length} are insurance-related, ${matched} matched to a Sohar result.</p>
-        <p>${Object.entries(by).map(([k, v]) => `${esc(k)}: ${v}`).join(' · ') || 'No insurance-related items.'}</p>
-        ${ir.length - matched ? `<p class="warn">${ir.length - matched} item${ir.length - matched > 1 ? 's have' : ' has'} no Sohar result; the IR Cross-Ref sheet says to send them to Sohar.</p>` : ''}`;
+      const insurance = parsed.records.filter((r) => C.irCategory(r.desc)).length;
+      box.innerHTML = `<p class="ok">${parsed.records.length} IR Portal rows read; ${insurance} are insurance-related, ${ir.length} of those have a Sohar result and are on the IR Cross-Ref sheet.</p>
+        <p>${Object.entries(by).map(([k, v]) => `${esc(k)}: ${v}`).join(' · ') || 'No insurance-related items with a Sohar result.'}</p>`;
       $('btnCopyIr').disabled = false; $('btnDlIr').disabled = false;
       markDone(6);
       if (dlg) await sendToDialog(await payload());

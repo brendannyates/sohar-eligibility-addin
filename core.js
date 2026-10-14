@@ -847,7 +847,6 @@
     const start = ver ? parseDate(ver['Coverage Start']) : null;
     const lateStart = start && dos && start > dos ? ` Coverage started ${fmtDate(start)}, after the ${fmtDate(dos)} DOS.` : '';
     const pick = found && disc['Choose in NextGen'] ? ` (${disc['Choose in NextGen']})` : '';
-    if (!ver && !disc) return 'Not in this Sohar run. Send for discovery (no insurance) or verification (insurance on file).';
     if (cat === 'Missing insurance' || cat === 'Missing demographics') {
       if (found) return `Sohar found ${payer(disc)}. Add it in NextGen${pick}, then resolve the IR item.`;
       if (verOk) return `Sohar verified ${payer(ver)} active${ver.Plan ? ` (${ver.Plan})` : ''}. Confirm it is on the patient in NextGen and on the claim, then resolve the IR item.${lateStart}`;
@@ -887,17 +886,19 @@
       let rs = byMrn.get(mk(ir.mrn)) || [], match = rs.length ? 'MRN' : '';
       if (!rs.length && dob) { rs = byName.get(`${nameKey(ir.first, ir.last)}|${fmtDate(dob)}`) || []; if (rs.length) match = 'Name + DOB'; }
       const latest = (kind) => rs.filter((r) => r['Sent As'] === kind && r['Sohar Status'] !== 'Not in Sohar file').sort((a, b) => String(b['Sohar Date']).localeCompare(String(a['Sohar Date'])))[0];
-      const ver = latest('Verification'), disc = latest('Discovery'), any = ver || disc || rs[0] || {};
+      const ver = latest('Verification'), disc = latest('Discovery'), any = ver || disc || {};
+      if (!ver && !disc) continue; // only items Sohar has something to say about
+
       out.push({
         'Category': cat, 'Description': str(ir.desc), 'Incident ID': str(ir.id), 'DOS': fmtDate(dos), 'Due Date': fmtDate(due),
         'Facility': str(ir.fac), 'Provider': str(ir.prov), 'MRN': str(ir.mrn), 'Last Name': str(ir.last), 'First Name': str(ir.first),
         'Per Nbr': any['Per Nbr'] || '', 'Next Appt': any['Next Appt'] || '', 'Next Location': any['Next Location'] || '',
-        'Sohar Result': [ver ? `Verification: ${ver['Sohar Status']}` : '', disc ? `Discovery: ${disc['Sohar Status']}` : ''].filter(Boolean).join('; ') || (rs.length ? 'Not in Sohar file' : 'No Sohar result'),
+        'Sohar Result': [ver ? `Verification: ${ver['Sohar Status']}` : '', disc ? `Discovery: ${disc['Sohar Status']}` : ''].filter(Boolean).join('; '),
         'Sohar Payer': (ver && ver['Sohar Payer']) || (disc && disc['Sohar Payer']) || '', 'Plan': (ver && ver.Plan) || '',
         'Coverage Start': (ver && ver['Coverage Start']) || '', 'Coverage End': (ver && ver['Coverage End']) || '',
         'Benefit Flag': (ver && ver['Benefit Flag']) || '', 'Choose in NextGen': (disc && disc['Choose in NextGen']) || '',
         'Open NextGen Tasks': any['Per Nbr'] ? openTasks(any['Per Nbr']).join('; ') : '',
-        'Suggested Action': irAction(cat, ver, disc, dos), 'Match': match || 'No Sohar result',
+        'Suggested Action': irAction(cat, ver, disc, dos), 'Match': match,
       });
     }
     // Most urgent first: due date, then DOS.

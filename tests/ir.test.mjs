@@ -38,7 +38,7 @@ test('parseIrPortal finds headers that start in column C', () => {
 test('irCrossReference joins IR items to Sohar results and suggests the fix', () => {
   const rows = C.irCrossReference(C.parseIrPortal(IR).records, RESULTS, TASKS);
   for (const r of rows) assert.deepEqual(Object.keys(r), C.IR_COLS);
-  assert.equal(rows.length, 4, 'the signature item is left out');
+  assert.equal(rows.length, 3, 'the signature item and the item with no Sohar result are left out');
   const by = (id) => rows.find((r) => r['Incident ID'] === id);
 
   const a = by('I-1');
@@ -54,9 +54,10 @@ test('irCrossReference joins IR items to Sohar results and suggests the fix', ()
   assert.equal(c.Match, 'Name + DOB', 'no MRN on the IR row');
   assert.match(c['Suggested Action'], /does not check authorizations/);
 
-  const d = by('I-5');
-  assert.equal(d.Match, 'No Sohar result');
-  assert.match(d['Suggested Action'], /^Not in this Sohar run/);
+  assert.equal(by('I-5'), undefined, 'no Sohar result for this MRN');
+  const notReturned = C.irCrossReference(C.parseIrPortal(IR).records,
+    [...RESULTS, { ...RESULTS[0], 'Per Nbr': '107', MRN: '777', 'Sohar Status': 'Not in Sohar file', 'Sent As': 'Verification' }], TASKS);
+  assert.equal(notReturned.find((r) => r['Incident ID'] === 'I-5'), undefined, '"Not in Sohar file" counts as no result');
 
   assert.equal(rows[0]['Incident ID'], 'I-2', 'soonest due date first');
 });
