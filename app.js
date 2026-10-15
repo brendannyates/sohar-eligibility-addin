@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.6.3';
+  const VERSION = '0.7.0';
   const C = window.SoharCore;
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
@@ -60,10 +60,13 @@
     if (saved.length) {
       $('resultsResult').innerHTML = '';
       const html = await processResults([]);
-      if (html) $('resultsResult').insertAdjacentHTML('beforeend', html);
+      if (html) $('resultsResult').insertAdjacentHTML('beforeend', html); foldProgress();
       did += `; ${saved.length} saved Sohar result${saved.length === 1 ? '' : 's'} matched`;
       const ir = await X.readIrUploads();
       if (ir.length) { await runIr(ir); did += '; IR cross-check re-run'; }
+    } else if (!state.demo && await X.tableRowCount('tblSoharResults').catch(() => 0)) {
+      // Results written by an older version, before uploads were saved in the workbook: they cannot be re-matched.
+      note('resultsResult', 'The Sohar Results sheet has results from an earlier version of this add-in, but the Sohar files themselves were not saved in this workbook. Drop the Sohar outputs here again so follow-ups and benefits are current.', 'warn');
     }
     const last = saved.map((s) => String(s.Uploaded || '')).sort().pop();
     await stampUpdated(`${did}${last ? `. Last Sohar upload ${fmtStamp(new Date(last))}` : ''}`);
@@ -97,20 +100,17 @@
     $('btnBuild').addEventListener('click', () => guard(build, 'buildResult'));
     $('btnDlVer').addEventListener('click', () => guard(() => download('verification'), 'preflight'));
     $('btnDlDisc').addEventListener('click', () => guard(() => download('discovery'), 'preflight'));
-    $('btnUpload').addEventListener('click', () => $('fileImport').click());
-    $('fileImport').addEventListener('change', (e) => guard(() => uploadImport(e.target), 'scanResult'));
-    $('btnResults').addEventListener('click', () => $('fileResults').click());
-    $('fileResults').addEventListener('change', (e) => guard(() => uploadResults(e.target), 'resultsResult'));
+    dropZone('dropReport', 'fileImport', (files) => guard(() => uploadImport(files), 'scanResult'));
+    dropZone('dropResults', 'fileResults', (files) => guard(() => uploadResults(files), 'resultsResult'));
     $('btnCopyMsg').addEventListener('click', () => guard(() => copyAdminMessage('action'), 'resultsResult'));
-    $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits'), 'resultsResult'));
-    $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(`sohar_results_worklist_${stamp()}.csv`, C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
-    $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(`sohar_benefits_${stamp()}.csv`, C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'resultsResult'), 'resultsResult'));
+    $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits'), 'benBox'));
+    $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(C.fileName('worklist'), C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
+    $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(C.fileName('benefits'), C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'benBox'), 'benBox'));
     $('btnDlDiscVer').addEventListener('click', () => guard(downloadDiscoveryVerify, 'resultsResult'));
-    $('btnDlFinal').addEventListener('click', () => guard(downloadTrackerFile, 'resultsResult'));
+    $('btnDlFinal').addEventListener('click', () => guard(downloadTrackerFile, 'benBox'));
     $('btnClearSaved').addEventListener('click', () => guard(clearSaved, 'resultsResult'));
-    $('btnDlTasks').addEventListener('click',() => guard(async () => saveCSV(`nextgen_tasks_${stamp()}.csv`, C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
+    $('btnDlTasks').addEventListener('click',() => guard(async () => saveCSV(C.fileName('tasks'), C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
     $('btnFull').addEventListener('click', () => guard(() => openFull(), 'resultsResult'));
-    $('btnFull2').addEventListener('click', () => guard(() => openFull('upload'), 'resultsResult'));
     $('btnIr').addEventListener('click', () => $('fileIr').click());
     $('fileIr').addEventListener('change', (e) => guard(() => uploadIr(e.target), 'irResult'));
     $('btnCopyIr').addEventListener('click', () => guard(async () => {
@@ -118,7 +118,7 @@
       if (await copyText(text)) note('irResult', 'IR message copied. Paste it into Outlook or Teams.', 'ok');
       else note('irResult', 'Copy is blocked here. Open full screen > Messages to copy it.', 'warn');
     }, 'irResult'));
-    $('btnDlIr').addEventListener('click', () => guard(async () => saveCSV(`ir_portal_cross_reference_${stamp()}.csv`, C.IR_COLS, await currentIr(), 'irResult'), 'irResult'));
+    $('btnDlIr').addEventListener('click', () => guard(async () => saveCSV(C.fileName('ir'), C.IR_COLS, await currentIr(), 'irResult'), 'irResult'));
     diagnostics();
     document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => X.activate(b.dataset.goto)));
     $('scope').addEventListener('change', () => X.setConfigValue('Scope', $('scope').value === 'all' ? 'All patients' : 'Upcoming appointments').catch(() => {}));
@@ -136,17 +136,16 @@
   }
 
   // ---------- step 1 ----------
-  async function uploadImport(input) {
-    const file = input.files && input.files[0];
-    input.value = ''; // so choosing the same file again still fires
+  async function uploadImport(files) {
+    const file = files[0];
     if (!file) return;
-    busy('btnUpload', 'Loading…');
+    if (!isCSV(file) && !isXlsx(file)) throw new Error(`${file.name} is not .xlsx or .csv. Open it in Excel, File > Save As > Excel Workbook (.xlsx), then upload that.`);
+    dropBusy('dropReport', `Loading ${file.name}…`);
     try {
       if (isCSV(file)) await X.writeImportRows(C.parseCSV(await readText(file)));
-      else if (isXlsx(file)) await X.importXlsx(await readBase64(file));
-      else throw new Error(`${file.name} is not .csv or .xlsx. In Excel, use File > Save As to change the type, then upload again.`);
-    } finally { unbusy('btnUpload', 'Upload report file'); }
-    await refreshAll();
+      else await X.importXlsx(await readBase64(file));
+      await refreshAll();
+    } finally { dropBusy('dropReport'); }
   }
 
   async function scan() {
@@ -165,13 +164,11 @@
       const miss = det.optionalMissing.map((f) => `<span class="chip miss">${label(f)} missing</span>`).join('');
       let warn = '';
       if (det.colMap.patName == null || det.colMap.dob == null) warn += `<p class="warn">Sohar needs patient name and DOB. This report has ${det.colMap.patName == null ? 'no name column' : ''}${det.colMap.patName == null && det.colMap.dob == null ? ' and ' : ''}${det.colMap.dob == null ? 'no DOB column' : ''}; those fields will be blank until the report includes them.</p>`;
-      if (det.colMap.zip == null) warn += `<p class="warn">No ZIP column. Discovery rows will have an empty zipCode.</p>`;
-      out.innerHTML = `<p class="ok">Header found on row ${det.headerRow + 1}. About ${dataRows.toLocaleString()} appointment rows.</p><div class="chips">${found}${miss}</div>${warn}`;
+      out.innerHTML = `<p class="ok">Report loaded: ${dataRows.toLocaleString()} appointment rows.</p>${warn}<details class="more inline"><summary>Columns found</summary><div class="chips">${found}${miss}</div></details>`;
       if (det.missing.length) { out.innerHTML += `<p class="bad">Missing required columns: ${det.missing.map(label).join(', ')}.</p>`; $('btnBuild').disabled = true; return; }
       await loadPayerStep();
       $('btnBuild').disabled = false;
-      markDone(1); setCurrent(2);
-    } finally { unbusy('btnScan', 'Refresh from Import sheet'); }
+    } finally { unbusy('btnScan', 'Re-read the Import sheet'); }
   }
 
   // ---------- step 2 ----------
@@ -179,6 +176,12 @@
     state.payerMap = await X.readPayerMap();
     state.soharPayers = await X.readSoharPayers();
     renderPayers();
+  }
+
+  /** After a payer is mapped, rebuild so the patient moves from discovery to verification right away. */
+  async function afterMap() {
+    await loadPayerStep();
+    if (state.patients) await build();
   }
 
   function payersInImport() {
@@ -202,12 +205,11 @@
     const probable = [...counts].filter(([n]) => { const h = idx.get(n.toLowerCase()); return h && /^probable$/i.test(h.confidence); });
     const box = $('payerList'); box.hidden = false;
     if (!unmapped.length) {
-      box.innerHTML = `<p class="ok">All ${counts.size} payer names in this report are mapped.</p>` +
-        (probable.length ? `<p class="warn">${probable.length} are marked Probable. They will be verified under the mapped ID; confirm them on the Payer Map sheet after the first Sohar run.</p>` : '');
-      markDone(2); setCurrent(3);
+      box.hidden = !probable.length;
+      box.innerHTML = probable.length ? `<p class="hint">${probable.length} payer name${probable.length > 1 ? 's are' : ' is'} mapped as Probable; confirm on the Payer Map sheet after the first Sohar run.</p>` : '';
       return;
     }
-    box.innerHTML = `<p class="warn">${unmapped.length} payer name${unmapped.length > 1 ? 's' : ''} not in the Payer Map. Unmapped payers go to discovery.</p>`;
+    box.innerHTML = `<p class="warn"><b>${unmapped.length} insurance name${unmapped.length > 1 ? 's' : ''} need a Sohar payer.</b> Pick one below and it is remembered. Anything left unmapped goes to discovery.</p>`;
     for (const [name, pers] of unmapped) {
       const wrap = document.createElement('div');
       wrap.className = 'payer';
@@ -226,7 +228,7 @@
           b.innerHTML = `<span>${esc(s.payerName)}</span><span class="id">${esc(s.payerId)}</span>`;
           b.addEventListener('click', () => guard(async () => {
             await X.upsertPayerMap({ nextgenPayerName: name, payerId: s.payerId, payerName: s.payerName, confidence: 'Confirmed', notes: 'Mapped in the add-in' });
-            await loadPayerStep();
+            await afterMap();
           }));
           sugg.appendChild(b);
         }
@@ -234,16 +236,15 @@
       input.addEventListener('input', () => show(input.value));
       wrap.querySelector('[data-act="notpayer"]').addEventListener('click', () => guard(async () => {
         await X.upsertPayerMap({ nextgenPayerName: name, payerId: '', payerName: '', confidence: 'Not a payer', notes: 'Marked in the add-in' });
-        await loadPayerStep();
+        await afterMap();
       }));
       wrap.querySelector('[data-act="skip"]').addEventListener('click', () => guard(async () => {
         await X.upsertPayerMap({ nextgenPayerName: name, payerId: '', payerName: '', confidence: 'Review', notes: 'Left unmapped in the add-in; patients go to discovery' });
-        await loadPayerStep();
+        await afterMap();
       }));
       show('');
       box.appendChild(wrap);
     }
-    setCurrent(2);
   }
 
   // ---------- step 3 ----------
@@ -271,27 +272,29 @@
       const sev = { High: 0, Medium: 0, Low: 0 };
       for (const r of res.review) sev[r.Severity] = (sev[r.Severity] || 0) + 1;
       out.innerHTML = `
-        <p>${s.patients.toLocaleString()} patients in the report, ${s.inScope.toLocaleString()} in scope${state.cfg.scope === 'upcoming' ? ` (appointment on or after ${C.fmtDate(res.asOf)})` : ''}.</p>
+        <p>${s.inScope.toLocaleString()} patient${s.inScope === 1 ? '' : 's'}${state.cfg.scope === 'upcoming' ? ` with a visit on or after ${C.fmtDate(res.asOf)}` : ' in the report'}.</p>
         <div class="routebar" role="img" aria-label="${s.verification} verification, ${s.discovery} discovery, ${s.exclude || 0} excluded"></div>
         <div class="counts">
-          <div class="count v"><div class="n">${s.verification}</div><div class="l">verification</div></div>
-          <div class="count d"><div class="n">${s.discovery}</div><div class="l">discovery</div></div>
-          <div class="count x"><div class="n">${s.exclude || 0}</div><div class="l">excluded</div></div>
+          <div class="count v"><div class="n">${s.verification}</div><div class="l">verification<br>(have insurance on file)</div></div>
+          <div class="count d"><div class="n">${s.discovery}</div><div class="l">discovery<br>(insurance missing or unmapped)</div></div>
+          <div class="count x"><div class="n">${s.exclude || 0}</div><div class="l">left out</div></div>
         </div>
-        <p class="issues">Review sheet: <span class="hi">${sev.High} high</span> <span class="md">${sev.Medium} medium</span> <span class="lo">${sev.Low} low</span></p>`;
+        ${sev.High ? `<p class="issues"><span class="hi">${sev.High} high-priority item${sev.High === 1 ? '' : 's'}</span> on the Review sheet.</p>` : ''}`;
       // widths set through the CSSOM so the strict style-src policy holds
       const bar = out.querySelector('.routebar');
       for (const [cls, n] of [['v', s.verification], ['d', s.discovery], ['x', s.exclude || 0]]) {
         const seg = document.createElement('span'); seg.className = cls; seg.style.width = pct(n); bar.appendChild(seg);
       }
       preflight();
-      markDone(3); setCurrent(4);
-      $('btnDlVer').disabled = !state.exports.verification.length;
-      $('btnDlDisc').disabled = !state.exports.discovery.length;
-    } finally { unbusy('btnBuild', 'Build patient list'); }
+      markDone(1); setCurrent(2);
+      const nv = state.exports.verification.length, nd = state.exports.discovery.length;
+      $('btnDlVer').disabled = !nv; $('btnDlDisc').disabled = !nd;
+      $('fnVer').textContent = `${nv} patient${nv === 1 ? '' : 's'} · ${C.fileName('verification')}`;
+      $('fnDisc').textContent = `${nd} patient${nd === 1 ? '' : 's'} · ${C.fileName('discovery')}`;
+    } finally { unbusy('btnBuild', 'Rebuild with these options'); }
   }
 
-  // ---------- step 4 ----------
+  // ---------- step 2: save the Sohar imports ----------
   function preflight() {
     const box = $('preflight'); box.hidden = false;
     const all = [...state.exports.verification, ...state.exports.discovery];
@@ -301,23 +304,23 @@
     const parts = [];
     if (noName) parts.push(`<p class="bad">${noName} rows have no first or last name. Sohar will reject them.</p>`);
     if (noDob) parts.push(`<p class="bad">${noDob} rows have no date of birth. Sohar will reject them.</p>`);
-    if (noZip) parts.push(`<p class="warn">${noZip} discovery rows have no ZIP.</p>`);
-    if (!parts.length) parts.push(`<p class="ok">All rows have name, DOB and state.</p>`);
+    if (noZip) parts.push(`<p class="hint">${noZip} discovery row${noZip === 1 ? ' has' : 's have'} no ZIP (the NextGen report has none). Sohar still searches by name, DOB and state.</p>`);
+    box.hidden = !parts.length;
     box.innerHTML = parts.join('');
   }
 
   async function download(kind) {
-    if (!state.exports) throw new Error('Build the patient list first (step 3).');
+    if (!state.exports) throw new Error('Upload the NextGen report first (step 1).');
     const cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS;
-    await saveCSV(`sohar_${kind}_import_${state.cfg.scope}_${stamp()}.csv`, cols, state.exports[kind], 'preflight');
+    await saveCSV(C.fileName(kind), cols, state.exports[kind], 'preflight');
+    markDone(2); setCurrent(3);
   }
 
-  // ---------- step 5 ----------
-  async function uploadResults(input) {
-    const files = [...(input.files || [])];
-    input.value = '';
+  // ---------- step 3: Sohar results ----------
+  async function uploadResults(files) {
+    files = [...files];
     if (!files.length) return;
-    busy('btnResults', 'Matching…');
+    dropBusy('dropResults', `Matching ${files.length} file${files.length > 1 ? 's' : ''}…`);
     $('resultsResult').hidden = false; $('resultsResult').innerHTML = '<ol class="progress"></ol>';
     progress(`Reading ${files.length} file${files.length > 1 ? 's' : ''}…`);
     try {
@@ -329,7 +332,16 @@
       }
       const html = await processResults(list);
       $('resultsResult').insertAdjacentHTML('beforeend', html);
-    } finally { unbusy('btnResults', 'Upload Sohar results'); }
+      foldProgress();
+    } finally { dropBusy('dropResults'); }
+  }
+  /** Tuck the file-by-file progress lines under "What was read" once the summary is up. */
+  function foldProgress() {
+    const ol = $('resultsResult').querySelector('ol.progress');
+    if (!ol || ol.parentElement.tagName === 'DETAILS') return;
+    const d = document.createElement('details'); d.className = 'more inline';
+    d.innerHTML = '<summary>What was read</summary>';
+    ol.replaceWith(d); d.appendChild(ol);
   }
 
   /** Match Sohar files to the Import report, write Sohar Results + NextGen Tasks, return a summary (HTML). Shared by pane and full screen. */
@@ -363,36 +375,33 @@
     const dv = C.keepMemberIds(res.discoveryVerification, await X.readDiscoveryVerify());
     await X.writeDiscoveryVerify(C.VERIFICATION_COLS, dv);
     state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv;
-    for (const id of ['btnCopyMsg', 'btnCopyBen', 'btnDlWork', 'btnDlBen', 'btnDlTasks', 'btnDlFinal']) $(id).disabled = false;
-    $('btnDlDiscVer').disabled = !dv.length;
-    markDone(5);
+    for (const id of ['btnDlWork', 'btnDlBen', 'btnDlTasks']) $(id).disabled = false;
+    $('fixActions').hidden = false;
+    markDone(3); setCurrent(4);
+
+    // Discovery found coverage -> those patients need a verification run before benefits exist.
     const noId = dv.filter((r) => !r.memberId).length;
-    const verifiedFromDisc = res.results.filter((r) => r['Discovery Follow-up'] === 'From discovery').length;
-    const dvHtml = (dv.length
-      ? `<p class="ok"><b>${dv.length} discovery patient${dv.length === 1 ? '' : 's'} ready to verify.</b> Click <b>Download discovery verification import</b> and upload it to Sohar as a verification batch, then bring the verification output back here; it is added to these results.</p>`
-        + (noId ? `<p class="warn">${noId} of them ha${noId === 1 ? 's' : 've'} no member ID. Open the Sohar link, type it in the memberId column on the Discovery Verify sheet, then download.</p>` : '')
-      : '')
-      + (verifiedFromDisc ? `<p class="ok">${verifiedFromDisc} plan${verifiedFromDisc === 1 ? '' : 's'} found by discovery ${verifiedFromDisc === 1 ? 'has' : 'have'} been verified; benefits are on those rows.</p>` : '');
+    $('discVerBox').hidden = !dv.length;
+    if (dv.length) {
+      $('discVerText').innerHTML = `<b>Discovery found insurance for ${dv.length} patient${dv.length === 1 ? '' : 's'}.</b> Benefits need one more Sohar run: save this verification file, upload it to Sohar, then drop Sohar's output above.`
+        + (noId ? ` <span class="warn">${noId} ha${noId === 1 ? 's' : 've'} no member ID yet: type ${noId === 1 ? 'it' : 'them'} in the memberId column on the <b>Discovery Verify</b> sheet first.</span>` : '');
+      $('fnDiscVer').textContent = `${dv.length} patient${dv.length === 1 ? '' : 's'} · ${C.fileName('discoveryVerify')}`;
+    }
 
     const q = res.counts.byQueue, c = res.counts;
-    const n = (col, v) => res.results.filter((r) => r[col] === v).length;
     const open = tasks.filter((t) => !t.Done).length;
-    const pctTxt = `${Math.round((cfg.approachingPct ?? 0.2) * 100)}%`;
+    const kinds = { verification: res.results.filter((r) => r['Sent As'] === 'Verification').length, discovery: res.results.filter((r) => r['Sent As'] === 'Discovery').length, waiting: dv.length };
     const html = `
+        <p>${c.matched} Sohar result${c.matched === 1 ? '' : 's'} matched to patients${c.notReturned ? `; ${c.notReturned} upcoming patient${c.notReturned === 1 ? ' was' : 's were'} not in the Sohar files` : ''}.</p>
         <div class="counts q4">
-          <div class="count act"><div class="n">${q['Action needed'] || 0}</div><div class="l">action needed</div></div>
+          <div class="count act"><div class="n">${q['Action needed'] || 0}</div><div class="l">need action</div></div>
           <div class="count unm"><div class="n">${q.Unmatched || 0}</div><div class="l">unmatched</div></div>
           <div class="count pen"><div class="n">${q.Pending || 0}</div><div class="l">pending</div></div>
           <div class="count clr"><div class="n">${q.Clear || 0}</div><div class="l">clear</div></div>
         </div>
-        <p>${c.matched} result${c.matched === 1 ? '' : 's'} matched to the appointment report${c.notReturned ? `; ${c.notReturned} upcoming patient${c.notReturned === 1 ? ' was' : 's were'} not in the Sohar files` : ''}.</p>
-        <p><b>${open} NextGen task${open === 1 ? '' : 's'}</b> on the NextGen Tasks sheet${tasks.length - open ? ` (${tasks.length - open} already done)` : ''}.</p>
-        ${dvHtml}
-        ${c.withBenefits
-          ? `<p class="ok">${c.withBenefits} verified patient${c.withBenefits === 1 ? ' has' : 's have'} benefits. Deductible: ${n('Deductible Status', 'Met')} met, ${n('Deductible Status', 'Approaching')} approaching, ${n('Deductible Status', 'None')} with no deductible. OOP max: ${n('OOP Status', 'Met')} met, ${n('OOP Status', 'Approaching')} approaching.</p>
-             <p class="hint">Approaching means ${pctTxt} or less remaining (Config: Benefit approaching %).</p>`
-          : `<p class="warn">These files have no deductible or out-of-pocket columns, so benefit statuses are blank. Use Sohar's full verification output, which includes them.</p>`}
+        ${open ? `<p><b>${open} NextGen fix${open === 1 ? '' : 'es'}</b> to make before visits (NextGen Tasks sheet).</p>` : ''}
         ${acc.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar output): ${acc.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
+    await renderBenefits(res.results, cfg, kinds);
     if (list.length) {
       // New Sohar results change the IR cross-check, so re-run it from the saved IR items.
       const ir = await X.readIrUploads();
@@ -402,6 +411,49 @@
     return html;
   }
 
+  // ---------- step 4: benefits ----------
+  const usd = (v) => { const n = parseFloat(String(v ?? '').replace(/[$,]/g, '')); return isNaN(n) ? '' : `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`; };
+
+  /** Write the Benefits sheet and show OOP / deductible progress, with the patients at or near their OOP max listed. */
+  async function renderBenefits(results, cfg, kinds) {
+    const view = C.benefitsView(results);
+    const s = C.benefitsSummary(view);
+    const box = $('benBox');
+    const pctTxt = `${Math.round((cfg.approachingPct ?? 0.2) * 100)}%`;
+    await X.writeBenefits(C.BENEFIT_SHEET_COLS, view.rows, C.BENEFIT_PCT_COLS);
+    state.benefits = view;
+    $('benActions').hidden = !s.verified;
+    if (!s.verified) {
+      box.innerHTML = !kinds.verification
+        ? `<p class="warn"><b>No benefits yet: only discovery results are loaded.</b> Discovery finds the insurance; copay, deductible and OOP max come from a <b>verification</b> run.</p>
+           <p class="hint">${kinds.waiting ? `Save the verification file in step 3 for the ${kinds.waiting} patient${kinds.waiting === 1 ? '' : 's'} discovery found, run it in Sohar, and drop the output in step 3. ` : ''}Patients sent for verification in step 2 show here once that output is uploaded too.</p>`
+        : `<p class="warn">${kinds.verification} verification result${kinds.verification === 1 ? '' : 's'} loaded, but none has benefit amounts. Upload Sohar's full verification output (the one with innOutOfPocket and innTotalDeductible columns).</p>`;
+      return;
+    }
+    const tile = (n, l, cls) => `<div class="count ${cls}"><div class="n">${n}</div><div class="l">${l}</div></div>`;
+    const bar = (pct) => `<span class="meter" data-pct="${pct === '' ? 0 : pct}"><span></span></span>`;
+    const rows = s.watch.slice(0, 25).map((r) => `<tr>
+        <td><b>${esc(C.lasfir(r['Last Name'], r['First Name']))}</b><br><span class="hint">Per ${esc(r['Per Nbr'])}${r.Service ? ` · ${esc(r.Service)}` : ''}</span></td>
+        <td>${esc(String(r['Next Appt'] || '').slice(0, 5)) || '<span class="hint">no visit</span>'}</td>
+        <td>${r['OOP Status'] === 'Met' ? '<b class="okc">Met</b>' : `${esc(usd(r['OOP Remaining']))} left`}<br><span class="hint">of ${esc(usd(r['OOP Max']))}</span></td>
+        <td class="meterc">${bar(r['OOP % Met'])}<span class="hint">${r['OOP % Met'] === '' ? '' : Math.round(r['OOP % Met'] * 100) + '%'}</span></td>
+      </tr>`).join('');
+    box.innerHTML = `
+      <p>${s.verified} verified patient${s.verified === 1 ? '' : 's'} on the <b>Benefits</b> sheet, closest to OOP max first.</p>
+      <div class="counts q4">
+        ${tile(s.oopMet, 'OOP max met', 'clr')}${tile(s.oopApproaching, 'OOP max approaching', 'unm')}
+        ${tile(s.dedMet, 'deductible met', 'clr')}${tile(s.dedApproaching, 'deductible approaching', 'unm')}
+      </div>
+      <h3 class="sub">At or near OOP max</h3>
+      ${s.watch.length
+        ? `<table class="watch"><thead><tr><th>Patient</th><th>Next</th><th>OOP</th><th>Met</th></tr></thead><tbody>${rows}</tbody></table>
+           ${s.watch.length > 25 ? `<p class="hint">${s.watch.length - 25} more on the Benefits sheet.</p>` : ''}`
+        : `<p class="hint">No one is within ${pctTxt} of their OOP max.</p>`}
+      <p class="hint">Approaching = ${pctTxt} or less left (Config: Benefit approaching %).${s.verified - s.withAmounts ? ` ${s.verified - s.withAmounts} verified patient${s.verified - s.withAmounts === 1 ? ' has' : 's have'} no amounts from Sohar.` : ''}${s.pending ? ` ${s.pending} patient${s.pending === 1 ? ' is' : 's are'} still waiting on the step 3 verification and not counted.` : ''}</p>`;
+    // widths set through the CSSOM so the strict style-src policy holds
+    box.querySelectorAll('.meter').forEach((m) => { m.firstElementChild.style.width = `${Math.round(Math.min(1, +m.dataset.pct) * 100)}%`; });
+  }
+
   async function currentDiscoveryVerify() {
     if (state.demo) return state.discoveryVerify || [];
     return X.readDiscoveryVerify(); // the sheet, so member IDs typed there go out
@@ -409,7 +461,7 @@
   async function downloadDiscoveryVerify() {
     const rows = await currentDiscoveryVerify();
     if (!rows.length) throw new Error('No discovery patients are waiting for verification. Upload a discovery output with coverage found first.');
-    await saveCSV(`sohar_verification_import_from_discovery_${stamp()}.csv`, C.VERIFICATION_COLS, rows, 'resultsResult');
+    await saveCSV(C.fileName('discoveryVerify'), C.VERIFICATION_COLS, rows, 'resultsResult');
     const noId = rows.filter((r) => !String(r.memberId || '').trim()).length;
     if (noId) note('resultsResult', `${noId} row${noId === 1 ? ' has' : 's have'} no member ID. Sohar may reject ${noId === 1 ? 'it' : 'them'}; fill the memberId column on the Discovery Verify sheet and download again.`, 'warn');
   }
@@ -420,12 +472,12 @@
     if (!rows.length) throw new Error('Upload Sohar results first.');
     const out = C.trackerExport(rows, fmtStamp(new Date()));
     if (!out.rows.length) throw new Error('No verified patients yet. The final file needs at least one Sohar verification result.');
-    await saveCSV(`sohar_tracker_import_${stamp()}.csv`, C.TRACKER_EXPORT_COLS, out.rows, 'resultsResult');
+    await saveCSV(C.fileName('tracker'), C.TRACKER_EXPORT_COLS, out.rows, 'benBox');
     const n = `${out.rows.length} patient${out.rows.length === 1 ? '' : 's'}`;
     if (out.pending.length) {
       const who = out.pending.map((r) => `${C.lasfir(r['Last Name'], r['First Name'])} · Per ${r['Per Nbr']}`).join(', ');
-      note('resultsResult', `${n} in the file. Left out, still waiting on a discovery verification: ${who}. Run the discovery verification import in Sohar, upload the output, then download the final file again.`, 'warn');
-    } else note('resultsResult', `${n} in the final tracker file. Import it in the TMS Tracker and the ESK Tracker.`, 'ok');
+      note('benBox', `${n} in the file. Left out, still waiting on the step 3 verification: ${who}. Save the tracker file again after that output is uploaded.`, 'warn');
+    } else note('benBox', `${n} in the tracker file. Import it in the TMS Tracker and the ESK Tracker.`, 'ok');
   }
 
   let clearArmed = 0;
@@ -471,7 +523,6 @@
     box.innerHTML = `<p class="ok">${esc(lead || `${records.length} saved insurance-related IR items. `)}${ir.length} have a Sohar result and are on the IR Cross-Ref sheet.</p>
       <p>${Object.entries(by).map(([k, v]) => `${esc(k)}: ${v}`).join(' · ') || 'No insurance-related items with a Sohar result.'}</p>`;
     $('btnCopyIr').disabled = false; $('btnDlIr').disabled = false;
-    markDone(6);
     if (dlg) await sendToDialog(await payload());
   }
   async function currentIr() {
@@ -568,7 +619,7 @@
           else if (f.base64) list.push({ name: f.name, rows: await X.readXlsxRows(f.base64) });
         }
         $('resultsResult').innerHTML = ''; const html = await processResults(list, (s) => sendToDialog({ type: 'notice', ok: true, text: s }));
-        $('resultsResult').insertAdjacentHTML('beforeend', html);
+        $('resultsResult').insertAdjacentHTML('beforeend', html); foldProgress();
         await sendToDialog({ ...(await payload('prep')), notice: { ok: true, text: `Loaded ${list.map((f) => f.name).join(', ')}.` } });
       } catch (e) {
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
@@ -577,21 +628,44 @@
     }
   }
 
-  // Excel on the web runs this pane (and the full-screen view) in a sandboxed frame that blocks downloads.
-  // There the rows go to an Export sheet instead, and Excel's own File > Export > Download as CSV saves them.
+  // Saves straight to Downloads. Excel on the web may block downloads inside the add-in frame, so there the note
+  // also offers a save tab (save.html, same site, top level) and, as a last resort, the Export sheet.
   async function saveCSV(name, cols, rows, boxId) {
-    if (isWeb()) {
-      const n = await X.writeExport(cols, rows);
-      const msg = `${n} rows are on the Export sheet. In Excel: File > Export > Download as CSV, and name it ${name}.`;
-      if (boxId) note(boxId, msg, 'ok');
-      return msg;
-    }
     const csv = C.toCSV(cols, rows);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
+    downloadNow(name, csv);
+    const msg = `Saved ${name} (${rows.length} row${rows.length === 1 ? '' : 's'}) to your Downloads folder.`;
+    if (!boxId) return msg;
+    if (!isWeb()) { note(boxId, msg, 'ok'); return msg; }
+    const p = note(boxId, `${msg} Nothing there? `, 'ok');
+    const tab = document.createElement('button'); tab.className = 'link'; tab.textContent = 'Save in a new tab';
+    tab.addEventListener('click', () => saveInTab(name, csv, boxId));
+    const sheet = document.createElement('button'); sheet.className = 'link'; sheet.textContent = 'put it on the Export sheet';
+    sheet.addEventListener('click', () => guard(async () => {
+      await X.writeExport(cols, rows);
+      note(boxId, `Rows are on the Export sheet. File > Export > Download as CSV, and name it ${name}.`, 'ok');
+    }, boxId));
+    p.append(tab, ' or ', sheet, '.');
+    return msg;
+  }
+  function downloadNow(name, csv) {
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const a = document.createElement('a');
     a.href = url; a.download = name; document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+  }
+  /** Open save.html and hand it the file by postMessage until it answers. Must run inside the click (pop-up rules). */
+  function saveInTab(name, csv, boxId) {
+    const w = window.open(new URL('save.html', location.href).href, '_blank');
+    if (!w) { note(boxId, 'The browser blocked the new tab. Allow pop-ups for Excel, or use the Export sheet.', 'bad'); return; }
+    let got = false, tries = 0;
+    const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.type === 'sohar-save-got') { got = true; window.removeEventListener('message', onMsg); } };
+    window.addEventListener('message', onMsg);
+    const send = () => {
+      if (got || ++tries > 40 || w.closed) { window.removeEventListener('message', onMsg); return; }
+      try { w.postMessage({ type: 'sohar-save', name, csv }, location.origin); } catch (e) { /* not loaded yet */ }
+      setTimeout(send, 250);
+    };
+    send();
   }
 
   // ---------- helpers ----------
@@ -601,7 +675,6 @@
   function busy(id, text) { const b = $(id); b.dataset.label = b.textContent; b.textContent = text; b.disabled = true; }
   function unbusy(id, text) { const b = $(id); b.textContent = text || b.dataset.label; b.disabled = false; }
   function esc(s) { return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-  function stamp() { return new Date().toISOString().slice(0, 10).replace(/-/g, ''); }
   const isCSV = (f) => /\.csv$/i.test(f.name);
   const isXlsx = (f) => /\.xls[xm]$/i.test(f.name);
   async function readText(file) {
@@ -645,10 +718,26 @@
     const li = document.createElement('li'); li.textContent = msg; ol.appendChild(li);
   }
   function note(boxId, msg, cls) {
-    const box = $(boxId); if (!box) return;
+    const box = $(boxId); if (!box) return null;
     box.hidden = false;
     const p = document.createElement('p'); p.className = cls || ''; p.textContent = msg;
     box.prepend(p);
+    return p;
+  }
+  /** A drop zone that also opens the file picker on click, Enter or Space. */
+  function dropZone(id, inputId, onFiles) {
+    const z = $(id), input = $(inputId);
+    z.addEventListener('click', () => { if (!z.classList.contains('busy')) input.click(); });
+    z.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); z.click(); } });
+    input.addEventListener('change', () => { const f = [...input.files]; input.value = ''; onFiles(f); });
+    z.addEventListener('dragover', (e) => { e.preventDefault(); z.classList.add('over'); });
+    z.addEventListener('dragleave', () => z.classList.remove('over'));
+    z.addEventListener('drop', (e) => { e.preventDefault(); z.classList.remove('over'); if (!z.classList.contains('busy')) onFiles([...e.dataTransfer.files]); });
+  }
+  function dropBusy(id, text) {
+    const z = $(id);
+    if (text) { z.dataset.html = z.dataset.html || z.innerHTML; z.textContent = text; z.classList.add('busy'); }
+    else { if (z.dataset.html) z.innerHTML = z.dataset.html; z.classList.remove('busy'); }
   }
   // Footer line so problems can be reported precisely: which Excel, and which API sets it supports.
   function diagnostics() {
@@ -690,13 +779,23 @@
       { nextgenPayerName: 'UMR', payerId: '37237', payerName: 'UMR', confidence: 'Exact' },
     ];
     const sohar = [['94135', 'Kaiser Foundation Health Plan of Northern California'], ['94036', 'Blue Shield of California'], ['62308', 'Cigna'], ['47198', 'Blue Cross of California'], ['87726', 'UnitedHealthcare'], ['01111', 'Medicare of California'], ['60054', 'Aetna'], ['37237', 'UMR'], ['95567', 'Health Net'], ['68039', 'Western Health Advantage'], ['943226498', 'San Francisco Health Plan'], ['PHHP1', 'Pacific Harbor Health Plan']].map(([payerId, payerName]) => ({ payerId, payerName, aliasPayerNames: '' }));
+    // Synthetic Sohar results so the benefits step has something to show. Add ?fresh to the URL to start empty.
+    const ver = (id, payer, ded, dedRem, oop, oopRem, copay) => ({ requestid: `ver-${id}`, id: String(id), status: 'complete.eligible', payername: payer, planname: 'SYNTH PPO', networktype: 'PPO', inncopay: copay, inncoinsurance: '0.2', inntotaldeductible: ded, innremainingdeductible: dedRem, innoutofpocket: oop, innoutofpocketremaining: oopRem, created: '2026-10-14T14:05:00.000Z' });
+    const demoUploads = /fresh/.test(location.search) ? [] : [
+      ver(100100, 'Kaiser Foundation Health Plan of Northern California', '1500', '0', '5000', '400', '40'),
+      ver(100101, 'Blue Shield of California', '2000', '300', '6000', '5100', '30'),
+      ver(100102, 'Cigna', '0', '0', '3000', '0', '0'),
+      ver(100103, 'Blue Cross of California', '1000', '1000', '4000', '3800', '50'),
+      ver(100104, 'UnitedHealthcare', '500', '0', '2500', '200', '25'),
+      { requestid: 'disc-100106', id: '100106', responsepayerid: '95567', responsepayername: 'Health Net', created: '2026-10-14T14:05:00.000Z' },
+    ].map((rec) => { const kind = rec.responsepayerid ? 'discovery' : 'verification'; return { Kind: kind, Key: C.resultKey(kind, rec), File: 'demo', Uploaded: '2026-10-14T14:10:00.000Z', Record: JSON.stringify(rec) }; });
     return {
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
       async writeImportRows(r) { rows = r; },
       async importXlsx() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
       async readXlsxRows() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
-      async writeResults() {}, async writeTasks() {}, async readTasks() { return []; }, async readUploads() { return []; }, async readIrUploads() { return []; }, async writeIrUploads() {}, async writeUploads() {}, async readDiscoveryVerify() { return []; }, async writeDiscoveryVerify() {}, async tableRowCount() { return 0; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
+      async writeResults() {}, async writeTasks() {}, async writeBenefits() {}, async readTasks() { return []; }, async readUploads() { return demoUploads; }, async readIrUploads() { return []; }, async writeIrUploads() {}, async writeUploads() {}, async readDiscoveryVerify() { return []; }, async writeDiscoveryVerify() {}, async tableRowCount() { return 0; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
       async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA' }, defaultState: '', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },

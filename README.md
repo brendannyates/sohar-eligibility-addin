@@ -4,7 +4,20 @@ Excel task-pane add-in that turns a NextGen **Appointments Listing** into Sohar 
 
 Same stack as the Billing Tickets add-in: static files on GitHub Pages, Office.js, no build step, no server.
 
-## What it does
+## The pane (v0.7)
+
+Four steps, upload-first. Nothing needs pasting.
+
+1. **Upload the NextGen report** (drop or choose; .xlsx or .csv). It is scanned and built right away. Unmapped insurance names show inline; mapping one rebuilds immediately. Scope, as-of date, rebuild and sheet links sit under Options.
+2. **Save the Sohar import files**: `Sohar Ready Import - Verification YYYY-MM-DD.csv` and `Sohar Ready Import - Discovery YYYY-MM-DD.csv` (local date), saved to Downloads.
+3. **Upload what Sohar sends back** (drop both outputs, or one at a time). If discovery found coverage, a callout offers `Sohar Ready Import - Verification (from Discovery) YYYY-MM-DD.csv` for the second run.
+4. **Benefits and OOP max**: counts of OOP / deductible met and approaching, and the patients at or near their OOP max (LASFIR + Per Nbr, $ left, % met). Writes the `Benefits` sheet (`tblBenefits`, `BENEFIT_SHEET_COLS`), one row per verified patient, OOP closest to met first, with % columns as numbers and data bars. Benefits only exist after a **verification** output is uploaded; with discovery alone the step says so.
+
+IR Portal and the secondary files are under collapsed sections. Full screen adds a **Benefits & OOP** tab.
+
+**Saving on Excel on the web.** Every save tries a normal download first. If the frame blocks it, the note under the button offers **Save in a new tab** (`save.html`, same site, receives the CSV by `postMessage`, no network) or the Export sheet.
+
+## What it does (detail)
 
 1. **Upload or paste** the report. **Upload report file** takes `.csv` or `.xlsx` (xlsx needs ExcelApi 1.13) and replaces the `Import` sheet; pasting still works. Then it **scans** the `Import` sheet. Finds the NextGen header row under the title block, maps columns by name (synonyms live in `core.js`), and reports which fields are present.
 2. **Map payers.** Any NextGen payer name not in `tblPayerMap` is listed with Sohar suggestions. Picking one writes the row to the Payer Map sheet, so it is remembered next time.

@@ -84,7 +84,31 @@
   // ---------- render ----------
   function render() {
     $('taskCount').textContent = tasks.filter(open).length || '';
-    renderPrep(); renderWorklist(); renderTasks(); renderMessage();
+    renderPrep(); renderBenefits(); renderWorklist(); renderTasks(); renderMessage();
+  }
+
+  const usd = (v) => { const n = parseFloat(String(v ?? '').replace(/[$,]/g, '')); return isNaN(n) ? '' : `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`; };
+  /** "$2,700 of $3,000" with a bar, or "Met" / "None". */
+  function progressCell(met, total, pct, status) {
+    if (status === 'None') return '<td class="hint">None</td>';
+    if (pct === '' || pct == null) return `<td>${esc(status || '')}</td>`;
+    const cls = status === 'Met' ? 'met' : status === 'Approaching' ? 'appr' : '';
+    return `<td class="${cls}"><span class="meter" data-pct="${pct}"><span></span></span> ${Math.round(pct * 100)}%<br><span class="hint">${esc(usd(met))} of ${esc(usd(total))}</span></td>`;
+  }
+  function renderBenefits() {
+    const all = C.benefitsView(rows).rows;
+    const v = $('fBenView').value;
+    const bs = all.filter((r) => shared(r)
+      && (!v || (v === 'oop' ? /^(Met|Approaching)$/.test(r['OOP Status']) : /^(Met|Approaching)$/.test(r['Deductible Status']))));
+    $('benShown').textContent = `Showing ${bs.length} of ${all.length} verified`;
+    const tb = $('benTbl').querySelector('tbody');
+    tb.innerHTML = bs.map((r) => `<tr data-key="${esc(r['Per Nbr'] + '|' + ((rows.find((x) => x['Per Nbr'] === r['Per Nbr'] && x['Sent As'] === 'Verification') || {})['Sohar Ref'] || ''))}" tabindex="0">
+      <td><b>${esc(name(r))}</b></td>${cell(r['Per Nbr'])}${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r['Next Location'])}${cell(r.Service)}
+      ${cell([r['Sohar Payer'], r.Plan].filter(Boolean).join(' · '), 'mid')}${cell(r.Copay === '' ? '' : usd(r.Copay))}${cell(r.Coinsurance)}
+      ${progressCell(r['OOP Met'], r['OOP Max'], r['OOP % Met'], r['OOP Status'])}${cell(r['OOP Remaining'] === '' ? '' : usd(r['OOP Remaining']))}
+      ${progressCell(r['Deductible Met'], r.Deductible, r['Deductible % Met'], r['Deductible Status'])}${cell(r['Deductible Remaining'] === '' ? '' : usd(r['Deductible Remaining']))}
+      ${r.Flag ? cell(r.Flag, r.Flag === 'OOP max met' ? 'flag met' : r.Flag.startsWith('OOP') ? 'flag' : '') : r['OOP Max'] === '' && r.Deductible === '' ? '<td class="hint">No amounts from Sohar</td>' : cell('')}</tr>`).join('') || `<tr><td colspan="13" class="hint">${all.length ? 'No one matches these filters.' : 'No verified benefits yet. Benefits come from Sohar\'s verification output; discovery alone has none.'}</td></tr>`;
+    tb.querySelectorAll('.meter').forEach((m) => { m.firstElementChild.style.width = `${Math.round(Math.min(1, +m.dataset.pct) * 100)}%`; });
   }
 
   const cell = (v, cls) => `<td${cls ? ` class="${cls}"` : ''}>${esc(v)}</td>`;
@@ -215,39 +239,58 @@
   }
 
   // ---------- saving ----------
-  const stamp = () => new Date().toISOString().slice(0, 10).replace(/-/g, '');
   function save(kind) {
-    let name, cols, data;
+    let name, cols, data, extra = '';
     if (kind === 'verification' || kind === 'discovery') {
-      if (!exportsData) { notice('No Sohar import built yet. Run step 3 (Build) in the pane first.', false); return; }
-      name = `sohar_${kind}_import_${scope}_${stamp()}.csv`;
+      if (!exportsData) { notice('No Sohar import built yet. Upload the NextGen report in the pane first.', false); return; }
+      name = C.fileName(kind);
       cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS; data = exportsData[kind] || [];
     } else if (kind === 'discoveryVerify') {
       if (!discVerify.length) { notice('No discovery patients are waiting for verification. Upload a discovery output with coverage found first.', false); return; }
-      name = `sohar_verification_import_from_discovery_${stamp()}.csv`; cols = C.VERIFICATION_COLS; data = discVerify;
-    } else if (kind === 'tasks') { name = `nextgen_tasks_open_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks.filter(open); }
-    else if (kind === 'allTasks') { name = `nextgen_tasks_all_${stamp()}.csv`; cols = C.TASK_COLS; data = tasks; }
+      name = C.fileName('discoveryVerify'); cols = C.VERIFICATION_COLS; data = discVerify;
+    } else if (kind === 'tasks') { name = C.fileName('tasks').replace('Tasks', 'Tasks (open)'); cols = C.TASK_COLS; data = tasks.filter(open); }
+    else if (kind === 'allTasks') { name = C.fileName('tasks'); cols = C.TASK_COLS; data = tasks; }
     else if (kind === 'tracker') {
       const out = C.trackerExport(rows, new Date().toLocaleString());
-      if (!out.rows.length) { notice('No verified patients yet. The final file needs at least one Sohar verification result.', false); return; }
-      name = `sohar_tracker_import_${stamp()}.csv`; cols = C.TRACKER_EXPORT_COLS; data = out.rows;
-      if (out.pending.length) setTimeout(() => notice(`${out.rows.length} patients saved. ${out.pending.length} left out, still waiting on a discovery verification (see Prep).`, true), 50);
+      if (!out.rows.length) { notice('No verified patients yet. The tracker file needs at least one Sohar verification result.', false); return; }
+      name = C.fileName('tracker'); cols = C.TRACKER_EXPORT_COLS; data = out.rows;
+      if (out.pending.length) extra = ` ${out.pending.length} left out, still waiting on the verification of what discovery found.`;
     }
-    else if (kind === 'benefits') { name = `sohar_benefits_${stamp()}.csv`; cols = C.BENEFITS_EXPORT_COLS; data = C.benefitsExport(rows); }
+    else if (kind === 'benefits') { name = C.fileName('benefits'); cols = C.BENEFIT_SHEET_COLS; data = C.benefitsView(rows).rows; }
     else if (kind === 'ir') {
-      if (!irRows.length) { notice('No IR Portal cross-check yet. Upload the IR Portal file in step 6 of the pane.', false); return; }
-      name = `ir_portal_cross_reference_${stamp()}.csv`; cols = C.IR_COLS; data = irRows;
+      if (!irRows.length) { notice('No IR Portal cross-check yet. Upload the IR Portal file in the pane.', false); return; }
+      name = C.fileName('ir'); cols = C.IR_COLS; data = irRows;
     }
-    else { name = `sohar_results_filtered_${stamp()}.csv`; cols = C.RESULTS_COLS; data = filteredRows(); }
-    // Excel on the web blocks downloads here too, so the pane writes the rows to the Export sheet instead.
-    if (inOffice && web) { notice('Writing to the Export sheet…', true); toPane({ type: 'export', name, cols, rows: data }); return; }
+    else { name = C.fileName('worklist'); cols = C.RESULTS_COLS; data = filteredRows(); }
     const csv = C.toCSV(cols, data);
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const a = document.createElement('a');
     a.href = url; a.download = name;
     document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
-    notice(`Saved ${name}.`, true);
+    notice(`Saved ${name} (${data.length} rows) to your Downloads folder.${extra}`, true);
+    // Excel on the web may block downloads in this frame; offer a top-level save tab, then the Export sheet.
+    if (inOffice && web) {
+      const n = $('notice');
+      const tab = document.createElement('button'); tab.className = 'link'; tab.textContent = 'Save in a new tab';
+      tab.addEventListener('click', () => saveInTab(name, csv));
+      const sheet = document.createElement('button'); sheet.className = 'link'; sheet.textContent = 'put it on the Export sheet';
+      sheet.addEventListener('click', () => { notice('Writing to the Export sheet…', true); toPane({ type: 'export', name, cols, rows: data }); });
+      n.append(' Nothing there? ', tab, ' or ', sheet, '.');
+    }
+  }
+  function saveInTab(name, csv) {
+    const w = window.open(new URL('save.html', location.href).href, '_blank');
+    if (!w) { notice('The browser blocked the new tab. Allow pop-ups for Excel, or use the Export sheet.', false); return; }
+    let got = false, tries = 0;
+    const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.type === 'sohar-save-got') { got = true; window.removeEventListener('message', onMsg); } };
+    window.addEventListener('message', onMsg);
+    const send = () => {
+      if (got || ++tries > 40 || w.closed) { window.removeEventListener('message', onMsg); return; }
+      try { w.postMessage({ type: 'sohar-save', name, csv }, location.origin); } catch (e) { /* not loaded yet */ }
+      setTimeout(send, 250);
+    };
+    send();
   }
 
   function notice(text, ok) { const n = $('notice'); n.hidden = false; n.textContent = text; n.className = `notice ${ok ? 'ok' : 'bad'}`; }
@@ -255,7 +298,7 @@
 
   // ---------- wiring ----------
   document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
-  ['fSent', 'fLoc', 'fFrom', 'fTo', 'fQueue', 'fBen', 'fDone', 'fTask', 'msgMode'].forEach((id) => $(id).addEventListener('change', render));
+  ['fSent', 'fLoc', 'fFrom', 'fTo', 'fQueue', 'fBen', 'fBenView', 'fDone', 'fTask', 'msgMode'].forEach((id) => $(id).addEventListener('change', render));
   $('fText').addEventListener('input', render);
   document.querySelectorAll('[data-queue]').forEach((b) => b.addEventListener('click', () => { $('fQueue').value = b.dataset.queue; $('fBen').value = ''; render(); }));
   document.querySelectorAll('[data-benefit]').forEach((b) => b.addEventListener('click', () => { $('fBen').value = b.dataset.benefit; $('fQueue').value = ''; render(); }));

@@ -235,6 +235,8 @@
   // Excel on the web cannot download from the pane, so files go to an Export sheet (File > Export > Download as CSV).
   const writeExport = (cols, rows) => writeAddinTable('Export', 'tblExport', cols, rows, true);
   const writeIr = (cols, rows) => writeAddinTable('IR Cross-Ref', 'tblIrCrossRef', cols, rows, true);
+  // Benefits: one row per verified patient, OOP closest to met first. Percent columns stay numbers so they show as % with data bars.
+  const writeBenefits = (cols, rows, pctCols) => writeAddinTable('Benefits', 'tblBenefits', cols, rows, false, { pctCols });
   async function readIr() { try { return await readTable('tblIrCrossRef'); } catch (e) { return []; } }
   // Discovery Verify: import-ready verification rows for patients discovery found coverage for. Admins can type member IDs here.
   const writeDiscoveryVerify = (cols, rows) => writeAddinTable('Discovery Verify', 'tblDiscoveryVerify', cols, rows, false);
@@ -288,8 +290,10 @@
    * Writes every row as plain cells first, then turns the block into a table in one step,
    * so there is no table resize (that path left Sohar Results empty in Excel).
    */
-  async function writeAddinTable(sheetName, tableName, cols, rows, activate) {
+  async function writeAddinTable(sheetName, tableName, cols, rows, activate, opts) {
+    const pct = new Set((opts && opts.pctCols) || []);
     const values = rows.map((r) => cols.map((c) => { const v = r[c]; return v == null ? '' : v; }));
+    const fmt = (r, hdr) => r.map((v, j) => (!hdr && pct.has(cols[j]) ? '0%' : '@'));
     const stage = (s) => (e) => { e.message = `Writing the ${sheetName} sheet (${s}): ${e.message}`; throw e; };
     await run(async (ctx) => {
       const old = ctx.workbook.tables.getItemOrNullObject(tableName);
@@ -308,7 +312,7 @@
         ctx.application.suspendApiCalculationUntilNextSync();
         const chunk = all.slice(i, i + CHUNK);
         const rg = ws.getRangeByIndexes(i, 0, chunk.length, cols.length);
-        rg.numberFormat = chunk.map((r) => r.map(() => '@')); // text, so IDs and ZIPs keep leading zeros
+        rg.numberFormat = chunk.map((r, k) => fmt(r, i + k === 0)); // text, so IDs and ZIPs keep leading zeros; % columns stay numbers
         rg.values = chunk;
         await ctx.sync().catch(stage(`rows ${i + 1}-${i + chunk.length}`));
       }
@@ -317,6 +321,14 @@
       ws.freezePanes.freezeRows(1);
       await ctx.sync().catch(stage('making the table'));
       tbl.getRange().format.autofitColumns();
+      if (values.length && Office.context.requirements.isSetSupported('ExcelApi', '1.6')) {
+        for (const c of pct) {
+          const j = cols.indexOf(c); if (j < 0) continue;
+          const bar = ws.getRangeByIndexes(1, j, values.length, 1).conditionalFormats.add(Excel.ConditionalFormatType.dataBar);
+          bar.dataBar.lowerBoundRule = { type: Excel.ConditionalDataBarRuleType.number, formula: '0' };
+          bar.dataBar.upperBoundRule = { type: Excel.ConditionalDataBarRuleType.number, formula: '1' };
+        }
+      }
       if (activate) ws.activate();
       await ctx.sync().catch(() => {}); // cosmetic only
     });
@@ -355,5 +367,5 @@
 
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
-    writeDiscoveryVerify, readDiscoveryVerify, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeDiscoveryVerify, readDiscoveryVerify, writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

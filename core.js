@@ -1055,6 +1055,92 @@
     return { rows, pending };
   }
 
+  // ---------- saved file names ----------
+  /** Local calendar date as YYYY-MM-DD (not UTC, so an evening save is still today's date). */
+  function localDate(d) {
+    const x = d || new Date();
+    return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+  }
+  const FILE_LABELS = {
+    verification: 'Sohar Ready Import - Verification',
+    discovery: 'Sohar Ready Import - Discovery',
+    discoveryVerify: 'Sohar Ready Import - Verification (from Discovery)',
+    tracker: 'Sohar Tracker Import (TMS + ESK)',
+    benefits: 'Sohar Benefits',
+    worklist: 'Sohar Results Worklist',
+    tasks: 'NextGen Tasks',
+    ir: 'IR Portal Cross-Reference',
+  };
+  /** "Sohar Ready Import - Verification 2026-10-15.csv" */
+  function fileName(kind, d) { return `${FILE_LABELS[kind] || kind} ${localDate(d)}.csv`; }
+
+  // ---------- benefits sheet ----------
+  // Benefits sheet (created by the add-in): one row per verified patient, OOP max closest to met first.
+  const BENEFIT_SHEET_COLS = ['Flag', 'Next Appt', 'Next Time', 'Next Location', 'Service', 'Per Nbr', 'MRN', 'Last Name', 'First Name',
+    'Sohar Payer', 'Plan', 'Copay', 'Coinsurance',
+    'OOP Max', 'OOP Met', 'OOP Remaining', 'OOP % Met', 'OOP Status',
+    'Deductible', 'Deductible Met', 'Deductible Remaining', 'Deductible % Met', 'Deductible Status',
+    'Coverage Level', 'Coverage End', 'Source', 'Sohar Date'];
+  const BENEFIT_PCT_COLS = ['OOP % Met', 'Deductible % Met'];
+
+  /** Spent so far and share of the total, from total and remaining. Blank when either is unknown or the total is $0. */
+  function spent(total, remaining) {
+    const t = money(total), r = money(remaining);
+    if (t == null || r == null || t <= 0) return { met: '', pct: '' };
+    const met = Math.min(t, Math.max(0, t - r));
+    return { met: fmtMoney(met), pct: Math.round((met / t) * 1000) / 1000 };
+  }
+
+  const FLAG_RANK = { 'OOP max met': 0, 'OOP max approaching': 1, 'Deductible met': 2, 'Deductible approaching': 3, '': 4 };
+  function benefitSheetFlag(r) {
+    if (r['OOP Status'] === 'Met') return 'OOP max met';
+    if (r['OOP Status'] === 'Approaching') return 'OOP max approaching';
+    if (r['Deductible Status'] === 'Met') return 'Deductible met';
+    if (r['Deductible Status'] === 'Approaching') return 'Deductible approaching';
+    return '';
+  }
+
+  /**
+   * Benefits sheet rows from the merged Sohar results: latest verification per patient, skipping ones whose
+   * discovered coverage still waits on a verification. Sorted: OOP met, OOP approaching, then highest OOP % met.
+   * Percent columns are fractions (0.85), so Excel can show them as % with data bars.
+   */
+  function benefitsView(results) {
+    const tr = trackerExport(results, '');
+    const byPer = new Map((results || []).filter((r) => r['Sent As'] === 'Verification').map((r) => [r['Per Nbr'], r]));
+    const rows = tr.rows.map((b) => {
+      const r = byPer.get(b['Per Nbr']) || {};
+      const oop = spent(b['OOP Max'], b['OOP Remaining']);
+      const ded = spent(b.Deductible, b['Deductible Remaining']);
+      return {
+        'Flag': benefitSheetFlag(b), 'Next Appt': str(r['Next Appt']), 'Next Time': str(r['Next Time']), 'Next Location': str(r['Next Location']),
+        'Service': b.Service, 'Per Nbr': b['Per Nbr'], 'MRN': b.MRN, 'Last Name': b['Last Name'], 'First Name': b['First Name'],
+        'Sohar Payer': b['Sohar Payer'], 'Plan': b.Plan, 'Copay': b.Copay, 'Coinsurance': b.Coinsurance,
+        'OOP Max': b['OOP Max'], 'OOP Met': oop.met, 'OOP Remaining': b['OOP Remaining'], 'OOP % Met': oop.pct, 'OOP Status': b['OOP Status'],
+        'Deductible': b.Deductible, 'Deductible Met': ded.met, 'Deductible Remaining': b['Deductible Remaining'], 'Deductible % Met': ded.pct, 'Deductible Status': b['Deductible Status'],
+        'Coverage Level': b['Coverage Level'], 'Coverage End': b['Coverage End'], 'Source': b.Source, 'Sohar Date': b['Sohar Date'],
+      };
+    });
+    const pctOf = (v) => (v === '' || v == null ? -1 : v);
+    const day = (s) => { const d = parseDate(s); return d ? d.getTime() : 8.64e15; };
+    rows.sort((a, b) => FLAG_RANK[a.Flag] - FLAG_RANK[b.Flag] || pctOf(b['OOP % Met']) - pctOf(a['OOP % Met']) || day(a['Next Appt']) - day(b['Next Appt']));
+    return { rows, pending: tr.pending };
+  }
+
+  /** Counts for the pane: verified with benefits, OOP met / approaching, deductible met / approaching, and the OOP watch list. */
+  function benefitsSummary(view) {
+    const rows = view.rows || [];
+    const n = (col, v) => rows.filter((r) => r[col] === v).length;
+    return {
+      verified: rows.length,
+      withAmounts: rows.filter((r) => r['OOP Max'] !== '' || r.Deductible !== '').length,
+      oopMet: n('OOP Status', 'Met'), oopApproaching: n('OOP Status', 'Approaching'),
+      dedMet: n('Deductible Status', 'Met'), dedApproaching: n('Deductible Status', 'Approaching'),
+      watch: rows.filter((r) => r['OOP Status'] === 'Met' || r['OOP Status'] === 'Approaching'),
+      pending: (view.pending || []).length,
+    };
+  }
+
   function summarize(patients) {
     const s = { patients: patients.length, inScope: 0, verification: 0, discovery: 0, exclude: 0, highIssues: 0 };
     for (const p of patients) {
@@ -1067,6 +1153,7 @@
 
   return {
     VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, UPLOAD_COLS, BENEFITS_EXPORT_COLS,
+    localDate, fileName, FILE_LABELS, BENEFIT_SHEET_COLS, BENEFIT_PCT_COLS, benefitsView, benefitsSummary,
     resultKey, accumulateResults, keepMemberIds, TRACKER_EXPORT_COLS, serviceLine, trackerExport, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
     irCategory, parseIrPortal, irCrossReference, irMessage,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,

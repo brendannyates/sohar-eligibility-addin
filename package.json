@@ -1,6 +1,6 @@
 {
   "name": "sohar-eligibility-addin",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "private": true,
   "description": "Excel task-pane add-in: build Sohar discovery and verification imports from a NextGen Appointments Listing.",
   "scripts": {

@@ -20,6 +20,7 @@
 
   <nav class="tabs" role="tablist" aria-label="Views">
     <button role="tab" data-tab="prep" aria-selected="true">Prep by appointment</button>
+    <button role="tab" data-tab="benefits">Benefits &amp; OOP</button>
     <button role="tab" data-tab="worklist">Worklist</button>
     <button role="tab" data-tab="tasks">NextGen tasks <span id="taskCount" class="badge"></span></button>
     <button role="tab" data-tab="messages">Messages</button>
@@ -45,6 +46,30 @@
     <section class="panel" data-panel="prep">
       <p class="hint">Each upcoming visit day, soonest first, with what Sohar returned and what still has to change in NextGen. Click a patient for the full view.</p>
       <div id="prepList"></div>
+    </section>
+
+    <!-- Benefits & OOP -->
+    <section class="panel" data-panel="benefits" hidden>
+      <div class="filters">
+        <label>Show
+          <select id="fBenView">
+            <option value="">Everyone verified</option>
+            <option value="oop">OOP max met or approaching</option>
+            <option value="ded">Deductible met or approaching</option>
+          </select>
+        </label>
+        <span id="benShown" class="hint"></span>
+      </div>
+      <p class="hint">One row per verified patient, closest to their in-network OOP max first. Same rows as the Benefits sheet. Patients still waiting on the verification of what discovery found are not here yet.</p>
+      <div class="tablewrap">
+        <table id="benTbl" class="grid">
+          <thead><tr>
+            <th>Patient</th><th>Per Nbr</th><th>Next appt</th><th>Location</th><th>Service</th><th>Plan</th><th>Copay</th><th>Coins</th>
+            <th>OOP met</th><th>OOP left</th><th>Deductible met</th><th>Deductible left</th><th>Flag</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- Worklist -->
@@ -140,15 +165,15 @@
         </div>
         <div>
           <h2>Save files</h2>
-          <p class="hint">Sohar imports come from the last Build in the pane; the rest from the results loaded here. In Excel on the web, files go to the <b>Export</b> sheet; then use File &gt; Export &gt; Download as CSV.</p>
+          <p class="hint">Files save to your Downloads folder with today's date.</p>
           <div class="savelist">
-            <button class="primary alt" data-save="verification">Verification import (for Sohar)</button>
-            <button class="primary alt" data-save="discovery">Discovery import (for Sohar)</button>
-            <button class="primary alt" data-save="discoveryVerify">Discovery verification import (for Sohar)</button>
+            <button class="primary alt" data-save="verification">Sohar Ready Import - Verification</button>
+            <button class="primary alt" data-save="discovery">Sohar Ready Import - Discovery</button>
+            <button class="primary alt" data-save="discoveryVerify">Sohar Ready Import - Verification (from Discovery)</button>
+            <button class="primary" data-save="tracker">Tracker file (TMS + ESK)</button>
+            <button class="primary alt" data-save="benefits">Benefits and OOP progress</button>
             <button class="primary alt" data-save="tasks">NextGen tasks (open)</button>
             <button class="primary alt" data-save="allTasks">NextGen tasks (all)</button>
-            <button class="primary" data-save="tracker">Final tracker file (TMS + ESK)</button>
-            <button class="primary alt" data-save="benefits">Benefits (TMS Tracker)</button>
             <button class="primary alt" data-save="worklist">Worklist (filtered)</button>
             <button class="primary alt" data-save="ir">IR Portal cross-reference</button>
           </div>
