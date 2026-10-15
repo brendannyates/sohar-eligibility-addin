@@ -141,7 +141,7 @@ test('R2: buildPatients auto-maps new names, routes High/Medium to verification,
   assert.equal(by['31']['Secondary Sohar payerId'], '60054');
   assert.equal(by['32'].Route, 'discovery');
   assert.equal(by['32']['Sohar payerId'], '', 'a low-confidence guess is not sent as the discovery hint');
-  assert.ok(res.review.some((r) => r['Per Nbr'] === '32' && r.Issue === 'Payer auto-match is low confidence'));
+  assert.ok(res.review.some((r) => r['Per Nbr'] === '32' && r.Issue === 'Payer needs manual classification'));
   assert.equal(by['33'].Confidence, 'Review', 'manual confidence on an existing row wins');
   assert.equal(by['33'].Route, 'discovery');
   assert.equal(by['34'].Route, 'discovery', 'Self Pay unchanged');

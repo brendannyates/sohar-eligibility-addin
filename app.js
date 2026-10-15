@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.8.0';
+  const VERSION = '0.8.1';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -282,13 +282,16 @@
     const box = $('payerList');
     box.hidden = !items.length;
     if (!items.length) { box.innerHTML = ''; return; }
-    const low = items.filter((it) => it.conf === 'auto-low' || !it.h).length;
+    // Auto-Low and unmapped names need a person to classify them; Auto-High / Auto-Medium stay in an optional list.
+    const isLow = (it) => it.conf === 'auto-low' || !it.h;
+    const low = items.filter(isLow).length, rest = items.length - low;
     const keepOpen = box.querySelector('details') && box.querySelector('details').open;
-    box.innerHTML = `<details class="more payerreview"${keepOpen ? ' open' : ''}><summary>Review auto-mapped payers (${items.length}${low ? `, ${low} low confidence` : ''})</summary>
-      <p class="hint">The add-in matched these insurance names to Sohar payers itself and saved them on the Payer Map. Auto-High and Auto-Medium go to verification; Auto-Low goes to discovery, or to verification with both insurances when the last visit was billed differently. Optional: fix a wrong match and it is remembered.</p>
-      <div class="payerrows"></div></details>`;
-    const list = box.querySelector('.payerrows');
+    box.innerHTML = (low ? `<div class="needclass"><p class="warn"><b>${low} insurance name${low === 1 ? '' : 's'} need${low === 1 ? 's' : ''} manual classification.</b> The add-in could not match ${low === 1 ? 'it' : 'them'} confidently, so those patients go to discovery (or to both insurances when the last visit was billed differently). Pick the right Sohar payer once and it is remembered.</p><div class="needrows"></div></div>` : '')
+      + (rest ? `<details class="more payerreview"${keepOpen ? ' open' : ''}><summary>Review auto-mapped payers (${rest})</summary>
+      <p class="hint">Matched confidently (Auto-High / Auto-Medium) and sent to verification. Optional: fix a wrong match and it is remembered.</p>
+      <div class="payerrows"></div></details>` : '');
     for (const it of items) {
+      const list = box.querySelector(isLow(it) ? '.needrows' : '.payerrows');
       const h = it.h || {};
       const label = it.h ? h.confidence : 'Not mapped';
       const cls = it.conf === 'auto-high' ? 'ok' : it.conf === 'auto-medium' ? 'mid' : 'low';
@@ -353,7 +356,7 @@
         res = C.buildPatients(state.rows, { ...state.cfg, payerMap: state.payerMap, soharPayers: state.soharPayers });
         if (res.error) { out.innerHTML = `<p class="bad">${esc(res.error)}</p>`; return; }
         const lowN = add.filter((a) => a.confidence === 'Auto-Low').length;
-        autoNote = `<p class="hint">${add.length} new insurance name${add.length === 1 ? ' was' : 's were'} matched to Sohar payers and added to the Payer Map${lowN ? ` (${lowN} low confidence)` : ''}. Review them below if you like; nothing is required.</p>`;
+        autoNote = `<p class="hint">${add.length} new insurance name${add.length === 1 ? ' was' : 's were'} matched to Sohar payers and added to the Payer Map${lowN ? ` (${lowN} low confidence)` : ''}. ${lowN ? ' The low-confidence ones are listed above for classification.' : ''}</p>`;
       }
       renderPayers();
       state.patients = res.patients; state.review = res.review;
@@ -473,8 +476,8 @@
     return R.collapseFlags(rv.map((x) => ({ code: x.Issue, label: x.Pill, severity: String(x.Severity || '').toLowerCase(), detail: x.Detail,
       appt: { date: x['Appt Date'], event: x.Event, rendering: x.Rendering } })));
   }
-  /** "Kaiser MM" is a filter category; on a card it only repeats "Kaiser MM no auth". */
-  const cardPills = (pills) => (pills.includes('Kaiser MM no auth') ? pills.filter((l) => l !== 'Kaiser MM') : pills);
+  /** "Kaiser/VA MM" is a filter category; on a card it only repeats "Kaiser/VA MM no auth". */
+  const cardPills = (pills) => (pills.includes('Kaiser/VA MM no auth') ? pills.filter((l) => l !== 'Kaiser/VA MM') : pills);
 
   function wireClinic() {
     $('clinicLoc').addEventListener('change', () => {

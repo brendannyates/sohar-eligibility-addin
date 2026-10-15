@@ -351,3 +351,5 @@ textarea.copybox { width: 100%; font: 12px/1.45 ui-monospace, Consolas, monospac
 #tbl td.pillc { min-width: 170px; }
 #tbl td.pillc .pill { margin: 0 2px 2px 0; }
 .dash-main, .dash-main > * { min-width: 0; }
+.needclass { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--warn); border-left-width: 4px; border-radius: 4px; background: color-mix(in srgb, var(--warn) 7%, var(--field)); }
+.needclass .needrows .payer:first-child { border-top: none; }

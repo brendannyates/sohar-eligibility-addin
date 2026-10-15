@@ -35,7 +35,7 @@ test('classifiers: payers', () => {
   assert.ok(R.isVA('Veteran Affairs'));
   assert.ok(R.isVA('VA'));
   assert.ok(!R.isVA('Nevada Health'));
-  assert.ok(!R.isVA('TriWest'));
+  assert.ok(R.isVA('TriWest')); // TriWest (VA community care) shares the VA bucket
   assert.ok(R.isSFHP('San Francisco Health Plan'));
   assert.ok(R.isSFHP('SFHP Medi-Cal'));
   assert.ok(R.isQMB('QMB Noridian Southern CA'));
@@ -91,7 +91,7 @@ test('R5: VA med management telepsych without auth flags', () => {
   assert.ok(f);
   assert.equal(f.severity, 'high');
   assert.equal(f.appt.date, '10/20/2026');
-  assert.match(f.detail, /VA/);
+  assert.match(f.detail, /^Veterans Affairs Nor Cal med management/);
   assert.ok(codes(fl).includes('KAISER_MM'));
 });
 
@@ -279,7 +279,7 @@ test('allFlags + reviewRows', () => {
   const rv = R.reviewRows(m, patients);
   assert.deepEqual(Object.keys(rv[0]), ['Severity', 'Issue', 'Per Nbr', 'Detail', 'Fix']);
   assert.equal(rv[0].Severity, 'High');
-  assert.ok(!rv.some((r) => r.Issue === 'Kaiser MM'));
+  assert.ok(!rv.some((r) => r.Issue === 'Kaiser/VA MM'));
   assert.ok(rv.some((r) => r.Issue === 'Re-verify' && r.Fix.includes(R.REVERIFY_URL)));
   assert.ok(rv.some((r) => r.Issue === 'Secondary may cover' && r.Severity === 'Low'));
 });
@@ -299,7 +299,7 @@ test('clinicRows: location filter, scope, order, benefits from latest eligible v
   assert.equal(b['Run Date'], '10/15/2026');
   const a = rows[1];
   assert.equal(a['Re-verify Link'], R.REVERIFY_URL);
-  assert.match(a.Pills, /Kaiser MM no auth/);
+  assert.match(a.Pills, /Kaiser\/VA MM no auth/);
   assert.match(a.Pills, /Re-verify/);
   assert.equal(a['OOP Status'], 'Met');
   assert.equal(a['Choose in NextGen'], 'Kaiser Foundation Northern California');
@@ -330,7 +330,7 @@ test('clinicEmail: LASFIR + Per Nbr only, grouped by date', () => {
   assert.match(txt, /OOP max met/);
   assert.ok(txt.indexOf('10/16/2026') < txt.indexOf('10/21/2026'));
   for (const bad of ['Alpha', 'Anna', 'Bravo', 'M1', '01/02/1980']) assert.ok(!txt.includes(bad), bad);
-  assert.ok(!/Kaiser MM[;,\n]|Kaiser MM$/.test(txt.replace(/Kaiser MM no auth/g, '')));
+  assert.ok(!/Kaiser\/VA MM[;,\n]|Kaiser\/VA MM$/.test(txt.replace(/Kaiser\/VA MM no auth/g, '')));
   const none = R.clinicEmail('Castro Street', [], { runDate: TODAY });
   assert.match(none, /Nothing to flag/);
 });
@@ -444,4 +444,23 @@ test('payerEvidence: confidence comes from each verify row', () => {
   const ev = R.payerEvidence([p], [], [], TODAY);
   assert.equal(ev.find((r) => r['NextGen Payer'] === 'Anthem Blue Cross').Confidence, 'Fin Class (report)');
   assert.equal(ev.find((r) => r['NextGen Payer'] === 'Zeta Odd Plan').Confidence, 'Auto-Low');
+});
+
+test('R5: TriWest med management without auth flags, named by its own payer name', () => {
+  const p = pat({ 'Primary Payer': 'TriWest' }, { finClass: 'Triwest', appointments: [appt({ event: 'Telepsych' })] });
+  const f = R.patientFlags(p, [], CFG).find((x) => x.code === 'KAISER_MM_NOAUTH');
+  assert.ok(f);
+  assert.match(f.detail, /^TriWest med management/);
+});
+
+test('Dual eligible: Medicare with Medi-Cal secondary keeps the Medi-Cal flag and is treated like QMB', () => {
+  const p = pat({ 'Primary Payer': 'Noridian Southern CA', 'Secondary Payer': 'Health Net Medi-Cal' }, { finClass: 'Medicare', finClassLstEnc: 'Medicare', appointments: [appt({ event: 'TMS Follow Up' })] });
+  const fl = R.patientFlags(p, [], CFG);
+  assert.ok(codes(fl).includes('MEDICAL'));
+  const q = fl.find((x) => x.code === 'QMB');
+  assert.ok(q);
+  assert.match(q.detail, /treat like QMB/);
+  // Commercial primary with Medi-Cal secondary: Medi-Cal flag, no QMB treatment
+  const c = pat({ 'Primary Payer': 'Aetna', 'Secondary Payer': 'Health Net Medi-Cal' }, { finClass: 'Aetna', appointments: [appt({ event: 'TMS Follow Up' })] });
+  assert.ok(!codes(R.patientFlags(c, [], CFG)).includes('QMB'));
 });

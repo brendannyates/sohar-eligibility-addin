@@ -10,8 +10,8 @@
   // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
   const PILL_COLOR = new Map(((window.SoharRules && window.SoharRules.PILLS) || []).map((p) => [p.label, p.color]));
   const pillsOf = (r) => String(r.Pills || '').split(';').map((s) => s.trim()).filter(Boolean);
-  // "Kaiser MM" is a filter category; next to "Kaiser MM no auth" it only repeats it, so rows hide it.
-  const shownPills = (r) => { const p = pillsOf(r); return p.includes('Kaiser MM no auth') ? p.filter((l) => l !== 'Kaiser MM') : p; };
+  // "Kaiser/VA MM" is a filter category; next to "Kaiser/VA MM no auth" it only repeats it, so rows hide it.
+  const shownPills = (r) => { const p = pillsOf(r); return p.includes('Kaiser/VA MM no auth') ? p.filter((l) => l !== 'Kaiser/VA MM') : p; };
   const pillsHtml = (r) => shownPills(r).map((l) => `<span class="pill p-${PILL_COLOR.get(l) || 'grey'}">${esc(l)}</span>`).join(' ');
 
   const BEN = {
@@ -363,7 +363,7 @@
       mk({ 'Next Appt': '10/23/2026', 'Next Time': '11:00 AM', 'Next Event': 'Telepsych', 'Next Location': 'Walnut Creek', 'Upcoming Appts': 4, 'Per Nbr': '100103', 'Last Name': 'Mensah', 'First Name': 'Afia', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', Action: 'Eligible. No action.', Copay: '0', Coinsurance: '0%', Deductible: '0', 'Deductible Remaining': '0', 'Deductible Status': 'None', 'OOP Max': '3000', 'OOP Remaining': '0', 'OOP Status': 'Met', 'NextGen Payer': 'QMB Noridian Northern CA', 'Sohar Payer': 'Medicare of California', Plan: 'MEDICARE PART B', Match: 'Per Nbr', 'Sohar Ref': 'q-3' }),
       mk({ 'Sent As': 'Verification', 'Sohar Status': 'error.member.id', Action: 'Not matched to a patient in the Import report. Member ID rejected. Check the card, fix in NextGen, re-verify.', Match: 'No match', 'Sohar Ref': 'q-9' }),
     ].map((r) => ({ ...r, 'Benefit Flag': C.benefitFlag(r), 'Work Queue': C.workQueue(r) }));
-    const demoPills = { 100100: 'NP-TMS', 100101: 'Medi-Cal; New Medi-Cal; Re-verify', 100102: 'Kaiser MM no auth; Kaiser MM', 100103: 'QMB' };
+    const demoPills = { 100100: 'NP-TMS', 100101: 'Medi-Cal; New Medi-Cal; Re-verify', 100102: 'Kaiser/VA MM no auth; Kaiser/VA MM', 100103: 'QMB' };
     for (const r of res) r.Pills = demoPills[r['Per Nbr']] || '';
     load({ results: res, tasks: C.buildTasks(res), exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z' });
     if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));

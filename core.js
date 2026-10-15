@@ -539,12 +539,13 @@
           addReview('Low', verifyRows.length > 1 ? 'Two insurances sent to verification' : 'Last-encounter insurance sent to verification', per,
             `Chart: ${payerName}${lk.payerName ? ` (best guess ${lk.payerName}, ${lk.confidence})` : ` (${lk.confidence})`}; last encounter: ${finClassLst} -> ${le.payerName}`,
             'The Sohar results decide; Choose in NextGen shows which insurance to keep.');
+          if (autoLow) addReview('High', 'Payer needs manual classification', per, `${payerName}${lk.payerName ? ` -> best guess ${lk.payerName}` : ''}`, 'Classify it in the pane (Admin, step 1) or on the Payer Map sheet.');
         } else if (lk.status === 'unmapped') {
           route = 'discovery'; reason = `payer not in Payer Map: ${payerName}`;
           addReview('High', 'Unmapped payer', per, payerName, 'Map it in step 2 or add a row on the Payer Map sheet.');
         } else {
           route = 'discovery'; reason = `payer needs review (${lk.confidence}): ${payerName}`;
-          if (autoLow) addReview('Medium', 'Payer auto-match is low confidence', per, `${payerName}${lk.payerName ? ` -> best guess ${lk.payerName}` : ''}`, 'Sent to discovery. Confirm the payer on the Payer Map sheet to verify next time.');
+          if (autoLow) addReview('High', 'Payer needs manual classification', per, `${payerName}${lk.payerName ? ` -> best guess ${lk.payerName}` : ''}`, 'Sent to discovery. Classify it in the pane (Admin, step 1) or on the Payer Map sheet so it verifies next time.');
         }
       } else { route = 'discovery'; reason = 'mapped payer but no member ID'; flags.push('No member ID'); }
       if (route === 'verification') soharId = verifyRows[0].payerId;

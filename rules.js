@@ -12,14 +12,14 @@
     { code: 'MEDICAL', label: 'Medi-Cal', severity: 'high', color: 'red' },
     { code: 'MEDICAL_NEW', label: 'New Medi-Cal', severity: 'high', color: 'red' },
     { code: 'SFHP_PROVIDER', label: 'SFHP provider', severity: 'high', color: 'red' },
-    { code: 'KAISER_MM_NOAUTH', label: 'Kaiser MM no auth', severity: 'high', color: 'red' },
+    { code: 'KAISER_MM_NOAUTH', label: 'Kaiser/VA MM no auth', severity: 'high', color: 'red' },
     { code: 'NP_TMS', label: 'NP-TMS', severity: 'high', color: 'red' },
     { code: 'REVERIFY', label: 'Re-verify', severity: 'medium', color: 'amber' },
     { code: 'QMB', label: 'QMB', severity: 'medium', color: 'amber' },
     { code: 'SECONDARY', label: 'Secondary may cover', severity: 'info', color: 'blue' },
     { code: 'VIP', label: 'VIP', severity: 'info', color: 'blue' },
     { code: 'DUAL', label: 'Two insurances sent', severity: 'info', color: 'blue' },
-    { code: 'KAISER_MM', label: 'Kaiser MM', severity: 'info', color: 'grey' },
+    { code: 'KAISER_MM', label: 'Kaiser/VA MM', severity: 'info', color: 'grey' },
   ];
   const PILL = {};
   PILLS.forEach((p, i) => { PILL[p.code] = Object.assign({ order: i }, p); });
@@ -73,7 +73,8 @@
   const isQMB = (t) => /\bqmb\b/i.test(str(t));
   const isMediCal = (t) => /medi[\s-]?cal\b|medicaid/i.test(str(t));
   const isKaiser = (t) => /kaiser|\bkp\b/i.test(str(t));
-  const isVA = (t) => /veterans?'?\s*affairs|\bva\b/i.test(str(t));
+  // VA and TriWest (VA community care) share one bucket for rules; flag text uses the payer's own name.
+  const isVA = (t) => /veterans?'?\s*affairs|\bva\b|tri\s*-?west/i.test(str(t));
   const isSFHP = (t) => /san\s+francisco\s+health\s+plan|\bsfhp\b/i.test(str(t));
   const isCarelon = (t) => /carelon|beacon/i.test(str(t)); // Beacon Health Options is Carelon's former name
   const isUMR = (t) => /\bumr\b/i.test(str(t));
@@ -176,7 +177,7 @@
 
     // R5 Kaiser / VA medication management needs an auth.
     if (guar.some((t) => isKaiser(t) || isVA(t))) {
-      const who = guar.some(isKaiser) ? 'Kaiser' : 'VA';
+      const who = guar.find((t) => isKaiser(t) || isVA(t)); // formal payer name, e.g. "Veterans Affairs Nor Cal", "TriWest"
       for (const a of up) {
         if (!isMedMgmtEvent(a.event)) continue;
         const auth = apptAuth(a, x);
@@ -247,7 +248,10 @@
       out.push(mk('SECONDARY', detail, { severity: medicare ? 'medium' : 'info' }));
     }
     const qmbAt = [primary, secChart, secLst, fin, finL, ...rows.map((r) => `${str(r['Sohar Payer'])} ${str(r.Plan)}`)].find(isQMB);
+    // Medicare primary with Medi-Cal behind it (dual eligible) is treated like QMB; the Medi-Cal flag above still shows.
+    const dualMediCal = guar.some((t) => isMedicare(t) && !isMediCal(t)) && [secChart, secLst].find((t) => t && isMediCal(t) && !isQMB(t));
     if (qmbAt) out.push(mk('QMB', 'QMB: Medicare cost-sharing generally cannot be billed to the patient — confirm with billing before collecting'));
+    else if (dualMediCal) out.push(mk('QMB', `Medicare with Medi-Cal secondary (${dualMediCal}): treat like QMB — Medicare cost-sharing generally cannot be billed to the patient. Confirm with billing before collecting`));
 
     // R4 VIP pill.
     const vipText = [primary, fin, finL, sec].find(isVIP);
@@ -318,7 +322,7 @@
     MEDICAL: 'Medi-Cal (other than Kaiser or SFHP) is not accepted. Contact the patient about self-pay or other coverage before the visit.',
     MEDICAL_NEW: 'Coverage changed since the last visit. Confirm the new plan with the patient and update NextGen.',
     SFHP_PROVIDER: 'Move the visit to an SFHP-approved provider, or confirm approval and add the provider to Config "SFHP providers".',
-    KAISER_MM_NOAUTH: 'Get the Kaiser/VA authorization on file (Auth Cd) before the med management visit.',
+    KAISER_MM_NOAUTH: 'Get the Kaiser, VA or TriWest authorization on file (Auth Cd) before the med management visit.',
     NP_TMS: 'Reassign the TMS session to an MD/DO rendering provider.',
     REVERIFY: `Resubmit in Sohar: ${REVERIFY_URL}`,
     QMB: 'Do not collect Medicare cost-sharing from the patient until billing confirms.',
@@ -351,8 +355,8 @@
   const PER_APPT = {
     NP_TMS: { byProvider: true, lead: (d) => `${(d.match(/^(\w+) does not/) || [0, 'This payer'])[1]} does not allow an NP rendering provider for TMS` },
     SFHP_PROVIDER: { byProvider: true, lead: () => 'SFHP patient booked with a provider not on the SFHP providers list' },
-    KAISER_MM_NOAUTH: { lead: (d) => `${(d.match(/^(Kaiser|VA)/) || [0, 'Kaiser/VA'])[1]} med management with no Auth Cd on file` },
-    KAISER_MM: { lead: (d) => `${(d.match(/^(Kaiser|VA)/) || [0, 'Kaiser/VA'])[1]} med management` },
+    KAISER_MM_NOAUTH: { lead: (d) => `${(d.match(/^(.+?) med management/) || [0, 'Kaiser/VA'])[1]} med management with no Auth Cd on file` },
+    KAISER_MM: { lead: (d) => `${(d.match(/^(.+?) med management/) || [0, 'Kaiser/VA'])[1]} med management` },
   };
   const shortDate = (s) => str(s).replace(/^(\d{1,2})\/(\d{1,2})\/\d{2,4}$/, '$1/$2');
   /**
