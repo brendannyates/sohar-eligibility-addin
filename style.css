@@ -285,3 +285,69 @@ table.watch td.meterc { white-space: nowrap; }
 .notice button.link { padding: 0; }
 .savepage { padding: 24px; max-width: 560px; }
 .savepage h1 { font-size: 17px; margin: 0 0 8px; }
+
+/* v0.8: Clinic | Admin tabs, flag pills, clinic cards */
+.pane-tabs { padding: 0 12px; }
+.pane-tabs button { padding: 8px 14px; }
+.result.pad { padding: 12px 16px; margin: 0; }
+.callout.bad { border-color: var(--alert); background: color-mix(in srgb, var(--alert) 8%, var(--field)); color: var(--ink); }
+.callout.bad p { margin: 0 0 4px; color: var(--alert); }
+.callout.bad ul { margin: 0; padding-left: 18px; }
+.callout.bad li { margin: 2px 0; }
+.pill.p-red { color: var(--alert); background: color-mix(in srgb, var(--alert) 10%, transparent); }
+.pill.p-amber { color: var(--warn); background: color-mix(in srgb, var(--warn) 10%, transparent); }
+.pill.p-blue { color: var(--verify); background: color-mix(in srgb, var(--verify) 9%, transparent); }
+.pill.p-grey { color: var(--muted); }
+.pills { display: flex; flex-wrap: wrap; gap: 3px 4px; margin: 4px 0; }
+.clinic { padding: 12px 12px 14px; }
+.clinic-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; margin-bottom: 8px; }
+.clinic-head input, .clinic-head select { min-width: 0; }
+.clinic, .pcard, #clinicList { min-width: 0; overflow-wrap: anywhere; }
+.filterchips { margin: 0 0 6px; }
+.chipbtn { font-size: 11.5px; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line); background: var(--field); color: var(--ink); }
+.chipbtn.p-red { color: var(--alert); border-color: color-mix(in srgb, var(--alert) 45%, var(--line)); }
+.chipbtn.p-amber { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.chipbtn.p-blue { color: var(--verify); border-color: color-mix(in srgb, var(--verify) 45%, var(--line)); }
+.chipbtn.p-grey { color: var(--muted); }
+.chipbtn[aria-pressed="true"] { background: var(--pine); border-color: var(--pine-deep); color: #fff; }
+h3.cday { margin: 12px 0 4px; font-size: 13px; font-weight: 600; }
+.pcard { background: var(--field); border: 1px solid var(--line); border-radius: 5px; padding: 8px 10px; margin: 0 0 6px; font-size: 12.5px; }
+.pcard.hi { box-shadow: inset 3px 0 var(--alert); }
+.pc-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.pc-time { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 58px; }
+.pc-head .hint { margin: 0; margin-left: auto; font-size: 11.5px; }
+.pc-sub { color: var(--muted); font-size: 12px; }
+.pc-dl { display: grid; grid-template-columns: max-content 1fr; gap: 1px 8px; margin: 4px 0 0; }
+.pc-dl dt { color: var(--muted); }
+.pc-dl dd { margin: 0; overflow-wrap: anywhere; }
+.pc-dl .hint { margin: 0; font-size: 11.5px; }
+.pc-ben { margin-top: 4px; display: grid; gap: 2px; }
+.mrow { display: grid; grid-template-columns: 70px auto 1fr; align-items: center; gap: 6px; font-size: 12px; }
+.mrow .ml { color: var(--muted); }
+.mrow .hint { margin: 0; font-size: 11.5px; }
+.mrow.met .meter > span { background: var(--ok); }
+.mrow.appr .meter > span { background: var(--warn); }
+.pc-items { margin: 5px 0 0; padding-left: 16px; color: var(--alert); font-size: 12px; }
+.pc-items li { margin: 1px 0; }
+.pc-items li.sev-medium { color: var(--warn); }
+.pc-notes { margin: 3px 0 0; padding-left: 16px; color: var(--muted); font-size: 12px; }
+.pc-links { margin-top: 5px; font-size: 12px; }
+a { color: var(--pine); text-underline-offset: 3px; }
+a.due { color: var(--alert); font-weight: 600; }
+a.link { padding: 7px 0; }
+.payerreview .payer { padding: 7px 0; }
+.payer .guess { font-size: 12px; }
+.payer .guess .id, .payer .id { color: var(--muted); }
+.payer .ev { margin: 2px 0 0; font-size: 11.5px; }
+.conf { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 9px; border: 1px solid currentColor; }
+.conf.ok { color: var(--ok); }
+.conf.mid { color: var(--verify); }
+.conf.low { color: var(--warn); }
+table.clinicfiles td.acts { white-space: nowrap; text-align: right; }
+table.clinicfiles .hi, .clinicfiles .hi { color: var(--alert); font-weight: 600; }
+textarea.copybox { width: 100%; font: 12px/1.45 ui-monospace, Consolas, monospace; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 6px; margin: 4px 0 6px; }
+#tbl td.pillc, table.prep .pills { white-space: normal; }
+.pill { white-space: nowrap; }
+#tbl td.pillc { min-width: 170px; }
+#tbl td.pillc .pill { margin: 0 2px 2px 0; }
+.dash-main, .dash-main > * { min-width: 0; }

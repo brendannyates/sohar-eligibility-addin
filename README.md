@@ -4,11 +4,37 @@ Excel task-pane add-in that turns a NextGen **Appointments Listing** into Sohar 
 
 Same stack as the Billing Tickets add-in: static files on GitHub Pages, Office.js, no build step, no server.
 
-## The pane (v0.7)
+## The pane (v0.8)
 
-Four steps, upload-first. Nothing needs pasting.
+Two tabs at the top: **Clinic** and **Admin**. The pane opens on Admin in the Sohar template and on Clinic in a clinic file (a workbook with `tblClinicMeta`). In a clinic file the Admin tab only says it needs the template.
 
-1. **Upload the NextGen report** (drop or choose; .xlsx or .csv). It is scanned and built right away. Unmapped insurance names show inline; mapping one rebuilds immediately. Scope, as-of date, rebuild and sheet links sit under Options.
+**Clinic** is the pre-check view: every in-scope patient with an upcoming visit at the chosen location (remembered in Config `Clinic location`), grouped by day. Each card shows the next visit and provider, payer and secondary, which insurance to choose in NextGen, Sohar status and verified date, copay and coinsurance, deductible and OOP progress, flag pills, review items, and a **Re-verify in Sohar** link (`https://app.soharhealth.com/create?type=verification`, a plain link, opens a new tab). Chips filter by pill (Medi-Cal is the Medi-Cal focus; Kaiser MM is the Kaiser med-management drill-down). **Copy email summary** uses LASFIR + Per Nbr only.
+
+**Admin** is the four steps below, plus clinic files, payer evidence, IR and more files.
+
+### Rules (v0.8)
+
+- **R1 Report end.** Data stops at the first row after the header starting with `Total Appointments`. Rows with content below it (left over from pasting over a longer report) are ignored and a red warning says how many. A second warning fires when payer values match Rendering or Res Name values (shifted columns).
+- **R2 Auto payer mapping.** NextGen payer names not on the Payer Map are matched to Sohar payers and written to the Payer Map once: `Auto-High` (exact name or alias), `Auto-Medium` (strong fuzzy match: score ≥ 0.75, ≥ 66% of words matched, clear winner by ≥ 0.15), `Auto-Low` (best guess only). Auto-High and Auto-Medium go to verification. A manual confidence on an existing row always wins. Self Pay and VIP names are never auto-matched. Step 1 has an optional **Review auto-mapped payers** list (Auto-Low first): Looks right, Change, Not a payer.
+- **R3 Two insurances.** Low-confidence chart payer and a different last encounter (Fin Class or Pol Nbr): both are sent to verification with id = Per Nbr. The last-encounter payer comes from this report's Fin Class → most common confidently mapped NextGen payer. The Sohar results decide; the losing row is marked Superseded.
+- **R4 VIP / Partial VIP** = MHS-sponsored. Verify any other insurance on file, else discovery only. Always a VIP pill.
+- **R5 Kaiser / VA** med-management visits (not TMS, esketamine, ketamine, MT, meetings, testing) with no Auth Cd on the chart or last encounter: `Kaiser MM no auth`.
+- **R6 Medi-Cal** other than Kaiser or SFHP (NextGen, secondary, Fin Class, or what Sohar returned): red `Medi-Cal` pill, plus `New Medi-Cal` when the last visit was not Medi-Cal. SFHP patients booked with a provider not on Config `SFHP providers` (names or last names, `;` separated) are flagged; an empty list asks to confirm the provider.
+- **R7** UMR and Carelon (incl. Beacon) TMS visits with an NP rendering provider: `NP-TMS`.
+- **R8 Secondary** on the chart: "may cover the deductible, copay or coinsurance" (stronger, medium, when Medicare/Noridian/QMB is involved). QMB anywhere: `QMB` pill, do not collect Medicare cost-sharing until billing confirms.
+- **R9 Re-verify** when the latest Sohar verification is older than Config `Re-verify days` (default 7) or missing, for patients with an upcoming visit.
+
+Flags are added to the **Review** sheet rows (same `REVIEW_COLS`) and a `Pills` column is added after the standard columns on **Sohar Results** and **Benefits**. Full screen shows pills and a Flag filter.
+
+### Clinic files and payer evidence
+
+- **Clinic files and emails** (Admin): one `Sohar Clinic - <Location> YYYY-MM-DD.xlsx` per location, saved to Downloads like the CSVs (save-tab fallback on the web). Sheets: `Clinic` (`tblClinic`, `rules.CLINIC_COLS`, run date, benefits, pills, review items, re-verify hyperlink), `Review` (`tblClinicReview`), hidden `Clinic Info` (`tblClinicMeta`: Kind = Sohar Clinic, Location, Run Date, Add-in Version). The file also carries the Office web-extension parts so Excel can open the pane with it; if Excel ignores them, open the add-in from the Home tab. **Copy email** per location: LASFIR + Per Nbr, grouped by date, pills and OOP/deductible met or approaching.
+- **Payer Evidence** sheet (`tblPayerEvidence`), written every refresh and upserted by Per Nbr + NextGen payer + member ID prefix: Fin Class, prefix, location, ZIP3, state, confidence used, Sohar payer/plan/status, first and last seen. Admin shows a payer × prefix × location summary.
+- **Copay history:** each clinic file and the tracker export keep the verification date with deductible and OOP status per patient, so a later copay-log report can join on Per Nbr + date.
+
+### The four Admin steps
+
+1. **Upload the NextGen report** (drop or choose; .xlsx or .csv). It is scanned and built right away; new insurance names are auto-mapped. Scope, as-of date, rebuild and sheet links sit under Options.
 2. **Save the Sohar import files**: `Sohar Ready Import - Verification YYYY-MM-DD.csv` and `Sohar Ready Import - Discovery YYYY-MM-DD.csv` (local date), saved to Downloads.
 3. **Upload what Sohar sends back** (drop both outputs, or one at a time). If discovery found coverage, a callout offers `Sohar Ready Import - Verification (from Discovery) YYYY-MM-DD.csv` for the second run.
 4. **Benefits and OOP max**: counts of OOP / deductible met and approaching, and the patients at or near their OOP max (LASFIR + Per Nbr, $ left, % met). Writes the `Benefits` sheet (`tblBenefits`, `BENEFIT_SHEET_COLS`), one row per verified patient, OOP closest to met first, with % columns as numbers and data bars. Benefits only exist after a **verification** output is uploaded; with discovery alone the step says so.
@@ -56,6 +82,8 @@ Scope `upcoming` keeps patients with a non-cancelled, non-no-show appointment on
 
 Code changes ship by pushing to `main`. Manifest changes need a re-upload in Integrated apps.
 
+Clinic files open the pane by themselves only because the ribbon button's `<TaskpaneId>` is `Office.AutoShowTaskpaneWithDocument` (manifest 0.1.1.0 and later). Keep that value; Office needs it plus the web-extension parts the clinic file carries.
+
 ## Local preview
 
 ```
@@ -76,7 +104,10 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 
 | File | Role |
 |---|---|
-| `core.js` | Pure logic: header detection, name/date parsing, routing, exports, CSV. Shared with tests. |
+| `core.js` | Pure logic: header detection, name/date parsing, routing, auto payer matching, exports, CSV. Shared with tests. |
+| `rules.js` | Pure clinic rules (R5-R10): flags and pills, Review rows, clinic sheet and email, payer evidence. |
+| `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts). |
+| `save.html`, `save.js` | Fallback save tab for Excel on the web; takes CSV text or base64 (.xlsx). |
 | `excel.js` | Everything that reads or writes the workbook. Table names must match the template. |
 | `app.js` | Pane behaviour, step flow, payer mapping UI, uploads, downloads, demo mode. |
 | `dashboard.html`, `dashboard.js` | Full-screen window (Office dialog): prep, worklist, NextGen tasks, messages, upload and save. |

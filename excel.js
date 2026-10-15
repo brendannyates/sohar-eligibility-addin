@@ -69,6 +69,11 @@
       useGuarantorAsSubscriber: /^y|true/i.test(String(cfg['Use guarantor as subscriber'] || 'No')),
       // "Approaching" = remaining at or under this share of the deductible or OOP max. Optional Config row; default 20%.
       approachingPct: (() => { const n = parseFloat(String(cfg['Benefit approaching %'] ?? '').replace('%', '')); return isNaN(n) ? 0.2 : (n > 1 ? n / 100 : n); })(),
+      // Optional rows, never required: SFHP-approved rendering providers (names or last names, ; separated),
+      // days before a Sohar verification counts as stale, and the Clinic tab's last location.
+      sfhpProviders: String(cfg['SFHP providers'] ?? '').split(/[;\n]/).map((s) => s.trim()).filter(Boolean),
+      reverifyDays: (() => { const n = parseInt(String(cfg['Re-verify days'] ?? ''), 10); return isNaN(n) || n < 0 ? 7 : n; })(),
+      clinicLocation: String(cfg['Clinic location'] ?? '').trim(),
     };
   }
 
@@ -85,7 +90,11 @@
     return rows.map((r) => ({ payerId: String(r.payerId || ''), payerName: String(r.payerName || ''), aliasPayerNames: String(r.aliasPayerNames || '') }));
   }
 
-  async function upsertPayerMap(entry) {
+  async function upsertPayerMap(entry) { return upsertPayerMapMany([entry]); }
+
+  /** Add or update Payer Map rows by NextGen name in one pass (auto-mapping can add dozens at once). */
+  async function upsertPayerMapMany(entries) {
+    if (!entries || !entries.length) return 0;
     return run(async (ctx) => {
       const t = ctx.workbook.tables.getItem(TABLES.payerMap);
       const h = t.getHeaderRowRange(); h.load('values');
@@ -93,24 +102,49 @@
       await ctx.sync();
       const headers = h.values[0].map((x) => String(x).trim());
       const col = (name) => headers.indexOf(name);
+      const set = (vals, name, v) => { const j = col(name); if (j >= 0) vals[j] = v; };
       const today = root.SoharCore.fmtDate(new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())));
-      const rowVals = headers.map(() => '');
-      rowVals[col('NextGen Payer Name')] = entry.nextgenPayerName;
-      rowVals[col('Sohar payerId')] = entry.payerId;
-      rowVals[col('Sohar payerName')] = entry.payerName;
-      rowVals[col('Confidence')] = entry.confidence;
-      rowVals[col('Action')] = entry.payerId ? 'verification' : 'discovery';
-      rowVals[col('Notes')] = entry.notes || '';
-      if (col('Last reviewed') >= 0) rowVals[col('Last reviewed')] = today;
-      const i = b.values.findIndex((r) => String(r[col('NextGen Payer Name')]).trim().toLowerCase() === String(entry.nextgenPayerName).trim().toLowerCase());
-      if (i >= 0) {
-        b.getRow(i).values = [rowVals];
-      } else {
-        const blank = b.values.findIndex((r) => r.every((v) => v === '' || v == null));
-        if (blank >= 0 && b.rowCount === 1) b.getRow(blank).values = [rowVals];
-        else t.rows.add(null, [rowVals]);
+      const verifiable = root.SoharCore.VERIFIABLE;
+      const keyOf = (v) => String(v ?? '').trim().toLowerCase();
+      const existing = new Map();
+      b.values.forEach((r, i) => { const k = keyOf(r[col('NextGen Payer Name')]); if (k && !existing.has(k)) existing.set(k, i); });
+      let blank = b.rowCount === 1 && b.values[0].every((v) => v === '' || v == null) ? 0 : -1;
+      // Sohar payerIds like 01111 must stay text, or Excel stores 1111 and verification gets the wrong payerId.
+      const idCol = col('Sohar payerId');
+      const writeRow = (i, rowVals) => {
+        const rg = b.getRow(i);
+        if (idCol >= 0) rg.getCell(0, idCol).numberFormat = [['@']];
+        rg.values = [rowVals];
+      };
+      const adds = [];
+      for (const entry of entries) {
+        const rowVals = headers.map(() => '');
+        set(rowVals, 'NextGen Payer Name', entry.nextgenPayerName);
+        set(rowVals, 'Sohar payerId', entry.payerId);
+        set(rowVals, 'Sohar payerName', entry.payerName);
+        set(rowVals, 'Confidence', entry.confidence);
+        set(rowVals, 'Action', entry.payerId && verifiable.has(keyOf(entry.confidence)) ? 'verification' : 'discovery');
+        set(rowVals, 'Notes', entry.notes || '');
+        set(rowVals, 'Last reviewed', today);
+        const i = existing.get(keyOf(entry.nextgenPayerName));
+        if (i != null) writeRow(i, rowVals);
+        else if (blank === 0) { writeRow(0, rowVals); blank = -1; existing.set(keyOf(entry.nextgenPayerName), 0); }
+        else adds.push(rowVals);
+      }
+      if (adds.length) {
+        t.rows.add(null, adds);
+        await ctx.sync();
+        if (idCol >= 0) {
+          // Re-write the new rows' payerIds as text (rows.add may have turned "01111" into 1111).
+          const nb = t.getDataBodyRange(); nb.load('rowCount');
+          await ctx.sync();
+          const ids = nb.getCell(nb.rowCount - adds.length, idCol).getResizedRange(adds.length - 1, 0);
+          ids.numberFormat = adds.map(() => ['@']);
+          ids.values = adds.map((r) => [r[idCol]]);
+        }
       }
       await ctx.sync();
+      return entries.length;
     });
   }
 
@@ -269,6 +303,29 @@
   }
   async function readTasks() { try { return await readTable(TASKS_TABLE); } catch (e) { return []; } }
 
+  // Payer Evidence: one row per patient-insurance observation, upserted by Key each refresh (rules.payerEvidence).
+  async function readPayerEvidence() { try { return await readTable('tblPayerEvidence'); } catch (e) { return []; } }
+  const writePayerEvidence = (cols, rows) => writeAddinTable('Payer Evidence', 'tblPayerEvidence', cols, rows, false);
+
+  /** True when the workbook has this table (used to tell the Sohar template from a clinic file). */
+  async function tableExists(tableName) {
+    return run(async (ctx) => {
+      const t = ctx.workbook.tables.getItemOrNullObject(tableName);
+      t.load('isNullObject');
+      await ctx.sync();
+      return !t.isNullObject;
+    });
+  }
+
+  /** A clinic file saved by the Admin tab: {meta, rows, review}, or null when this is not one. */
+  async function readClinicFile() {
+    if (!(await tableExists('tblClinicMeta'))) return null;
+    const meta = (await readTable('tblClinicMeta'))[0] || {};
+    const rows = await readTable('tblClinic').catch(() => []);
+    const review = await readTable('tblClinicReview').catch(() => []);
+    return { meta, rows, review };
+  }
+
   /** Mark one NextGen task done (or not) by Task Key. */
   async function setTaskDone(key, done) {
     return run(async (ctx) => {
@@ -365,7 +422,8 @@
     });
   }
 
-  root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, replaceTable,
+  root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, upsertPayerMapMany, replaceTable,
+    readPayerEvidence, writePayerEvidence, tableExists, readClinicFile,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

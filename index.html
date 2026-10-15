@@ -17,9 +17,35 @@
     </div>
     <p id="wbStatus" class="status">Checking workbook…</p>
   </header>
+  <nav class="tabs pane-tabs" role="tablist" aria-label="Pane views">
+    <button role="tab" id="tabClinic" data-ptab="clinic" aria-controls="panelClinic" aria-selected="false" tabindex="-1">Clinic</button>
+    <button role="tab" id="tabAdmin" data-ptab="admin" aria-controls="panelAdmin" aria-selected="true" tabindex="0">Admin</button>
+  </nav>
 
   <main>
-    <ol class="steps">
+    <!-- Clinic: simple pre-check view -->
+    <section id="panelClinic" role="tabpanel" aria-labelledby="tabClinic" class="clinic" hidden>
+      <div class="clinic-head">
+        <label>Location
+          <select id="clinicLoc"><option value="">All locations</option></select>
+        </label>
+        <label>Search
+          <input id="clinicText" type="search" placeholder="Name or Per Nbr">
+        </label>
+      </div>
+      <div id="clinicChips" class="chips filterchips" role="group" aria-label="Filter by flag"></div>
+      <p id="clinicMeta" class="hint"></p>
+      <div id="clinicList"><p class="hint">Upload the NextGen report on the Admin tab first.</p></div>
+      <div class="actions">
+        <button class="primary alt" id="btnClinicEmail">Copy email summary</button>
+        <a class="link" href="https://app.soharhealth.com/create?type=verification" target="_blank" rel="noopener">Re-verify in Sohar</a>
+      </div>
+      <div id="clinicNote" class="result" hidden></div>
+    </section>
+
+    <section id="panelAdmin" role="tabpanel" aria-labelledby="tabAdmin">
+    <div id="adminOnlyTemplate" class="result pad" hidden><p class="warn">The Admin tab works only in the Sohar Eligibility template workbook. This is a clinic file: use the Clinic tab.</p></div>
+    <ol class="steps" id="adminSteps">
       <!-- 1. NextGen report in -->
       <li class="step" id="step1" data-step="1">
         <div class="num">1</div>
@@ -29,6 +55,7 @@
           <div id="dropReport" class="drop slim" tabindex="0" role="button" aria-label="Upload the NextGen Appointments Listing">
             Drop the Appointments Listing here, or <u>choose the file</u><br><span class="hint">.xlsx or .csv, straight from NextGen</span>
           </div>
+          <div id="reportWarn" class="callout bad" role="alert" hidden></div>
           <div id="scanResult" class="result" hidden></div>
           <div id="payerList" class="result" hidden></div>
           <div id="buildResult" class="result" hidden></div>
@@ -54,6 +81,7 @@
               <button class="link" data-goto="Patients">Patients</button>
               <button class="link" data-goto="Review">Review</button>
               <button class="link" data-goto="Payer Map">Payer Map</button>
+              <button class="link" data-goto="Payer Evidence">Payer Evidence</button>
             </div>
           </details>
         </div>
@@ -110,6 +138,21 @@
       </li>
     </ol>
 
+    <details class="more section" id="clinicSection" open>
+      <summary>Clinic files and emails</summary>
+      <p class="hint">One file per location for the clinic team: patients with an upcoming visit, benefits, flags and a re-verify link. Opening it in Excel shows the Clinic tab. The email summary uses LASFIR and Per Nbr only.</p>
+      <p class="hint warn-text">Clinic files contain PHI. Share them only through MHS OneDrive or Teams with the clinic team; do not email them outside MHS.</p>
+      <div id="clinicFiles"><p class="hint">Shows after the NextGen report is loaded.</p></div>
+      <div id="clinicFilesNote" class="result" hidden></div>
+    </details>
+
+    <details class="more section" id="evidenceSection">
+      <summary>Payer evidence</summary>
+      <p class="hint">Every refresh adds what was seen to the <b>Payer Evidence</b> sheet: NextGen payer, member ID prefix, location, ZIP3 and what Sohar returned. Over time it shows which Sohar payer a one-off NextGen name really is.</p>
+      <div id="evidenceBox" class="result"></div>
+      <div class="actions"><button class="link" data-goto="Payer Evidence">Payer Evidence sheet</button></div>
+    </details>
+
     <details class="more section" id="irSection">
       <summary>IR Portal cross-check (optional)</summary>
       <p class="hint">Upload the IR Portal workbook (its <b>Filtered</b> tab) or a CSV of it. Insurance items are matched to the Sohar results by MRN, then name and DOB, and written to <b>IR Cross-Ref</b>.</p>
@@ -137,6 +180,7 @@
       </div>
       <p class="hint">Messages use LASFIR and Per Nbr only. Send inside Outlook or Teams only.</p>
     </details>
+    </section>
   </main>
 
   <footer class="foot">
@@ -146,6 +190,8 @@
   </footer>
 
   <script src="core.js"></script>
+  <script src="rules.js"></script>
+  <script src="xlsx.js"></script>
   <script src="excel.js"></script>
   <script src="app.js"></script>
 </body>

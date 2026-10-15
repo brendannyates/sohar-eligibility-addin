@@ -47,12 +47,20 @@
     secPayer: ['Sec Payer (Cht Guar)', 'Secondary Payer', 'Sec Payer', 'Secondary Insurance'],
     polNbr: ['Pol Nbr (Cht Guar)', 'Policy Nbr', 'Policy Number', 'Member ID', 'Subscriber ID', 'Pol Nbr'],
     polNbrLstEnc: ['Pol Nbr (Lst Enc)', 'Policy Nbr (Last Enc)'],
-    zip: ['Zip', 'Pat Zip', 'Zip Code', 'Postal Code', 'Patient Zip', 'Home Zip'],
+    zip: ['Zip', 'Pat Zip', 'Zip Code', 'Postal Code', 'Patient Zip', 'Home Zip', 'Guar Zip'],
     state: ['Pat State', 'Patient State', 'Home State', 'State'],
     guarName: ['Guar Name', 'Guarantor Name', 'Guarantor'],
     rendering: ['Rendering', 'Rendering Provider', 'Provider'],
+    resName: ['Res Name', 'Resource Name', 'Resource'],
+    finClass: ['Fin Class (Cht Guar)', 'Fin Class', 'Financial Class'],
+    finClassLstEnc: ['Fin Class (Lst Enc)'],
+    secPayerLstEnc: ['Sec Payer (Lst Enc)'],
+    authCd: ['Auth Cd (Cht Guar)', 'Auth Cd', 'Auth Code'],
+    authCdLstEnc: ['Auth Cd (Lst Enc)'],
   };
+  // Matching is exact after normHeader, so "Nxt Appt Dt", "Nxt Beg Tm" and "Nxt Event" never land on apptDt/begTm/event.
   const REQUIRED = ['perNbr', 'apptDt', 'payer'];
+  const FOOTER_RE = /^total appointments/i;
 
   function normHeader(s) {
     return String(s == null ? '' : s).toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -64,7 +72,13 @@
     return isBlank(v) ? '' : String(v).trim();
   }
 
-  /** Find the header row in a pasted report. Returns {headerRow, colMap, headers} or null. */
+  /**
+   * Find the header row in a pasted report. Returns {headerRow, colMap, headers, missing, optionalMissing,
+   * footerRow, dataEnd, leftoverRows, warnings} or null.
+   * Data stops at the first row after the header whose first non-blank cell starts with "Total Appointments"
+   * (footerRow; -1 when there is none). dataEnd is the exclusive end index for data rows.
+   * leftoverRows counts rows with content below the footer (left over from pasting over a longer report).
+   */
   function detectHeader(rows, maxScan) {
     const limit = Math.min(rows.length, maxScan || 40);
     const synIndex = {};
@@ -94,8 +108,39 @@
     if (!best) return null;
     best.missing = REQUIRED.filter((f) => best.colMap[f] == null);
     best.optionalMissing = ['patName', 'dob', 'zip', 'polNbr', 'event', 'loc', 'sts'].filter((f) => best.colMap[f] == null);
+    best.warnings = [];
+    best.footerRow = -1;
+    for (let r = best.headerRow + 1; r < rows.length; r++) {
+      const first = (rows[r] || []).find((v) => !isBlank(v));
+      if (first != null && FOOTER_RE.test(str(first))) { best.footerRow = r; break; }
+    }
+    best.dataEnd = best.footerRow >= 0 ? best.footerRow : rows.length;
+    best.leftoverRows = 0;
+    if (best.footerRow >= 0) {
+      for (let r = best.footerRow + 1; r < rows.length; r++) if ((rows[r] || []).some((v) => !isBlank(v))) best.leftoverRows++;
+    }
+    if (best.leftoverRows) {
+      const n = best.leftoverRows;
+      best.warnings.push(`${n} leftover row${n > 1 ? 's' : ''} below the report total ${n > 1 ? 'were' : 'was'} ignored — upload the report instead of pasting, which clears the sheet.`);
+    }
+    // Sanity check: provider names in the payer column mean the columns are shifted.
+    const cm = best.colMap;
+    if (cm.payer != null && (cm.rendering != null || cm.resName != null)) {
+      const staff = new Set(), payers = new Set();
+      for (let r = best.headerRow + 1; r < best.dataEnd; r++) {
+        const row = rows[r] || [];
+        for (const f of ['rendering', 'resName']) if (cm[f] != null && !isBlank(row[cm[f]])) staff.add(str(row[cm[f]]).toLowerCase());
+        if (!isBlank(row[cm.payer])) payers.add(str(row[cm.payer]));
+      }
+      const overlap = [...payers].filter((p) => staff.has(p.toLowerCase()));
+      best.shiftedColumns = overlap;
+      if (overlap.length) {
+        best.warnings.push(`The payer column holds provider names (${overlap.slice(0, 3).join('; ')}${overlap.length > 3 ? '; …' : ''}); the columns look shifted. Re-run the report and upload it again.`);
+      }
+    } else best.shiftedColumns = [];
     return best;
   }
+  const dataEndOf = (det, rows) => (det.dataEnd != null ? det.dataEnd : rows.length);
 
   // ---------- dates ----------
   const MS_DAY = 86400000;
@@ -149,8 +194,13 @@
   }
 
   // ---------- payer map ----------
-  const VERIFIABLE = new Set(['exact', 'probable', 'confirmed']);
+  const VERIFIABLE = new Set(['exact', 'probable', 'confirmed', 'auto-high', 'auto-medium']);
+  // Confident enough to stand in for a Fin Class when deriving the last-encounter payer (Auto-Medium is not).
+  const CONFIDENT = new Set(['exact', 'probable', 'confirmed', 'auto-high']);
+  const isVip = (s) => /\bvip\b/i.test(str(s));
+  const isSelfPay = (s) => /^self[\s-]*pay\b/i.test(str(s));
   function payerMapIndex(mapRows) {
+    if (mapRows instanceof Map) return mapRows;
     const idx = new Map();
     for (const r of mapRows || []) {
       const name = str(r.nextgenPayerName);
@@ -190,6 +240,150 @@
     return out.slice(0, n || 5);
   }
 
+  // ---------- automatic payer matching ----------
+  // Normalization (used for both exact and fuzzy): lowercase, "&" -> "and", punctuation -> space,
+  // a few joined phrases (united healthcare -> unitedhealthcare, medi cal -> medcal, tri west -> triwest),
+  // abbreviations expanded (ca/calif -> california, bs -> blue shield, bc -> blue cross, uhc -> unitedhealthcare,
+  // va -> veterans affairs, nor -> northern, adv -> advantage), filler words dropped (AUTO_STOP), duplicates removed.
+  const AUTO_STOP = new Set(['the', 'of', 'and', 'inc', 'co', 'corp', 'llc', 'plan', 'plans', 'insurance', 'ins', 'generic']);
+  const AUTO_ABBR = { ca: ['california'], calif: ['california'], bs: ['blue', 'shield'], bc: ['blue', 'cross'], bcbs: ['blue', 'cross', 'shield'],
+    uhc: ['unitedhealthcare'], va: ['veterans', 'affairs'], veteran: ['veterans'], nor: ['northern'], adv: ['advantage'] };
+  const AUTO_PHRASES = [[/\bunited health ?care\b/g, 'unitedhealthcare'], [/\bmedi cal\b/g, 'medcal'], [/\btri west\b/g, 'triwest']];
+  // Generic words count half: they rarely tell two payers apart.
+  const AUTO_GENERIC = new Set(['health', 'healthcare', 'care', 'california', 'northern', 'southern', 'west', 'east', 'behavioral', 'services',
+    'solutions', 'network', 'foundation', 'group', 'medical', 'benefits', 'administrators', 'options', 'systems', 'national', 'alliance', 'partners', 'company']);
+  const AUTO_MEDIUM = { minScore: 0.75, minCoverage: 0.66, minGap: 0.15 };
+  function autoTokens(s) {
+    let t = ` ${str(s).toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ')} `;
+    for (const [re, to] of AUTO_PHRASES) t = t.replace(re, to);
+    const out = [];
+    for (const w of t.split(/\s+/)) {
+      if (!w || AUTO_STOP.has(w)) continue;
+      for (const x of AUTO_ABBR[w] || [w]) if (!out.includes(x)) out.push(x);
+    }
+    return out;
+  }
+  const autoWeight = (t) => (AUTO_GENERIC.has(t) ? 0.5 : 1);
+  const autoPrepCache = new WeakMap();
+  function autoPrep(soharPayers) {
+    const list = soharPayers || [];
+    if (autoPrepCache.has(list)) return autoPrepCache.get(list);
+    const prepared = [];
+    for (const p of list) {
+      if (!str(p.payerId) && !str(p.payerName)) continue;
+      const variants = [{ text: str(p.payerName), kind: 'name' }];
+      for (const a of str(p.aliasPayerNames).split(/\s*[;|\n,]\s*/)) if (a) variants.push({ text: a, kind: 'alias' });
+      prepared.push({ payerId: str(p.payerId), payerName: str(p.payerName), variants: variants.map((v) => ({ ...v, toks: autoTokens(v.text) })).filter((v) => v.toks.length) });
+    }
+    if (soharPayers) autoPrepCache.set(list, prepared);
+    return prepared;
+  }
+
+  /**
+   * Best Sohar payer for a NextGen payer name, with a confidence:
+   *  Auto-High   exact match after normalization to a Sohar payerName or one of its aliasPayerNames (one payerId only).
+   *  Auto-Medium fuzzy: score >= 0.75, the query's words matched >= 66% (by weight), and the best payer beats the
+   *              best payer with a different payerId by >= 0.15, and no unmatched non-generic query word appears in
+   *              another payer's name or alias (a second brand, e.g. "Western Health Advantage Optum").
+   *  Auto-Low    anything weaker; payerId is still the best guess ('' when no Sohar payer shares a distinctive word).
+   * Fuzzy score per name/alias = 0.7 * coverage (share of the query's word weight found) + 0.3 * precision
+   * (share of the Sohar name's word weight found); generic words weigh 0.5, others 1. A candidate scores 0 unless
+   * at least one non-generic word matches (when the query has one). Returns {payerId, payerName, confidence, score, evidence}.
+   */
+  function autoMatchPayer(name, soharPayers) {
+    const q = autoTokens(name);
+    const none = (evidence) => ({ payerId: '', payerName: '', confidence: 'Auto-Low', score: 0, evidence });
+    if (!q.length) return none('No words to match');
+    const prepared = autoPrep(soharPayers);
+    if (!prepared.length) return none('Sohar payer list is empty');
+    const key = q.join(' ');
+    const exact = [];
+    for (const p of prepared) {
+      const v = p.variants.find((x) => x.toks.join(' ') === key);
+      if (v && !exact.some((e) => e.p.payerId === p.payerId)) exact.push({ p, v });
+    }
+    if (exact.length === 1) {
+      const { p, v } = exact[0];
+      return { payerId: p.payerId, payerName: p.payerName, confidence: 'Auto-High', score: 1, evidence: `Exact ${v.kind} match: "${v.text}"` };
+    }
+    if (exact.length > 1) {
+      const { p } = exact[0];
+      return { payerId: p.payerId, payerName: p.payerName, confidence: 'Auto-Low', score: 1,
+        evidence: `Same name on ${exact.length} Sohar payers: ${exact.map((e) => `${e.p.payerName} (${e.p.payerId})`).join(', ')}` };
+    }
+    const qW = q.reduce((s, t) => s + autoWeight(t), 0);
+    const qHasStrong = q.some((t) => autoWeight(t) === 1);
+    const scored = [];
+    for (const p of prepared) {
+      let best = null;
+      for (const v of p.variants) {
+        const hit = q.filter((t) => v.toks.includes(t));
+        if (!hit.length || (qHasStrong && !hit.some((t) => autoWeight(t) === 1))) continue;
+        const hW = hit.reduce((s, t) => s + autoWeight(t), 0);
+        const cW = v.toks.reduce((s, t) => s + autoWeight(t), 0);
+        const coverage = hW / qW, precision = hW / cW;
+        const score = 0.7 * coverage + 0.3 * precision;
+        if (!best || score > best.score) best = { score, coverage, hit, v };
+      }
+      if (best) scored.push({ p, ...best });
+    }
+    if (!scored.length) return none('No Sohar payer shares a distinctive word');
+    scored.sort((a, b) => b.score - a.score || a.p.payerName.localeCompare(b.p.payerName));
+    const top = scored[0];
+    const runner = scored.find((s) => s.p.payerId !== top.p.payerId);
+    const gap = top.score - (runner ? runner.score : 0);
+    const r2 = (n) => Math.round(n * 100) / 100;
+    // A distinctive word the best payer did not match but another payer's name has (e.g. "Optum" in
+    // "Western Health Advantage Optum") means the name may be a second brand: never Auto-Medium.
+    const otherBrand = q.filter((t) => autoWeight(t) === 1 && !top.hit.includes(t))
+      .find((t) => prepared.some((p) => p.payerId !== top.p.payerId && p.variants.some((v) => v.toks.includes(t))));
+    const medium = !otherBrand && top.score >= AUTO_MEDIUM.minScore && top.coverage >= AUTO_MEDIUM.minCoverage && gap >= AUTO_MEDIUM.minGap;
+    const evidence = `Matched ${top.hit.length}/${q.length} words (${top.hit.join(', ')}) in ${top.v.kind} "${top.v.text}"; score ${r2(top.score)}`
+      + (runner ? `; next best ${runner.p.payerName} ${r2(runner.score)}` : '; no other candidate')
+      + (otherBrand ? `; unmatched "${otherBrand}" is in another payer's name` : '');
+    return { payerId: top.p.payerId, payerName: top.p.payerName, confidence: medium ? 'Auto-Medium' : 'Auto-Low', score: r2(top.score), evidence };
+  }
+
+  /**
+   * Fin Class -> Sohar payer, learned from this report: for each Fin Class (Cht Guar), the NextGen payer most
+   * patients with that Fin Class have, among payers confidently mapped (Exact, Probable, Confirmed, Auto-High).
+   * entries: patients (uses x.finClass and 'Primary Payer') or {finClass, payer} objects, one per patient.
+   * payerMap: Payer Map rows or a payerMapIndex Map. opts.overrides: {finClass: payerId} or
+   * [{finClass, payerId, payerName}] (Config); overrides win.
+   * Returns Map(normalized fin class -> {finClass, nextgenPayer, payerId, payerName, count, total, source}).
+   */
+  function finClassPayerIndex(entries, payerMap, opts) {
+    const idx = payerMapIndex(payerMap);
+    const fk = (s) => str(s).toLowerCase().replace(/\s+/g, ' ');
+    const tally = new Map();
+    for (const e of entries || []) {
+      const fc = str(e.x ? e.x.finClass : e.finClass);
+      const payer = str(e.x ? e['Primary Payer'] : e.payer);
+      if (!fc || !payer) continue;
+      if (!tally.has(fk(fc))) tally.set(fk(fc), { finClass: fc, total: 0, payers: new Map() });
+      const t = tally.get(fk(fc));
+      t.total++;
+      t.payers.set(payer, (t.payers.get(payer) || 0) + 1);
+    }
+    const out = new Map();
+    for (const [k, t] of tally) {
+      const ranked = [...t.payers].filter(([n]) => { const h = idx.get(n.toLowerCase()); return h && h.payerId && CONFIDENT.has(h.confidence.toLowerCase()); })
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+      if (!ranked.length) continue;
+      const [nextgenPayer, count] = ranked[0];
+      const h = idx.get(nextgenPayer.toLowerCase());
+      out.set(k, { finClass: t.finClass, nextgenPayer, payerId: h.payerId, payerName: h.payerName, count, total: t.total, source: 'report' });
+    }
+    const ov = (opts && opts.overrides) || null;
+    const ovList = Array.isArray(ov) ? ov : ov ? Object.entries(ov).map(([finClass, payerId]) => ({ finClass, payerId })) : [];
+    for (const o of ovList) {
+      if (!str(o.finClass) || !str(o.payerId)) continue;
+      out.set(fk(o.finClass), { finClass: str(o.finClass), nextgenPayer: str(o.nextgenPayer), payerId: str(o.payerId), payerName: str(o.payerName), count: 0, total: 0, source: 'config' });
+    }
+    return out;
+  }
+  const finClassLookup = (fidx, fc) => (str(fc) ? fidx.get(str(fc).toLowerCase().replace(/\s+/g, ' ')) || null : null);
+
   // ---------- build ----------
   const NOT_KEPT_FUTURE = new Set(['cancelled', 'canceled', 'no show', 'noshow', 'deleted']);
 
@@ -197,14 +391,16 @@
    * rows: 2D array from the Import sheet (including title rows). cfg:
    *  { asOf: Date, scope: 'upcoming'|'all', locationState: {locName: 'CA'}, defaultState, teleKeywords: ['tele'],
    *    posTele: '10', posOffice: '11', specialty: 'PSY', payerMap: [ {nextgenPayerName,payerId,payerName,confidence,notes} ],
-   *    useGuarantorAsSubscriber: bool }
+   *    useGuarantorAsSubscriber: bool, soharPayers: [{payerId, payerName, aliasPayerNames}] (optional; turns on auto-matching),
+   *    finClassPayers: {finClass: payerId} | [{finClass, payerId, payerName}] (optional Config overrides) }
+   * Each patient has the PATIENT_COLS keys plus a non-column property x (see README / API contract).
+   * autoMapped: Payer Map rows to add for NextGen payer names that were not in the map.
    */
   function buildPatients(rows, cfg) {
     const det = detectHeader(rows);
     if (!det) return { error: 'Could not find the header row. The Import sheet needs the NextGen columns, including "Per Nbr" and "Appt Dt".' };
     if (det.missing.length) return { error: `Header row found but missing: ${det.missing.join(', ')}.`, detection: det };
     const cm = det.colMap;
-    const idx = payerMapIndex(cfg.payerMap);
     const asOf = cfg.asOf ? utcDay(cfg.asOf) : utcDay(new Date());
     const tele = (cfg.teleKeywords && cfg.teleKeywords.length ? cfg.teleKeywords : ['tele']).map((k) => k.toLowerCase());
     const locState = {};
@@ -213,16 +409,20 @@
     const get = (row, f) => (cm[f] == null ? '' : row[cm[f]]);
     const byPatient = new Map();
     let dataRows = 0;
-    for (let r = det.headerRow + 1; r < rows.length; r++) {
+    const end = dataEndOf(det, rows);
+    for (let r = det.headerRow + 1; r < end; r++) {
       const row = rows[r] || [];
       const per = str(get(row, 'perNbr'));
       const dt = parseDate(get(row, 'apptDt'));
-      if (!per || !dt) continue; // footer / blank rows
+      if (!per || !dt) continue; // blank rows
       dataRows++;
       const rec = {
-        dt, status: str(get(row, 'sts')), event: str(get(row, 'event')), loc: str(get(row, 'loc')),
-        payer: str(get(row, 'payer')), secPayer: str(get(row, 'secPayer')),
+        dt, tmRaw: get(row, 'begTm'), status: str(get(row, 'sts')), event: str(get(row, 'event')), loc: str(get(row, 'loc')),
+        rendering: str(get(row, 'rendering')),
+        payer: str(get(row, 'payer')), secPayer: str(get(row, 'secPayer')), secPayerLst: str(get(row, 'secPayerLstEnc')),
         pol: str(get(row, 'polNbr')), polLst: str(get(row, 'polNbrLstEnc')),
+        finClass: str(get(row, 'finClass')), finClassLst: str(get(row, 'finClassLstEnc')),
+        authCd: str(get(row, 'authCd')), authCdLst: str(get(row, 'authCdLstEnc')),
         name: str(get(row, 'patName')), dob: parseDate(get(row, 'dob')), zip: str(get(row, 'zip')),
         state: str(get(row, 'state')), patSts: str(get(row, 'patSts')), mrn: str(get(row, 'mrn')), guar: str(get(row, 'guarName')),
       };
@@ -231,15 +431,43 @@
     }
     if (!dataRows) return { error: 'Header row found but no appointment rows under it.', detection: det };
 
+    // Per patient: latest row first; chart-level fields come from the latest row that has them.
+    const pts = [];
+    for (const [per, recs] of byPatient) {
+      recs.sort((a, b) => b.dt - a.dt);
+      const latest = recs[0];
+      const pick = (f) => { const h = recs.find((x) => x[f]); return h ? h[f] : ''; };
+      const of = (f) => latest[f] || pick(f);
+      pts.push({ per, recs, latest, pick, payerName: of('payer'), secName: of('secPayer'), finClass: of('finClass'), finClassLst: of('finClassLst') });
+    }
+
+    // R2: auto-match NextGen payer names that are not in the Payer Map. Rows already in the map win.
+    const autoMapped = [];
+    const mapRows = (cfg.payerMap || []).slice();
+    const known = payerMapIndex(mapRows);
+    if (cfg.soharPayers && cfg.soharPayers.length) {
+      const names = new Map();
+      for (const t of pts) for (const n of [t.payerName, t.secName]) if (n) names.set(n.toLowerCase(), { name: n, n: (names.get(n.toLowerCase()) || { n: 0 }).n + 1 });
+      for (const { name, n } of names.values()) {
+        if (known.has(name.toLowerCase()) || isSelfPay(name) || isVip(name)) continue;
+        const m = autoMatchPayer(name, cfg.soharPayers);
+        const entry = { nextgenPayerName: name, payerId: m.payerId, payerName: m.payerName, confidence: m.confidence,
+          notes: `Auto-matched by the add-in: ${m.evidence}`, score: m.score, patients: n };
+        autoMapped.push(entry);
+        mapRows.push(entry);
+      }
+      autoMapped.sort((a, b) => b.patients - a.patients || a.nextgenPayerName.localeCompare(b.nextgenPayerName));
+    }
+    const idx = payerMapIndex(mapRows);
+    const finIdx = finClassPayerIndex(pts.map((t) => ({ finClass: t.finClass, payer: t.payerName })), idx, { overrides: cfg.finClassPayers });
+
     const patients = [];
     const review = [];
     const addReview = (sev, issue, per, detail, fix) => review.push({ Severity: sev, Issue: issue, 'Per Nbr': per, Detail: detail, Fix: fix });
 
-    for (const [per, recs] of byPatient) {
-      recs.sort((a, b) => b.dt - a.dt); // latest first
-      const latest = recs[0];
-      const pick = (f) => { const h = recs.find((x) => x[f]); return h ? h[f] : ''; };
-      const future = recs.filter((x) => x.dt >= asOf && !NOT_KEPT_FUTURE.has(x.status.toLowerCase())).sort((a, b) => a.dt - b.dt);
+    for (const { per, recs, latest, pick, payerName, secName, finClass, finClassLst } of pts) {
+      const future = recs.filter((x) => x.dt >= asOf && !NOT_KEPT_FUTURE.has(x.status.toLowerCase()))
+        .sort((a, b) => a.dt - b.dt || String(a.tmRaw).localeCompare(String(b.tmRaw)));
       const next = future[0] || null;
       const posEvent = (next || latest).event;
       const pos = tele.some((k) => posEvent.toLowerCase().includes(k)) ? (cfg.posTele || '10') : (cfg.posOffice || '11');
@@ -249,21 +477,77 @@
       const zip = str(pick('zip')).replace(/[^0-9-]/g, '').slice(0, 10);
       const state = (str(pick('state')) || locState[latest.loc.toLowerCase()] || cfg.defaultState || '').toUpperCase().slice(0, 2);
 
-      const payerName = latest.payer || pick('payer');
       const memberId = latest.pol || pick('pol');
       const memberLst = latest.polLst || pick('polLst');
       const lk = lookupPayer(payerName, idx);
-      const secName = latest.secPayer || pick('secPayer');
       const secLk = lookupPayer(secName, idx);
+      const conf = str(lk.confidence).toLowerCase();
+      const autoLow = conf === 'auto-low';
+      const vip = isVip(payerName) || isVip(finClass);
 
       const distinctPayers = new Set(recs.map((x) => x.payer).filter(Boolean));
       const flags = [];
-      let route, reason;
-      if (lk.status === 'mapped' && memberId) { route = 'verification'; reason = 'mapped payer + member ID'; }
-      else if (lk.status === 'none') { route = 'discovery'; reason = 'no payer on file'; }
-      else if (lk.status === 'unmapped') { route = 'discovery'; reason = `payer not in Payer Map: ${payerName}`; addReview('High', 'Unmapped payer', per, payerName, 'Map it in step 2 or add a row on the Payer Map sheet.'); }
-      else if (lk.status === 'review') { route = 'discovery'; reason = `payer needs review (${lk.confidence}): ${payerName}`; if (lk.confidence.toLowerCase() === 'not a payer' && payerName.toLowerCase() !== 'self pay') { route = 'exclude'; reason = `not a payer: ${payerName}`; } }
-      else { route = 'discovery'; reason = 'mapped payer but no member ID'; flags.push('No member ID'); }
+      const verifyRows = [];
+      let route, reason, soharId = lk.payerId || '';
+
+      // Last-encounter insurance, derived from Fin Class (Lst Enc) via this report's Fin Class -> payer index.
+      const lastEncRow = () => {
+        if (!finClassLst || isVip(finClassLst) || isSelfPay(finClassLst) || !memberLst) return null;
+        const f = finClassLookup(finIdx, finClassLst);
+        if (!f) return null;
+        return { payerId: f.payerId, payerName: f.payerName, memberId: memberLst, source: 'last encounter', nextgenPayer: f.nextgenPayer,
+          confidence: f.source === 'config' ? 'Fin Class (config)' : 'Fin Class (report)' };
+      };
+
+      if (vip) {
+        // R4: VIP / partial VIP = MHS-sponsored. Verify other insurance on file, else discovery only.
+        // A real chart payer (Fin Class VIP / Partial VIP) is that other insurance.
+        flags.push('VIP');
+        const chartOk = !isVip(payerName) && !isSelfPay(payerName) && lk.status === 'mapped' && memberId;
+        const le = chartOk ? null : lastEncRow();
+        const secOk = secName && !isVip(secName) && !isSelfPay(secName) && secLk.status === 'mapped';
+        if (chartOk) verifyRows.push({ payerId: lk.payerId, payerName: lk.payerName || '', memberId, source: 'guarantor', nextgenPayer: payerName, confidence: lk.confidence || '' });
+        else if (le) verifyRows.push(le);
+        if (verifyRows.length) {
+          route = 'verification'; reason = `VIP (MHS-sponsored); verifying other insurance: ${verifyRows[0].source} ${verifyRows[0].nextgenPayer || verifyRows[0].payerName}`;
+        } else if (secOk) {
+          // The report has no secondary policy number (Pol Nbr (Cht Guar) is the VIP entry's), so discovery with the secondary's payer as the hint.
+          route = 'discovery'; reason = `VIP (MHS-sponsored); secondary ${secName} has no policy number in the report: discovery with its payer as the hint`;
+          soharId = secLk.payerId;
+        } else {
+          route = 'discovery'; reason = 'VIP (MHS-sponsored), no other insurance on file: discovery only';
+          soharId = '';
+        }
+      } else if (lk.status === 'mapped' && memberId) {
+        route = 'verification'; reason = /^auto/.test(conf) ? `auto-mapped payer (${lk.confidence}) + member ID` : 'mapped payer + member ID';
+        verifyRows.push({ payerId: lk.payerId, payerName: lk.payerName || '', memberId, source: 'guarantor', nextgenPayer: payerName, confidence: lk.confidence || '' });
+      } else if (lk.status === 'none') { route = 'discovery'; reason = 'no payer on file'; }
+      else if (lk.status === 'review' && conf === 'not a payer') {
+        route = 'discovery'; reason = `payer needs review (${lk.confidence}): ${payerName}`;
+        if (!isSelfPay(payerName)) { route = 'exclude'; reason = `not a payer: ${payerName}`; }
+      } else if (lk.status === 'unmapped' || lk.status === 'review') {
+        // R3: low confidence + a different last encounter -> send both insurances; the results decide.
+        const differs = (finClassLst && finClassLst.toLowerCase() !== finClass.toLowerCase()) || (memberLst && idKey(memberLst) !== idKey(memberId));
+        const le = differs ? lastEncRow() : null;
+        if (autoLow) soharId = '';
+        if (le) {
+          if (lk.payerId && memberId) verifyRows.push({ payerId: lk.payerId, payerName: lk.payerName || '', memberId, source: 'guarantor', nextgenPayer: payerName, confidence: lk.confidence || '' });
+          verifyRows.push(le);
+          route = 'verification';
+          reason = verifyRows.length > 1 ? `two insurances: chart ${payerName} (${lk.confidence}) and last encounter ${finClassLst}` : `chart payer ${lk.confidence}: ${payerName}; verifying last-encounter insurance (${finClassLst})`;
+          if (verifyRows.length > 1) flags.push('Two insurances sent');
+          addReview('Low', verifyRows.length > 1 ? 'Two insurances sent to verification' : 'Last-encounter insurance sent to verification', per,
+            `Chart: ${payerName}${lk.payerName ? ` (best guess ${lk.payerName}, ${lk.confidence})` : ` (${lk.confidence})`}; last encounter: ${finClassLst} -> ${le.payerName}`,
+            'The Sohar results decide; Choose in NextGen shows which insurance to keep.');
+        } else if (lk.status === 'unmapped') {
+          route = 'discovery'; reason = `payer not in Payer Map: ${payerName}`;
+          addReview('High', 'Unmapped payer', per, payerName, 'Map it in step 2 or add a row on the Payer Map sheet.');
+        } else {
+          route = 'discovery'; reason = `payer needs review (${lk.confidence}): ${payerName}`;
+          if (autoLow) addReview('Medium', 'Payer auto-match is low confidence', per, `${payerName}${lk.payerName ? ` -> best guess ${lk.payerName}` : ''}`, 'Sent to discovery. Confirm the payer on the Payer Map sheet to verify next time.');
+        }
+      } else { route = 'discovery'; reason = 'mapped payer but no member ID'; flags.push('No member ID'); }
+      if (route === 'verification') soharId = verifyRows[0].payerId;
 
       if (!nm.firstName || !nm.lastName) { flags.push('Name incomplete'); addReview('High', 'Name missing or incomplete', per, pick('name') || '(blank)', 'Both Sohar imports need firstName and lastName. Re-run the report with Pat Name, or fill in on the Patients sheet.'); }
       else if (nm.flag) { flags.push(nm.flag); addReview('Low', 'Name split uncertain', per, pick('name'), 'Check first/last on the Patients sheet.'); }
@@ -284,11 +568,19 @@
         'Per Nbr': per, 'MRN': pick('mrn'), 'Last Name': nm.lastName, 'First Name': nm.firstName, 'DOB': fmtDate(dob),
         'State': state, 'Zip': zip, 'Pat Sts': latest.patSts, 'Route': route, 'Route Reason': reason, 'In Scope': inScope ? 'Yes' : 'No',
         'Next Appt': fmtDate(next && next.dt), 'Next Event': next ? next.event : '', 'POS': pos,
-        'Primary Payer': payerName, 'Sohar payerId': lk.payerId || '', 'Confidence': lk.confidence || '',
+        'Primary Payer': payerName, 'Sohar payerId': soharId, 'Confidence': lk.confidence || '',
         'Member ID': memberId, 'Member ID (Lst Enc)': memberLst, 'Member ID Mismatch': (memberId && memberLst && memberId !== memberLst) ? 'Yes' : 'No',
-        'Secondary Payer': secName, 'Secondary Sohar payerId': secLk.payerId || '',
+        'Secondary Payer': secName, 'Secondary Sohar payerId': str(secLk.confidence).toLowerCase() === 'auto-low' ? '' : secLk.payerId || '',
         'Appt Count': recs.length, 'First Appt': fmtDate(recs[recs.length - 1].dt), 'Last Appt': fmtDate(latest.dt),
         'Subscriber First': subF, 'Subscriber Last': subL, 'Subscriber DOB': subD, 'Flags': flags.join('; '),
+        x: {
+          finClass, finClassLstEnc: finClassLst, secPayer: secName, secPayerLstEnc: latest.secPayerLst || pick('secPayerLst'),
+          authCd: latest.authCd || pick('authCd'), authCdLstEnc: latest.authCdLst || pick('authCdLst'),
+          guarZip: zip, location: next ? next.loc : latest.loc, rendering: next ? next.rendering : '',
+          vip, payerConfidence: lk.confidence || '', payerGuess: lk.payerId ? { payerId: lk.payerId, payerName: lk.payerName || '' } : null,
+          appointments: future.map((a) => ({ date: fmtDate(a.dt), time: fmtTime(a.tmRaw), event: a.event, loc: a.loc, rendering: a.rendering, status: a.status, authCd: a.authCd, authCdLstEnc: a.authCdLst })),
+          verifyRows,
+        },
       });
     }
     patients.sort((a, b) => (a.Route > b.Route ? -1 : a.Route < b.Route ? 1 : 0) || ((b['In Scope'] === 'Yes') - (a['In Scope'] === 'Yes')) || a['Per Nbr'].localeCompare(b['Per Nbr']));
@@ -297,17 +589,24 @@
     for (const p of patients) {
       if (p.Route === 'discovery' && p['Route Reason'].startsWith('payer not in Payer Map')) unmapped[p['Primary Payer']] = (unmapped[p['Primary Payer']] || 0) + 1;
     }
-    return { detection: det, dataRows, patients, review, unmappedPayers: unmapped, asOf };
+    return { detection: det, dataRows, patients, review, unmappedPayers: unmapped, autoMapped, finClassIndex: finIdx, asOf };
   }
 
+  /** Sohar import rows. One verification row per verifyRows entry (same id = Per Nbr); discovery one per patient. */
   function buildExports(patients, cfg) {
     const specialty = (cfg && cfg.specialty) || 'PSY';
     const inScope = patients.filter((p) => p['In Scope'] === 'Yes');
-    const verification = inScope.filter((p) => p.Route === 'verification').map((p) => ({
-      firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, memberId: p['Member ID'],
-      payerId: p['Sohar payerId'], placeOfServiceCode: p.POS, specialtyCode: specialty, id: p['Per Nbr'],
-      subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'],
-    }));
+    const verification = [];
+    for (const p of inScope.filter((x) => x.Route === 'verification')) {
+      const vrs = p.x && p.x.verifyRows && p.x.verifyRows.length ? p.x.verifyRows : [{ payerId: p['Sohar payerId'], memberId: p['Member ID'] }];
+      for (const v of vrs) {
+        verification.push({
+          firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, memberId: v.memberId,
+          payerId: v.payerId, placeOfServiceCode: p.POS, specialtyCode: specialty, id: p['Per Nbr'],
+          subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'],
+        });
+      }
+    }
     const discovery = inScope.filter((p) => p.Route === 'discovery').map((p) => ({
       firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, zipCode: p.Zip,
       payerId: p['Sohar payerId'], id: p['Per Nbr'],
@@ -458,10 +757,24 @@
   }
 
   /** Bucket a result row for the admin worklist. */
+  /** The verifyRows entry a Sohar verification record answers: same member ID, else same Sohar payer name. */
+  function matchVerifyRow(p, rec) {
+    const vrs = (p && p.x && p.x.verifyRows) || [];
+    if (!vrs.length) return null;
+    const mid = idKey(rec.memberid);
+    const byId = mid ? vrs.filter((v) => idKey(v.memberId) === mid) : [];
+    if (byId.length === 1) return byId[0];
+    const pn = str(rec.payername).toLowerCase();
+    const pool = byId.length ? byId : vrs;
+    const byName = pn ? pool.filter((v) => str(v.payerName).toLowerCase() === pn) : [];
+    if (byName.length) return byName[0];
+    return byId[0] || (vrs.length === 1 ? vrs[0] : null);
+  }
+
   function workQueue(row) {
     if (row.Match === 'No match') return 'Unmatched';
     if (/^Pending/.test(row.Action)) return 'Pending';
-    if (/^Eligible\. No action|^Coverage found matches/.test(row.Action)) return 'Clear';
+    if (/^Eligible\. No action|^Coverage found matches|^Superseded/.test(row.Action)) return 'Clear';
     return 'Action needed';
   }
 
@@ -547,7 +860,7 @@
 
     // Upcoming, still-expected appointments per patient (same rule as scope "upcoming").
     const upcoming = new Map();
-    for (let r = det.headerRow + 1; r < importRows.length; r++) {
+    for (let r = det.headerRow + 1; r < dataEndOf(det, importRows); r++) {
       const row = importRows[r] || [];
       const per = str(get(row, 'perNbr')); const dt = parseDate(get(row, 'apptDt'));
       if (!per || !dt || dt < asOf || NOT_KEPT_FUTURE.has(str(get(row, 'sts')).toLowerCase())) continue;
@@ -582,6 +895,7 @@
         ...(f.benefits || {}), ...f.cols,
       };
       for (const c of RESULTS_COLS) if (row[c] == null) row[c] = '';
+      row.x = p ? p.x || null : null; // non-column: patient extras (appointments, fin class, verifyRows) for the rules
       row['Benefit Flag'] = benefitFlag(row);
       results.push(row);
       if (p) seen[kind].add(p['Per Nbr']);
@@ -624,6 +938,12 @@
             'Sohar Payer': str(r.payername), 'Sohar payerId': '', 'Sohar Member ID': str(r.memberid), 'Coverage Differs': '',
             'Sohar Ref': str(r.verificationid || r.requestid), 'Sohar Link': str(r.url), 'Sohar Date': str(r.resolved || r.created),
           });
+          // Which insurance we sent: match on member ID, else Sohar payer name. Non-chart rows show what was sent.
+          const vr = p ? matchVerifyRow(p, r) : null;
+          if (vr) {
+            cols['Sohar payerId'] = vr.payerId;
+            if (vr.source !== 'guarantor') { cols['NextGen Payer'] = vr.nextgenPayer || ''; cols['NextGen Member ID'] = vr.memberId; }
+          }
         } else {
           p = byPer.get(str(r.id)) || null;
           if (p) match = 'Per Nbr';
@@ -719,6 +1039,52 @@
       }
     }
 
+    // Two insurances verified for one patient (R3 / R4): keep every row, mark the better one.
+    // Rank: complete.eligible > pending > ineligible > error; ties go to the latest Sohar Date.
+    // The other policy's row becomes "Superseded: ..." (work queue Clear, no NextGen task).
+    counts.twoInsurances = 0;
+    const vRank = (r) => { const s = str(r['Sohar Status']).toLowerCase(); return /^complete\.eligible/.test(s) ? 0 : /^pending/.test(s) || !s ? 1 : /^complete\.ineligible/.test(s) ? 2 : 3; };
+    const vByPer = new Map();
+    for (const r of results) {
+      if (r['Sent As'] !== 'Verification' || !r['Per Nbr'] || r.Match === 'No match' || r['Sohar Status'] === 'Not in Sohar file') continue;
+      const policy = `${idKey(r['Sohar Member ID'])}|${str(r['Sohar Payer']).toLowerCase()}`;
+      if (!vByPer.has(r['Per Nbr'])) vByPer.set(r['Per Nbr'], new Map());
+      const m = vByPer.get(r['Per Nbr']);
+      const prev = m.get(policy);
+      if (!prev || String(r['Sohar Date']) > String(prev['Sohar Date'])) m.set(policy, r);
+    }
+    // Only policies checked together count: saved uploads build up across runs, so a policy whose latest result is
+    // more than TWO_INS_DAYS older than the patient's newest result is history, not a second insurance.
+    const TWO_INS_DAYS = 3;
+    const dayMs = (r) => { const d = parseDate(r['Sohar Date']); return d ? d.getTime() : NaN; };
+    for (const [per, all] of vByPer) {
+      const newest = Math.max(...[...all.values()].map(dayMs).filter((n) => !isNaN(n)));
+      const m = [...all.values()].filter((r) => { const t = dayMs(r); return isNaN(t) || !isFinite(newest) || newest - t <= TWO_INS_DAYS * 86400000; });
+      if (m.length < 2) continue;
+      counts.twoInsurances++;
+      const list = m.sort((a, b) => vRank(a) - vRank(b) || String(b['Sohar Date']).localeCompare(String(a['Sohar Date'])));
+      const best = list[0];
+      if (vRank(best) !== 0) {
+        for (const r of list) r.Action = `${r.Action} Two insurances were checked; neither came back eligible.`;
+        continue;
+      }
+      const bestPayer = best['Sohar Payer'] || 'the other insurance';
+      for (const r of list.slice(1)) r.Action = `Superseded: ${r['Sohar Status'] || 'no status'} on ${r['Sohar Payer'] || 'this insurance'}. ${bestPayer} came back eligible for this patient; use that row.`;
+      const p = byPer.get(per);
+      const vr = p ? matchVerifyRow(p, { memberid: best['Sohar Member ID'], payername: best['Sohar Payer'] }) : null;
+      if (!vr || vr.source === 'guarantor') {
+        if (/^Eligible\. No action/.test(best.Action)) best.Action = `${best.Action} Two insurances were checked; the chart insurance is the active one.`;
+        else best.Action = `${best.Action} Two insurances were checked; this one is active.`;
+        continue;
+      }
+      const options = nextgenFor.get(vr.payerId) || [];
+      const choose = vr.nextgenPayer && (!options.length || options.some((o) => o.toLowerCase() === vr.nextgenPayer.toLowerCase())) ? vr.nextgenPayer
+        : options.length === 1 ? options[0] : options.length ? `One of: ${options.join(' | ')}` : vr.nextgenPayer || '';
+      best['Choose in NextGen'] = choose;
+      const text = `Eligible on ${bestPayer}, the ${vr.source} insurance. Two insurances were checked; make this the chart insurance in NextGen${choose ? ` (choose ${/^One of/.test(choose) ? choose.replace(/^One of: /, 'one of: ') : `"${choose}"`})` : ''}.`;
+      best.Action = /^Coverage ends/.test(best.Action) ? `${best.Action} ${text}` : text;
+    }
+
     for (const row of results) {
       row['Work Queue'] = workQueue(row);
       counts.byAction[row.Action] = (counts.byAction[row.Action] || 0) + 1;
@@ -803,6 +1169,7 @@
     for (const r of results || []) {
       const status = String(r['Sohar Status'] || '').toLowerCase();
       const memberHint = r['Sohar Member ID'] ? `Member ID ${r['Sohar Member ID']}.` : 'Member ID: open the Sohar link.';
+      if (/^Superseded/.test(r.Action || '')) continue; // the other insurance came back eligible
       if (r.Match === 'No match') { add(r, 'Find patient for Sohar result', `Sohar ${r['Sent As'].toLowerCase()} result did not match the Import report. ${r.Action}`); continue; }
       if (status === 'not in sohar file') { add(r, 'Resend to Sohar', 'Upcoming patient missing from the Sohar results.'); continue; }
       if (r['Sent As'] === 'Discovery') {
@@ -822,7 +1189,7 @@
       else if (status === 'error.member.id') add(r, 'Fix member ID in NextGen', `Sohar rejected member ID ${r['NextGen Member ID'] || '(blank)'} for ${r['NextGen Payer']}. Check the card, then re-verify.`);
       else if (status === 'error.member.name') add(r, 'Fix name in NextGen', 'Sohar rejected the name. Match it to the insurance card, then re-verify.');
       else if (status === 'complete.eligible') {
-        if (/^Coverage ends/.test(r.Action)) add(r, 'Update insurance in NextGen', r.Action);
+        if (/^Coverage ends|make this the chart insurance/.test(r.Action)) add(r, 'Update insurance in NextGen', r.Action);
         const ben = benefitText(r);
         if (ben) add(r, 'Update benefits in NextGen', ben);
       }
@@ -1015,7 +1382,7 @@
   function benefitsExport(results) {
     const by = new Map();
     for (const r of results || []) {
-      if (r['Sent As'] !== 'Verification' || !r['Per Nbr'] || !r['Sohar Ref']) continue;
+      if (r['Sent As'] !== 'Verification' || !r['Per Nbr'] || !r['Sohar Ref'] || /^Superseded/.test(r.Action || '')) continue;
       const prev = by.get(r['Per Nbr']);
       if (!prev || String(r['Sohar Date']) > String(prev['Sohar Date'])) by.set(r['Per Nbr'], r);
     }
@@ -1023,7 +1390,10 @@
   }
 
   // Final file for the TMS Tracker and ESK Tracker imports: the benefits columns, then these. Add columns at the end only.
-  const TRACKER_EXPORT_COLS = [...BENEFITS_EXPORT_COLS, 'Service', 'Source', 'Exported'];
+  // Secondary Payer and Cost-share Flags (Secondary may cover / QMB / VIP on the day of export) let a later copay-log
+  // report join on Per Nbr + Sohar Date and spot copays a secondary or QMB should have covered.
+  const TRACKER_EXPORT_COLS = [...BENEFITS_EXPORT_COLS, 'Service', 'Source', 'Exported', 'Secondary Payer', 'Cost-share Flags'];
+  const COST_SHARE_PILLS = ['Secondary may cover', 'QMB', 'VIP'];
 
   /** "TMS", "ESK", "TMS; ESK" or '' from a patient's upcoming NextGen events. */
   function serviceLine(text) {
@@ -1035,13 +1405,14 @@
    * One row per patient with a Sohar verification, for the tracker imports. Patients whose discovered coverage
    * is still waiting on a verification are left out and returned as pending, so their benefits are not stale.
    */
-  function trackerExport(results, exportedAt) {
+  function trackerExport(results, exportedAt, secondaryByPer) {
+    const sec = (per) => (secondaryByPer instanceof Map ? secondaryByPer.get(per) : secondaryByPer && secondaryByPer[per]) || '';
     const pendingPer = new Set((results || []).filter((r) => r['Discovery Follow-up'] === 'Ready to verify' && r['Per Nbr']).map((r) => r['Per Nbr']));
     const events = new Map();
     for (const r of results || []) if (r['Per Nbr']) events.set(r['Per Nbr'], `${events.get(r['Per Nbr']) || ''} ${r['Next Event']} ${r['Upcoming Detail']}`);
     const by = new Map();
     for (const r of results || []) {
-      if (r['Sent As'] !== 'Verification' || !r['Per Nbr'] || !r['Sohar Ref'] || pendingPer.has(r['Per Nbr'])) continue;
+      if (r['Sent As'] !== 'Verification' || !r['Per Nbr'] || !r['Sohar Ref'] || pendingPer.has(r['Per Nbr']) || /^Superseded/.test(r.Action || '')) continue;
       const prev = by.get(r['Per Nbr']);
       if (!prev || String(r['Sohar Date']) > String(prev['Sohar Date'])) by.set(r['Per Nbr'], r);
     }
@@ -1050,6 +1421,8 @@
       'Service': serviceLine(events.get(r['Per Nbr'])),
       'Source': r['Discovery Follow-up'] === 'From discovery' ? 'Discovery, then verification' : 'Verification',
       'Exported': exportedAt || '',
+      'Secondary Payer': str(sec(r['Per Nbr']) || r['Secondary Payer']),
+      'Cost-share Flags': String(r.Pills || '').split(';').map((x) => x.trim()).filter((x) => COST_SHARE_PILLS.includes(x)).join('; '),
     }));
     const pending = (results || []).filter((r) => r['Discovery Follow-up'] === 'Ready to verify' && r['Per Nbr']);
     return { rows, pending };
@@ -1107,7 +1480,7 @@
    */
   function benefitsView(results) {
     const tr = trackerExport(results, '');
-    const byPer = new Map((results || []).filter((r) => r['Sent As'] === 'Verification').map((r) => [r['Per Nbr'], r]));
+    const byPer = new Map((results || []).filter((r) => r['Sent As'] === 'Verification' && !/^Superseded/.test(r.Action || '')).map((r) => [r['Per Nbr'], r]));
     const rows = tr.rows.map((b) => {
       const r = byPer.get(b['Per Nbr']) || {};
       const oop = spent(b['OOP Max'], b['OOP Remaining']);
@@ -1158,6 +1531,7 @@
     irCategory, parseIrPortal, irCrossReference, irMessage,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,
+    VERIFIABLE, autoMatchPayer, autoTokens, AUTO_MEDIUM, finClassPayerIndex, matchVerifyRow, isVip,
     resultKind, readResultRows, mergeSoharResults, benefitFields, accumulatorStatus, benefitFlag, benefitsExport, buildTasks, taskMessage, keepDone, chunkMessage, messageAssembler, workQueue, lasfir, adminMessage,
   };
 });

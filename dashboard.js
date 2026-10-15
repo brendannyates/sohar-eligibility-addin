@@ -7,6 +7,12 @@
   let rows = [], tasks = [], irRows = [], exportsData = null, discVerify = [], scope = 'upcoming', asOf = null, list = [], tab = 'prep';
   let inOffice = false, web = false;
   const take = C.messageAssembler();
+  // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
+  const PILL_COLOR = new Map(((window.SoharRules && window.SoharRules.PILLS) || []).map((p) => [p.label, p.color]));
+  const pillsOf = (r) => String(r.Pills || '').split(';').map((s) => s.trim()).filter(Boolean);
+  // "Kaiser MM" is a filter category; next to "Kaiser MM no auth" it only repeats it, so rows hide it.
+  const shownPills = (r) => { const p = pillsOf(r); return p.includes('Kaiser MM no auth') ? p.filter((l) => l !== 'Kaiser MM') : p; };
+  const pillsHtml = (r) => shownPills(r).map((l) => `<span class="pill p-${PILL_COLOR.get(l) || 'grey'}">${esc(l)}</span>`).join(' ');
 
   const BEN = {
     dedMet: (r) => r['Deductible Status'] === 'Met',
@@ -50,6 +56,12 @@
     const keepLoc = $('fLoc').value;
     $('fLoc').innerHTML = '<option value="">All</option>' + locs.map((l) => `<option>${esc(l)}</option>`).join('');
     $('fLoc').value = locs.includes(keepLoc) ? keepLoc : '';
+    const pillSet = new Set(rows.flatMap(pillsOf));
+    const order = [...PILL_COLOR.keys()];
+    const pl = [...pillSet].sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+    const keepPill = $('fPill').value;
+    $('fPill').innerHTML = '<option value="">Any</option>' + pl.map((l) => `<option>${esc(l)}</option>`).join('');
+    $('fPill').value = pl.includes(keepPill) ? keepPill : '';
     const types = [...new Set(tasks.map((t) => t.Task))].sort((a, b) => C.TASK_TYPES.indexOf(a) - C.TASK_TYPES.indexOf(b));
     $('fTask').innerHTML = '<option value="">All tasks</option>' + types.map((t) => `<option>${esc(t)}</option>`).join('');
     if (!rows.length && tab === 'prep') showTab('upload');
@@ -65,6 +77,9 @@
     const to = $('fTo').value ? C.parseDate($('fTo').value) : null;
     if (sv && (r['Sent As'] || r['Result Type']) !== sv) return false;
     if (lv && r['Next Location'] !== lv) return false;
+    const pv = $('fPill').value;
+    // Results rows carry Pills; tasks and benefits rows borrow them from the patient's results by Per Nbr.
+    if (pv && (r.Pills != null ? !pillsOf(r).includes(pv) : !rows.some((x) => x['Per Nbr'] && x['Per Nbr'] === r['Per Nbr'] && pillsOf(x).includes(pv)))) return false;
     if (from || to) {
       const d = C.parseDate(r['Next Appt']);
       if (!d || (from && d < from) || (to && d > to)) return false;
@@ -136,7 +151,7 @@
         <table class="prep"><tbody>${day.map((r) => {
           const n = byPer.get(r['Per Nbr'] || `ref:${r['Sohar Ref']}`) || 0;
           return `<tr class="q-${queueClass(r['Work Queue'])}" data-key="${esc(r['Per Nbr'] + '|' + r['Sohar Ref'])}" tabindex="0">
-            ${cell(r['Next Time'])}<td><b>${esc(name(r))}</b><br><span class="hint">Per ${esc(r['Per Nbr'] || '?')}${r.MRN ? ` · MRN ${esc(r.MRN)}` : ''}</span></td>
+            ${cell(r['Next Time'])}<td><b>${esc(name(r))}</b><br><span class="hint">Per ${esc(r['Per Nbr'] || '?')}${r.MRN ? ` · MRN ${esc(r.MRN)}` : ''}</span>${pillsOf(r).length ? `<div class="pills">${pillsHtml(r)}</div>` : ''}</td>
             <td>${esc(r['Next Event'])}<br><span class="hint">${esc([r['Next Location'], r['Next Provider']].filter(Boolean).join(' · '))}</span></td>
             <td><span class="pill ${r['Sent As'] === 'Discovery' ? 'd' : 'v'}">${esc(r['Sent As'])}</span><br><span class="hint">${esc(r['Sohar Status'])}</span></td>
             <td>${esc(r['Benefit Flag'] || (r['Sent As'] === 'Verification' ? '' : ''))}${r.Copay !== '' && r.Copay != null ? `<br><span class="hint">Copay ${esc(r.Copay)}${r.Coinsurance ? ` · ${esc(r.Coinsurance)}` : ''}</span>` : ''}</td>
@@ -151,7 +166,7 @@
     $('shown').textContent = `Showing ${list.length} of ${rows.length}`;
     const st = (s) => ({ Met: 'met', Approaching: 'appr' }[s] || '');
     $('tbl').querySelector('tbody').innerHTML = list.map((r) => `<tr class="q-${queueClass(r['Work Queue'])}" data-key="${esc(r['Per Nbr'] + '|' + r['Sohar Ref'])}" tabindex="0">
-      ${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r['Next Location'])}${cell(name(r))}${cell(r['Per Nbr'])}${cell(r['Sent As'])}
+      ${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r['Next Location'])}${cell(name(r))}${cell(r['Per Nbr'])}<td class="pillc">${pillsHtml(r)}</td>${cell(r['Sent As'])}
       ${cell(r['Sohar Status'])}${cell(r['Work Queue'])}${cell(r.Action, 'wide')}${cell(r['Choose in NextGen'], 'mid')}
       ${cell(r['Benefit Flag'])}${cell(r.Copay)}${cell(r.Coinsurance)}
       ${cell(left(r['Deductible Remaining'], r.Deductible), st(r['Deductible Status']))}${cell(left(r['OOP Remaining'], r['OOP Max']), st(r['OOP Status']))}
@@ -298,7 +313,7 @@
 
   // ---------- wiring ----------
   document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => showTab(b.dataset.tab)));
-  ['fSent', 'fLoc', 'fFrom', 'fTo', 'fQueue', 'fBen', 'fBenView', 'fDone', 'fTask', 'msgMode'].forEach((id) => $(id).addEventListener('change', render));
+  ['fSent', 'fLoc', 'fPill', 'fFrom', 'fTo', 'fQueue', 'fBen', 'fBenView', 'fDone', 'fTask', 'msgMode'].forEach((id) => $(id).addEventListener('change', render));
   $('fText').addEventListener('input', render);
   document.querySelectorAll('[data-queue]').forEach((b) => b.addEventListener('click', () => { $('fQueue').value = b.dataset.queue; $('fBen').value = ''; render(); }));
   document.querySelectorAll('[data-benefit]').forEach((b) => b.addEventListener('click', () => { $('fBen').value = b.dataset.benefit; $('fQueue').value = ''; render(); }));
@@ -342,12 +357,14 @@
     document.body.insertBefore(b, document.querySelector('nav'));
     const mk = (o) => { const r = Object.fromEntries(C.RESULTS_COLS.map((c) => [c, ''])); return Object.assign(r, o); };
     const res = [
-      mk({ 'Next Appt': '10/20/2026', 'Next Time': '9:00 AM', 'Next Event': 'TMS Treatment Unilateral', 'Next Location': 'San Rafael', 'Next Provider': 'Dr Test', 'Upcoming Appts': 12, 'Upcoming Detail': '10/20 TMS Treatment Unilateral; 10/21 TMS Treatment Unilateral; +10 more', 'Per Nbr': '100100', MRN: '80100', 'Last Name': 'Rivera', 'First Name': 'Ana', DOB: '03/04/1980', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', Action: 'Eligible. No action.', Plan: 'SYNTH GOLD PPO', Network: 'PR', 'Coverage Level': 'IND', Copay: '40', Coinsurance: '20%', Deductible: '1500', 'Deductible Remaining': '0', 'Deductible Status': 'Met', 'OOP Max': '5000', 'OOP Remaining': '800', 'OOP Status': 'Approaching', 'NextGen Payer': 'Blue Shield CA', 'Sohar Payer': 'Blue Shield of California', Match: 'Per Nbr', 'Sohar Ref': 'q-1' }),
-      mk({ 'Next Appt': '10/20/2026', 'Next Time': '1:30 PM', 'Next Event': 'Telepsych', 'Next Location': 'San Rafael', 'Upcoming Appts': 1, 'Per Nbr': '100101', 'Last Name': 'Okafor', 'First Name': 'Chidi', 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', Action: 'Coverage found. Add it to NextGen, then verify. Choose "Cigna" in NextGen. Get the member ID from the Sohar link.', 'Choose in NextGen': 'Cigna', 'Sohar Payer': 'Cigna', 'Sohar payerId': '62308', 'Coverage Differs': 'Yes', Match: 'Per Nbr', 'Sohar Link': 'https://example.test/r-1', 'Sohar Ref': 'r-1' }),
-      mk({ 'Next Appt': '10/22/2026', 'Next Time': '10:00 AM', 'Next Event': 'Med Management In-Office', 'Next Location': 'Walnut Creek', 'Upcoming Appts': 2, 'Per Nbr': '100102', 'Last Name': 'Lindqvist', 'First Name': 'Sven', 'Sent As': 'Verification', 'Sohar Status': 'error.member.id', Action: 'Member ID rejected. Check the card, fix in NextGen, re-verify.', 'NextGen Payer': 'Aetna', 'NextGen Member ID': 'SYN555', Match: 'Per Nbr', 'Sohar Ref': 'q-2' }),
-      mk({ 'Next Appt': '10/23/2026', 'Next Time': '11:00 AM', 'Next Event': 'Telepsych', 'Next Location': 'Walnut Creek', 'Upcoming Appts': 4, 'Per Nbr': '100103', 'Last Name': 'Mensah', 'First Name': 'Afia', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', Action: 'Eligible. No action.', Copay: '0', Coinsurance: '0%', Deductible: '0', 'Deductible Remaining': '0', 'Deductible Status': 'None', 'OOP Max': '3000', 'OOP Remaining': '0', 'OOP Status': 'Met', 'NextGen Payer': 'Cigna', 'Sohar Payer': 'Cigna', Plan: 'OPEN ACCESS PLUS', Match: 'Per Nbr', 'Sohar Ref': 'q-3' }),
+      mk({ 'Next Appt': '10/20/2026', 'Next Time': '9:00 AM', 'Next Event': 'TMS Treatment Unilateral', 'Next Location': 'San Rafael', 'Next Provider': 'Lark, Jordan PMHNP', 'Upcoming Appts': 12, 'Upcoming Detail': '10/20 TMS Treatment Unilateral; 10/21 TMS Treatment Unilateral; +10 more', 'Per Nbr': '100100', MRN: '80100', 'Last Name': 'Rivera', 'First Name': 'Ana', DOB: '03/04/1980', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', Action: 'Eligible. No action.', Plan: 'SYNTH GOLD PPO', Network: 'PR', 'Coverage Level': 'IND', Copay: '40', Coinsurance: '20%', Deductible: '1500', 'Deductible Remaining': '0', 'Deductible Status': 'Met', 'OOP Max': '5000', 'OOP Remaining': '800', 'OOP Status': 'Approaching', 'NextGen Payer': 'UMR', 'Sohar Payer': 'UMR', Match: 'Per Nbr', 'Sohar Ref': 'q-1' }),
+      mk({ 'Next Appt': '10/20/2026', 'Next Time': '1:30 PM', 'Next Event': 'Telepsych', 'Next Location': 'San Rafael', 'Upcoming Appts': 1, 'Per Nbr': '100101', 'Last Name': 'Okafor', 'First Name': 'Chidi', 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', Action: 'Coverage found. Add it to NextGen, then verify. Get the member ID from the Sohar link.', 'Choose in NextGen': 'Not in Payer Map: Partnership HealthPlan Medi-Cal (SYN01)', 'NextGen Payer': 'Cigna', 'Sohar Payer': 'Partnership HealthPlan Medi-Cal', 'Sohar payerId': 'SYN01', 'Coverage Differs': 'Yes', Match: 'Per Nbr', 'Sohar Link': 'https://example.test/r-1', 'Sohar Ref': 'r-1' }),
+      mk({ 'Next Appt': '10/22/2026', 'Next Time': '10:00 AM', 'Next Event': 'Med Management In-Office', 'Next Location': 'Walnut Creek', 'Upcoming Appts': 2, 'Per Nbr': '100102', 'Last Name': 'Lindqvist', 'First Name': 'Sven', 'Sent As': 'Verification', 'Sohar Status': 'error.member.id', Action: 'Member ID rejected. Check the card, fix in NextGen, re-verify.', 'NextGen Payer': 'Kaiser Foundation Northern California', 'NextGen Member ID': 'SYN555', Match: 'Per Nbr', 'Sohar Ref': 'q-2' }),
+      mk({ 'Next Appt': '10/23/2026', 'Next Time': '11:00 AM', 'Next Event': 'Telepsych', 'Next Location': 'Walnut Creek', 'Upcoming Appts': 4, 'Per Nbr': '100103', 'Last Name': 'Mensah', 'First Name': 'Afia', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', Action: 'Eligible. No action.', Copay: '0', Coinsurance: '0%', Deductible: '0', 'Deductible Remaining': '0', 'Deductible Status': 'None', 'OOP Max': '3000', 'OOP Remaining': '0', 'OOP Status': 'Met', 'NextGen Payer': 'QMB Noridian Northern CA', 'Sohar Payer': 'Medicare of California', Plan: 'MEDICARE PART B', Match: 'Per Nbr', 'Sohar Ref': 'q-3' }),
       mk({ 'Sent As': 'Verification', 'Sohar Status': 'error.member.id', Action: 'Not matched to a patient in the Import report. Member ID rejected. Check the card, fix in NextGen, re-verify.', Match: 'No match', 'Sohar Ref': 'q-9' }),
     ].map((r) => ({ ...r, 'Benefit Flag': C.benefitFlag(r), 'Work Queue': C.workQueue(r) }));
+    const demoPills = { 100100: 'NP-TMS', 100101: 'Medi-Cal; New Medi-Cal; Re-verify', 100102: 'Kaiser MM no auth; Kaiser MM', 100103: 'QMB' };
+    for (const r of res) r.Pills = demoPills[r['Per Nbr']] || '';
     load({ results: res, tasks: C.buildTasks(res), exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z' });
     if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
   }

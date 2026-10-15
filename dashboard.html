@@ -39,6 +39,9 @@
       </label>
       <label>Appt from <input id="fFrom" type="date"></label>
       <label>Appt to <input id="fTo" type="date"></label>
+      <label>Flag
+        <select id="fPill"><option value="">Any</option></select>
+      </label>
       <label class="grow">Search <input id="fText" type="search" placeholder="Name, Per Nbr, MRN, payer, plan"></label>
     </section>
 
@@ -106,7 +109,7 @@
       <div class="tablewrap">
         <table id="tbl">
           <thead><tr>
-            <th>Next appt</th><th>Location</th><th>Patient</th><th>Per Nbr</th><th>Result</th><th>Sohar status</th><th>Queue</th>
+            <th>Next appt</th><th>Location</th><th>Patient</th><th>Per Nbr</th><th>Flags</th><th>Result</th><th>Sohar status</th><th>Queue</th>
             <th>Action</th><th>Choose in NextGen</th><th>Benefits</th><th>Copay</th><th>Coins</th>
             <th>Deductible left</th><th>OOP left</th><th>Plan</th><th>Link</th>
           </tr></thead>
@@ -185,6 +188,7 @@
   </main>
 
   <script src="core.js"></script>
+  <script src="rules.js"></script>
   <script src="dashboard.js"></script>
 </body>
 </html>
