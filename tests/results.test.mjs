@@ -332,6 +332,68 @@ test('two insurances: one eligible keeps the patient off the discovery import', 
   assert.deepEqual(res.verificationDiscovery, []);
 });
 
+test('discovery from verification ignores out-of-scope patients and replaced policies', () => {
+  const rows = [...MERGE_ROWS(), row({ 'Per Nbr': '106', 'Pat Name': 'Novak, Ivo', 'Birth Dt': '9/9/1960', 'Appt Dt': '9/1/2026', 'Event': 'Telepsych', 'Loc Name': 'San Rafael', 'Sts': 'Completed', 'Payer Name (Cht Guar)': 'Cigna', 'Pol Nbr (Cht Guar)': 'C106' })];
+  const v = [VER_HDR,
+    ver({ requestId: 'a', id: '106', resolved: '2026-10-14T01:00:00.000Z', memberId: 'C106', payerName: 'Cigna', status: 'complete.ineligible' }),
+    // 104's chart now has Cigna C77; an old result for another Cigna policy is history.
+    ver({ requestId: 'b', id: '104', resolved: '2026-08-01T01:00:00.000Z', memberId: 'OLD104', payerName: 'Cigna', status: 'complete.ineligible' })];
+  const res = C.mergeSoharResults(rows, [{ name: 'v.csv', rows: v }], CFG);
+  assert.deepEqual(res.verificationDiscovery, []);
+});
+
+test('a discovery older than the failure does not block the follow-up', () => {
+  const v = [VER_HDR, ver({ requestId: 'a', id: '104', resolved: '2026-10-14T01:00:00.000Z', memberId: 'C77', payerName: 'Cigna', status: 'complete.ineligible' })];
+  const d = [DISC_HDR, disc({ requestId: 'r', id: '104', resolved: '2026-06-01T01:00:00.000Z', state: 'CA' })];
+  const res = C.mergeSoharResults(MERGE_ROWS(), [{ name: 'v.csv', rows: v }, { name: 'd.csv', rows: d }], CFG);
+  assert.deepEqual(res.verificationDiscovery.map((r) => r.id), ['104']);
+});
+
+test('a member ID Sohar rejected is not reused on the verification from discovery', () => {
+  const v = [VER_HDR, ver({ requestId: 'a', id: '105', resolved: '2026-10-14T01:00:00.000Z', memberId: 'C88', payerName: 'Cigna', status: 'error.member.id' })];
+  const d = [DISC_HDR, disc({ requestId: 'r', id: '105', resolved: '2026-10-15T01:00:00.000Z', state: 'CA', responsePayerId: '62308', responsePayerName: 'Cigna' })];
+  const res = C.mergeSoharResults(MERGE_ROWS(), [{ name: 'v.csv', rows: v }, { name: 'd.csv', rows: d }], CFG);
+  assert.equal(res.discoveryVerification.find((r) => r.id === '105').memberId, '', 'blank, so the pane asks for the right ID');
+});
+
+test('two policies with the same payer are both saved', () => {
+  const v = [VER_HDR,
+    ver({ requestId: 'a', id: '102', resolved: '2026-10-14T01:00:00.000Z', memberId: 'BS1', payerName: 'Blue Shield of California', status: 'complete.eligible' }),
+    ver({ requestId: 'b', id: '102', resolved: '2026-10-14T01:00:00.000Z', memberId: 'BS2', payerName: 'Blue Shield of California', status: 'complete.ineligible' })];
+  const acc = C.accumulateResults([], [{ name: 'v.csv', rows: v }], '2026-10-14');
+  assert.equal(acc.added, 2);
+  // Records saved under the old key (no member ID) are re-keyed, so the next upload replaces instead of duplicating.
+  const old = acc.saved.map((s) => ({ ...s, Key: s.Key.replace(/\|[^|]*$/, '') }));
+  assert.equal(C.accumulateResults(old, [{ name: 'v.csv', rows: v }], '2026-10-15').saved.length, 2);
+});
+
+test('soharTime reads ISO text and Excel serials; timeMins orders 9 AM before 10 AM', () => {
+  assert.equal(C.soharTime('2026-10-14T01:00:00.000Z'), Date.UTC(2026, 9, 14, 1));
+  assert.equal(new Date(C.soharTime(46309.5)).toISOString(), '2026-10-14T12:00:00.000Z');
+  assert.equal(new Date(C.soharTime('46309.5')).toISOString(), '2026-10-14T12:00:00.000Z');
+  assert.ok(C.timeMins('9:00 AM') < C.timeMins('10:00 AM'));
+  assert.equal(C.timeMins(0.375), 540);
+  assert.equal(C.timeMins('13:30'), 810);
+});
+
+test('same-day visits: the earliest sets POS and next visit', () => {
+  const rows = [...TITLE, HDR,
+    row({ 'Per Nbr': '400', 'Pat Name': 'Park, Jae', 'Birth Dt': '1/2/1981', 'Appt Dt': '10/20/2026', 'Beg Tm': '10:00 AM', 'Event': 'TMS Treatment Unilateral', 'Loc Name': 'San Rafael', 'Sts': 'Expected', 'Payer Name (Cht Guar)': 'Cigna', 'Pol Nbr (Cht Guar)': 'C400' }),
+    row({ 'Per Nbr': '400', 'Pat Name': 'Park, Jae', 'Birth Dt': '1/2/1981', 'Appt Dt': '10/20/2026', 'Beg Tm': '9:00 AM', 'Event': 'Telepsych', 'Loc Name': 'San Rafael', 'Sts': 'Expected', 'Payer Name (Cht Guar)': 'Cigna', 'Pol Nbr (Cht Guar)': 'C400' })];
+  const p = C.buildPatients(rows, CFG).patients[0];
+  assert.equal(p['Next Event'], 'Telepsych');
+  assert.equal(p.POS, '10');
+});
+
+test('as-of date is the day picked, in any time zone', () => {
+  const d = new Date(Date.UTC(2026, 9, 15));
+  assert.equal(C.fmtDate(C.parseDate(d)), '10/15/2026');
+  const rows = [...TITLE, HDR, row({ 'Per Nbr': '500', 'Pat Name': 'Diaz, Luz', 'Birth Dt': '1/1/1970', 'Appt Dt': '10/14/2026', 'Event': 'Telepsych', 'Loc Name': 'San Rafael', 'Sts': 'Expected', 'Payer Name (Cht Guar)': 'Cigna', 'Pol Nbr (Cht Guar)': 'C500' })];
+  const built = C.buildPatients(rows, { ...CFG, asOf: d });
+  assert.equal(C.fmtDate(built.asOf), '10/15/2026');
+  assert.notEqual(built.patients[0]['In Scope'], 'Yes', 'a 10/14 visit is before an as-of of 10/15');
+});
+
 test('keepMemberIds keeps IDs typed on the Discovery Verify sheet', () => {
   const rows = [{ id: '101', payerId: '62308', memberId: '' }, { id: '103', payerId: '87726', memberId: '' }];
   const kept = C.keepMemberIds(rows, [{ id: '101', payerId: '62308', memberId: 'TYPED1' }, { id: '103', payerId: '99999', memberId: 'OLDPAYER' }]);

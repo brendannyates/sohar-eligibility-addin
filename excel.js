@@ -11,7 +11,10 @@
   const TASKS_TABLE = 'tblNextGenTasks';
   const CHUNK = 1000;
 
-  async function run(fn) { return Excel.run(fn); }
+  // delayForCellEdit: wait out a cell someone is still typing in instead of failing (ExcelApi 1.11).
+  async function run(fn) {
+    return Office.context.requirements.isSetSupported('ExcelApi', '1.11') ? Excel.run({ delayForCellEdit: true }, fn) : Excel.run(fn);
+  }
 
   async function readImportRows() {
     return run(async (ctx) => {
@@ -33,21 +36,38 @@
     });
   }
 
-  async function readTable(tableName) {
+  // Rows per read. Excel on the web caps a response at 5MB; Sohar Uploads rows carry ~2KB of JSON each.
+  const READ_CHUNK = 500;
+
+  /** Table rows as objects. Throws if the table is missing, unless missingOk (then []). Other errors always throw. */
+  async function readTable(tableName, missingOk) {
     return run(async (ctx) => {
       const t = ctx.workbook.tables.getItemOrNullObject(tableName);
       t.load('isNullObject');
       await ctx.sync();
-      if (t.isNullObject) throw new Error(`Table ${tableName} is missing. Use the Sohar Eligibility template workbook.`);
+      if (t.isNullObject) {
+        if (missingOk) return [];
+        throw new Error(`Table ${tableName} is missing. Use the Sohar Eligibility template workbook.`);
+      }
       const h = t.getHeaderRowRange(); h.load('values');
-      const b = t.getDataBodyRange(); b.load('values');
+      const b = t.getDataBodyRange(); b.load('rowIndex,columnIndex,rowCount,columnCount');
       await ctx.sync();
       const headers = h.values[0].map((x) => String(x).trim());
-      return b.values
+      const values = [];
+      for (let i = 0; i < b.rowCount; i += READ_CHUNK) {
+        const rg = t.worksheet.getRangeByIndexes(b.rowIndex + i, b.columnIndex, Math.min(READ_CHUNK, b.rowCount - i), b.columnCount);
+        rg.load('values');
+        await ctx.sync();
+        for (const r of rg.values) values.push(r);
+      }
+      return values
         .filter((r) => r.some((v) => v !== '' && v != null))
         .map((r) => Object.fromEntries(headers.map((k, i) => [k, r[i]])));
     });
   }
+  // For tables the add-in creates on first use: missing means "nothing saved yet"; any other error stops the run
+  // so a failed read can never be mistaken for an empty table and overwritten.
+  const readOwned = (tableName) => readTable(tableName, true);
 
   async function readConfig() {
     const rows = await readTable(TABLES.config);
@@ -156,6 +176,7 @@
       await ctx.sync();
       if (t.isNullObject) throw new Error(`Table ${tableName} is missing. Use the Sohar Eligibility template workbook.`);
       const ws = t.worksheet;
+      t.clearFilters(); // a filtered table can't have its rows deleted and shifted reliably
       const hdr = t.getHeaderRowRange(); hdr.load('rowIndex,columnIndex,columnCount');
       const body = t.getDataBodyRange(); body.load('rowCount');
       await ctx.sync();
@@ -228,16 +249,18 @@
     return run(async (ctx) => {
       const inserted = ctx.workbook.insertWorksheetsFromBase64(base64, { positionType: Excel.WorksheetPositionType.end });
       await ctx.sync();
-      const names = inserted.value || [];
-      if (!names.length) throw new Error('That workbook has no sheets.');
+      const ids = inserted.value || []; // worksheet IDs, not names
+      if (!ids.length) throw new Error('That workbook has no sheets.');
       try {
-        const pick = (prefer && names.find((n) => prefer.test(n))) || names[0];
-        const used = ctx.workbook.worksheets.getItem(pick).getUsedRangeOrNullObject(true);
+        const sheets = ids.map((id) => { const s = ctx.workbook.worksheets.getItem(id); s.load('name'); return s; });
+        await ctx.sync();
+        const pick = (prefer && sheets.find((s) => prefer.test(s.name))) || sheets[0];
+        const used = pick.getUsedRangeOrNullObject(true);
         used.load('isNullObject,rowCount,columnCount');
         await ctx.sync();
         return await fn(ctx, used);
       } finally {
-        for (const n of names) ctx.workbook.worksheets.getItem(n).delete();
+        for (const id of ids) ctx.workbook.worksheets.getItem(id).delete();
         await ctx.sync();
       }
     });
@@ -258,9 +281,16 @@
   async function readXlsxRows(base64, prefer) {
     return withTempSheet(base64, async (ctx, used) => {
       if (used.isNullObject) return [];
-      used.load('values');
+      used.load('rowIndex,columnIndex');
       await ctx.sync();
-      return used.values;
+      const rows = [];
+      for (let i = 0; i < used.rowCount; i += 5000) { // chunked: Excel on the web caps a response at 5MB
+        const rg = used.worksheet.getRangeByIndexes(used.rowIndex + i, used.columnIndex, Math.min(5000, used.rowCount - i), used.columnCount);
+        rg.load('values');
+        await ctx.sync();
+        for (const r of rg.values) rows.push(r);
+      }
+      return rows;
     }, prefer);
   }
 
@@ -271,22 +301,22 @@
   const writeIr = (cols, rows) => writeAddinTable('IR Cross-Ref', 'tblIrCrossRef', cols, rows, true);
   // Benefits: one row per verified patient, OOP closest to met first. Percent columns stay numbers so they show as % with data bars.
   const writeBenefits = (cols, rows, pctCols) => writeAddinTable('Benefits', 'tblBenefits', cols, rows, false, { pctCols });
-  async function readIr() { try { return await readTable('tblIrCrossRef'); } catch (e) { return []; } }
+  async function readIr() { return readOwned('tblIrCrossRef'); }
   // Discovery Verify: import-ready verification rows for patients discovery found coverage for. Admins can type member IDs here.
   const writeDiscoveryVerify = (cols, rows) => writeAddinTable('Discovery Verify', 'tblDiscoveryVerify', cols, rows, false);
-  async function readDiscoveryVerify() { try { return await readTable('tblDiscoveryVerify'); } catch (e) { return []; } }
+  async function readDiscoveryVerify() { return readOwned('tblDiscoveryVerify'); }
   // Discovery from Verify: import-ready discovery rows for patients whose verification failed. Admins can type ZIPs here.
   const writeVerifyFailed = (cols, rows) => writeAddinTable('Discovery from Verify', 'tblVerifyFailed', cols, rows, false);
-  async function readVerifyFailed() { try { return await readTable('tblVerifyFailed'); } catch (e) { return []; } }
+  async function readVerifyFailed() { return readOwned('tblVerifyFailed'); }
   // Every Sohar result uploaded so far, one JSON record per row, on a hidden sheet.
-  async function readUploads() { try { return await readTable('tblSoharUploads'); } catch (e) { return []; } }
+  async function readUploads() { return readOwned('tblSoharUploads'); }
   async function writeUploads(cols, rows) {
     await writeAddinTable('Sohar Uploads', 'tblSoharUploads', cols, rows, false);
     await run(async (ctx) => { ctx.workbook.worksheets.getItem('Sohar Uploads').visibility = Excel.SheetVisibility.hidden; await ctx.sync(); }).catch(() => {});
   }
   // Insurance-related IR Portal items from the last IR upload, so the cross-check re-runs on open. Hidden sheet.
   async function readIrUploads() {
-    try { return (await readTable('tblIrUploads')).map((r) => { try { return JSON.parse(r.Record); } catch (e) { return null; } }).filter(Boolean); } catch (e) { return []; }
+    return (await readOwned('tblIrUploads')).map((r) => { try { return JSON.parse(r.Record); } catch (e) { return null; } }).filter(Boolean);
   }
   async function writeIrUploads(records) {
     await writeAddinTable('IR Uploads', 'tblIrUploads', ['Record'], records.map((r) => ({ Record: JSON.stringify(r) })), false);
@@ -304,10 +334,10 @@
       return b.values.filter((r) => r.some((v) => v !== '' && v != null)).length;
     });
   }
-  async function readTasks() { try { return await readTable(TASKS_TABLE); } catch (e) { return []; } }
+  async function readTasks() { return readOwned(TASKS_TABLE); }
 
   // Payer Evidence: one row per patient-insurance observation, upserted by Key each refresh (rules.payerEvidence).
-  async function readPayerEvidence() { try { return await readTable('tblPayerEvidence'); } catch (e) { return []; } }
+  async function readPayerEvidence() { return readOwned('tblPayerEvidence'); }
   const writePayerEvidence = (cols, rows) => writeAddinTable('Payer Evidence', 'tblPayerEvidence', cols, rows, false);
 
   /** True when the workbook has this table (used to tell the Sohar template from a clinic file). */
@@ -362,8 +392,12 @@
       ws.load('isNullObject');
       await ctx.sync();
       if (!old.isNullObject) old.delete();
-      if (ws.isNullObject) ws = ctx.workbook.worksheets.add(sheetName);
+      const existed = !ws.isNullObject;
+      if (existed) ws.tables.load('items/name');
+      else ws = ctx.workbook.worksheets.add(sheetName);
       await ctx.sync().catch(stage('preparing the sheet'));
+      // clear() leaves tables in place; a renamed or extra table on this sheet would make tables.add overlap.
+      if (existed) for (const t of ws.tables.items) t.delete();
       ws.getRange().clear();
       await ctx.sync().catch(stage('clearing'));
 
@@ -378,8 +412,8 @@
       }
       const tbl = ws.tables.add(ws.getRangeByIndexes(0, 0, Math.max(2, all.length), cols.length), true);
       tbl.name = tableName;
-      ws.freezePanes.freezeRows(1);
       await ctx.sync().catch(stage('making the table'));
+      ws.freezePanes.freezeRows(1);
       tbl.getRange().format.autofitColumns();
       if (values.length && Office.context.requirements.isSetSupported('ExcelApi', '1.6')) {
         try { // cosmetic only: never let data bars break a save

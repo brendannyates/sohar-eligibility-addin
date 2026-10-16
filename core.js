@@ -150,7 +150,7 @@
   }
   function parseDate(v) {
     if (v == null || v === '') return null;
-    if (v instanceof Date) return isNaN(v) ? null : utcDay(v);
+    if (v instanceof Date) return isNaN(v) ? null : dayOf(v);
     if (typeof v === 'number') return v > 59 ? excelSerialToDate(v) : null;
     const s = String(v).trim();
     let m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
@@ -165,6 +165,11 @@
   }
   function utcDay(d) {
     return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  }
+  /** A Date already at UTC midnight is a day value (from parseDate or an as-of picker): keep it. Else take its local day. */
+  function dayOf(d) {
+    return d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0 && d.getUTCMilliseconds() === 0
+      ? new Date(d.getTime()) : utcDay(d);
   }
   function fmtDate(d) {
     if (!d) return '';
@@ -401,7 +406,7 @@
     if (!det) return { error: 'Could not find the header row. The Import sheet needs the NextGen columns, including "Per Nbr" and "Appt Dt".' };
     if (det.missing.length) return { error: `Header row found but missing: ${det.missing.join(', ')}.`, detection: det };
     const cm = det.colMap;
-    const asOf = cfg.asOf ? utcDay(cfg.asOf) : utcDay(new Date());
+    const asOf = cfg.asOf ? dayOf(cfg.asOf) : utcDay(new Date());
     const tele = (cfg.teleKeywords && cfg.teleKeywords.length ? cfg.teleKeywords : ['tele']).map((k) => k.toLowerCase());
     const locState = {};
     for (const [k, v] of Object.entries(cfg.locationState || {})) locState[str(k).toLowerCase()] = str(v).toUpperCase();
@@ -467,7 +472,7 @@
 
     for (const { per, recs, latest, pick, payerName, secName, finClass, finClassLst } of pts) {
       const future = recs.filter((x) => x.dt >= asOf && !NOT_KEPT_FUTURE.has(x.status.toLowerCase()))
-        .sort((a, b) => a.dt - b.dt || String(a.tmRaw).localeCompare(String(b.tmRaw)));
+        .sort((a, b) => a.dt - b.dt || timeMins(a.tmRaw) - timeMins(b.tmRaw));
       const next = future[0] || null;
       const posEvent = (next || latest).event;
       const pos = tele.some((k) => posEvent.toLowerCase().includes(k)) ? (cfg.posTele || '10') : (cfg.posOffice || '11');
@@ -646,6 +651,20 @@
   }
 
   /** Excel time fraction, Date, or text -> "h:mm AM". */
+  /** Minutes after midnight for sorting: Excel fractions, Dates, "9:00 AM", "13:30". Unreadable sorts last. */
+  function timeMins(v) {
+    if (v == null || v === '') return 9999;
+    if (typeof v === 'number') return Math.round((v % 1) * 1440);
+    if (v instanceof Date) return v.getUTCHours() * 60 + v.getUTCMinutes();
+    const s = str(v);
+    if (/^\d*\.\d+$/.test(s)) return Math.round((+s % 1) * 1440);
+    const m = s.match(/^(\d{1,2}):(\d{2})\s*([AP]M)?/i);
+    if (!m) return 9999;
+    let h = +m[1] % (m[3] ? 12 : 24);
+    if (m[3] && /pm/i.test(m[3])) h += 12;
+    return h * 60 + +m[2];
+  }
+
   function fmtTime(v) {
     if (v == null || v === '') return '';
     let mins;
@@ -828,6 +847,8 @@
 
   /** Sohar resolved/created timestamp in ms (full time when present), NaN when blank. */
   function soharTime(v) {
+    // Excel serial (from an .xlsx output), time of day kept: Date.parse would read 46309.04 as a year.
+    if (typeof v === 'number' || /^\d+(\.\d+)?$/.test(str(v))) { const n = +v; return n > 59 ? Math.round((n - 25569) * 86400000) : NaN; }
     const t = Date.parse(str(v));
     if (!isNaN(t)) return t;
     const d = parseDate(v);
@@ -876,7 +897,7 @@
       if (!upcoming.has(per)) upcoming.set(per, []);
       upcoming.get(per).push({ dt, tmRaw: get(row, 'begTm'), event: str(get(row, 'event')), loc: str(get(row, 'loc')), rendering: str(get(row, 'rendering')) });
     }
-    for (const list of upcoming.values()) list.sort((a, b) => a.dt - b.dt || String(a.tmRaw).localeCompare(String(b.tmRaw)));
+    for (const list of upcoming.values()) list.sort((a, b) => a.dt - b.dt || timeMins(a.tmRaw) - timeMins(b.tmRaw));
 
     const byPer = new Map(), byMember = new Map(), byName = new Map(), byNameDob = new Map();
     const push = (m, k, p) => { if (!k) return; if (!m.has(k)) m.set(k, []); if (!m.get(k).includes(p)) m.get(k).push(p); };
@@ -1013,6 +1034,8 @@
     // same member ID when both files have one, else the same Sohar payer.
     const discoveryVerification = [];
     const specialty = cfg.specialty || 'PSY';
+    const idRejected = (per, payerId) => results.some((r) => r['Sent As'] === 'Verification' && r['Per Nbr'] === per
+      && r['Sohar payerId'] === payerId && /^error\.member\.id/i.test(str(r['Sohar Status'])));
     for (const d of results) {
       if (d['Sent As'] !== 'Discovery' || d['Sohar Status'] !== 'Coverage found' || !d['Per Nbr'] || !d['Sohar payerId']) continue;
       const p = byPer.get(d['Per Nbr']);
@@ -1030,8 +1053,8 @@
         d.Action = `${d.Action} Copay, deductible and OOP need a Sohar verification: this patient is on the discovery verification import.`;
         discoveryVerification.push({
           firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State,
-          // Member ID from discovery; NextGen's only when NextGen already has this payer.
-          memberId: d['Sohar Member ID'] || (p['Sohar payerId'] === d['Sohar payerId'] ? p['Member ID'] : ''),
+          // Member ID from discovery; NextGen's only when NextGen already has this payer and Sohar did not reject it.
+          memberId: d['Sohar Member ID'] || (p['Sohar payerId'] === d['Sohar payerId'] && !idRejected(d['Per Nbr'], d['Sohar payerId']) ? p['Member ID'] : ''),
           payerId: d['Sohar payerId'], placeOfServiceCode: p.POS, specialtyCode: specialty, id: p['Per Nbr'],
           subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'],
         });
@@ -1098,16 +1121,32 @@
     }
 
     // Verification failed (ineligible or any error) -> discovery, so Sohar can look for the patient's real coverage.
-    // Uses each policy's latest result. Skipped when any policy is eligible or still pending, or when the patient
-    // already has a discovery result (no looping between the two).
+    // Only patients with an upcoming visit, and only each policy's latest result for policies still on the chart
+    // (exact member ID, else the Sohar payer; old history for a policy since replaced does not count).
+    // Skipped when any current policy is eligible or pending, when the failure was itself the follow-up of a
+    // discovery (no looping), or when a discovery already ran after the failure.
     const verificationDiscovery = [];
     const failed = (r) => /^(complete\.ineligible|error)/i.test(str(r['Sohar Status']));
-    const discovered = new Set(results.filter((r) => r['Sent As'] === 'Discovery' && r['Per Nbr'] && r['Sohar Status'] !== 'Not in Sohar file').map((r) => r['Per Nbr']));
+    const onChart = (p, r) => {
+      const vrs = (p.x && p.x.verifyRows) || [];
+      const mid = idKey(r['Sohar Member ID']);
+      if (mid) return [p['Member ID'], p['Member ID (Lst Enc)'], ...vrs.map((v) => v.memberId)].some((m) => idKey(m) === mid);
+      const pn = str(r['Sohar Payer']).toLowerCase();
+      return !!pn && vrs.some((v) => str(v.payerName).toLowerCase() === pn);
+    };
+    const discTimes = new Map();
+    for (const r of results) {
+      if (r['Sent As'] !== 'Discovery' || !r['Per Nbr'] || r['Sohar Status'] === 'Not in Sohar file') continue;
+      if (!discTimes.has(r['Per Nbr'])) discTimes.set(r['Per Nbr'], []);
+      discTimes.get(r['Per Nbr']).push(soharTime(r['Sohar Date']));
+    }
     for (const [per, all] of vByPer) {
-      const latest = [...all.values()];
-      if (discovered.has(per) || !latest.length || !latest.every(failed)) continue;
       const p = byPer.get(per);
-      if (!p) continue;
+      if (!p || !upcoming.has(per)) continue;
+      const latest = [...all.values()].filter((r) => onChart(p, r));
+      if (!latest.length || !latest.every(failed) || latest.some((r) => r['Discovery Follow-up'] === 'From discovery')) continue;
+      const failT = Math.max(...latest.map((r) => soharTime(r['Sohar Date'])));
+      if ((discTimes.get(per) || []).some((t) => isNaN(t) || isNaN(failT) || t >= failT)) continue;
       // Payer as a hint only for errors (payer right, ID or name wrong); ineligible may mean the patient changed plans.
       const hint = latest.find((r) => /^error/i.test(str(r['Sohar Status'])) && r['Sohar payerId']);
       verificationDiscovery.push({
@@ -1138,7 +1177,8 @@
   function resultKey(kind, r) {
     if (kind === 'discovery') return `d|${str(r.id) || str(r.requestid) || `${nameKey(r.firstname, r.lastname)}|${str(r.dateofbirth)}`}`;
     const who = str(r.id) || str(r.verificationid || r.requestid) || `${idKey(r.memberid)}|${nameKey(r.firstname, r.lastname)}`;
-    return `v|${who}|${str(r.payername).toLowerCase()}`;
+    // Member ID too: two policies with the same payer (R3) are different results.
+    return `v|${who}|${str(r.payername).toLowerCase()}|${idKey(r.memberid)}`;
   }
 
   /**
@@ -1149,7 +1189,8 @@
     const by = new Map();
     for (const s of saved || []) {
       let rec; try { rec = JSON.parse(s.Record); } catch (e) { continue; }
-      by.set(String(s.Key), { Kind: str(s.Kind), Key: String(s.Key), File: str(s.File), Uploaded: str(s.Uploaded), rec });
+      const kind = str(s.Kind), key = kind ? resultKey(kind, rec) : String(s.Key); // re-keyed so older saved keys migrate
+      by.set(key, { Kind: kind, Key: key, File: str(s.File), Uploaded: str(s.Uploaded), rec });
     }
     let added = 0, replaced = 0;
     const unknownFiles = [];
@@ -1565,7 +1606,7 @@
     localDate, fileName, FILE_LABELS, BENEFIT_SHEET_COLS, BENEFIT_PCT_COLS, benefitsView, benefitsSummary,
     resultKey, accumulateResults, keepMemberIds, TRACKER_EXPORT_COLS, serviceLine, trackerExport, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
     irCategory, parseIrPortal, irCrossReference, irMessage,
-    normHeader, detectHeader, parseDate, fmtDate, fmtTime, excelSerialToDate, parseName,
+    normHeader, detectHeader, parseDate, fmtDate, fmtTime, timeMins, soharTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,
     VERIFIABLE, autoMatchPayer, autoTokens, AUTO_MEDIUM, finClassPayerIndex, matchVerifyRow, isVip,
     resultKind, readResultRows, mergeSoharResults, benefitFields, accumulatorStatus, benefitFlag, benefitsExport, buildTasks, taskMessage, keepDone, chunkMessage, messageAssembler, workQueue, lasfir, adminMessage,

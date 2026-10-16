@@ -9,6 +9,8 @@ Hard rules:
 - Output table columns (`PATIENT_COLS`, `REVIEW_COLS`) must match the template workbook. Changing either means shipping a new `Sohar_Eligibility_Template.xlsx` too.
 - Routing changes (what counts as verification vs discovery, scope, the POS rule) need Brendan's explicit OK on the exact rule before coding.
 
+Every release: bump `VERSION` in `app.js`, `package.json`, and the `?v=` on every local script/stylesheet in `index.html`, `dashboard.html` and `save.html`. Excel caches add-in files; without a new `?v=`, users keep running the old code.
+
 Workflow: edit → `npm test` → `npm run serve` and check at about 350px and at full width (`?tab=clinic` opens the Clinic tab in demo mode) → commit with a plain-English message → push `main` → confirm the `pages` action is green.
 
 Tell Brendan at the end: what changed, "Live now, close and reopen the pane", and whether `manifest.xml` or the template workbook changed (either one means a re-upload or a new workbook copy).

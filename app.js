@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.9.0';
+  const VERSION = '0.9.1';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -977,7 +977,7 @@
   }
 
   async function openFull(focus) {
-    const url = new URL('dashboard.html', location.href).href;
+    const url = new URL(`dashboard.html?v=${VERSION}`, location.href).href;
     if (state.demo) { showFloat(url + (focus ? `#${focus}` : '')); return; } // browser preview: the same float, drawn in the page
     if (!Office.context.requirements.isSetSupported('DialogApi', '1.2')) throw new Error('This version of Excel cannot open the full-screen window (needs DialogApi 1.2). Use the Sohar Results and NextGen Tasks sheets.');
     if (dlg) { await sendToDialog(await payload(focus)); return; }
@@ -1062,7 +1062,7 @@
   }
   /** Open save.html and hand it the file ({csv} or {base64, mime}) by postMessage until it answers. Must run inside the click (pop-up rules). */
   function saveInTab(name, file, boxId) {
-    const w = window.open(new URL('save.html', location.href).href, '_blank');
+    const w = window.open(new URL(`save.html?v=${VERSION}`, location.href).href, '_blank');
     if (!w) { note(boxId, 'The browser blocked the new tab. Allow pop-ups for Excel, or use the Export sheet.', 'bad'); return; }
     let got = false, tries = 0;
     const onMsg = (e) => { if (e.origin === location.origin && e.data && e.data.type === 'sohar-save-got') { got = true; window.removeEventListener('message', onMsg); } };
