@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.8.1';
+  const VERSION = '0.8.2';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -14,6 +14,16 @@
 
   // ---------- boot ----------
   document.getElementById('version').textContent = `v${VERSION}`;
+  // Header ⟳: a clinic file re-opens from its saved tables; otherwise re-read and rebuild, same as on open.
+  $('btnRefresh').addEventListener('click', async (e) => {
+    const b = e.currentTarget;
+    if (!X || state.clinicFile) { location.reload(); return; }
+    b.disabled = true;
+    await guard(async () => { setStatus('Refreshing from this workbook…', ''); await loadConfig(); await refreshAll();
+      if ($('btnBuild').disabled) setStatus('Refreshed. There is no usable report on the Import sheet yet; see step 1.', 'bad');
+    }, 'scanResult');
+    b.disabled = false;
+  });
   if (window.Office && Office.onReady) {
     Office.onReady((info) => { if (info.host === Office.HostType.Excel) startExcel(); else startDemo('Not running inside Excel.'); });
   } else {
