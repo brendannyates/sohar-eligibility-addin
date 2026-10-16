@@ -379,12 +379,14 @@
       await ctx.sync().catch(stage('making the table'));
       tbl.getRange().format.autofitColumns();
       if (values.length && Office.context.requirements.isSetSupported('ExcelApi', '1.6')) {
-        for (const c of pct) {
-          const j = cols.indexOf(c); if (j < 0) continue;
-          const bar = ws.getRangeByIndexes(1, j, values.length, 1).conditionalFormats.add(Excel.ConditionalFormatType.dataBar);
-          bar.dataBar.lowerBoundRule = { type: Excel.ConditionalDataBarRuleType.number, formula: '0' };
-          bar.dataBar.upperBoundRule = { type: Excel.ConditionalDataBarRuleType.number, formula: '1' };
-        }
+        try { // cosmetic only: never let data bars break a save
+          for (const c of pct) {
+            const j = cols.indexOf(c); if (j < 0) continue;
+            const bar = ws.getRangeByIndexes(1, j, values.length, 1).conditionalFormats.add('DataBar');
+            bar.dataBar.lowerBoundRule = { type: 'Number', formula: '0' };
+            bar.dataBar.upperBoundRule = { type: 'Number', formula: '1' };
+          }
+        } catch (e) { console.warn('data bars skipped', e); }
       }
       if (activate) ws.activate();
       await ctx.sync().catch(() => {}); // cosmetic only
