@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.8.3';
+  const VERSION = '0.9.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -171,6 +171,7 @@
     $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(C.fileName('worklist'), C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
     $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(C.fileName('benefits'), C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'benBox'), 'benBox'));
     $('btnDlDiscVer').addEventListener('click', () => guard(downloadDiscoveryVerify, 'resultsResult'));
+    $('btnDlVerFail').addEventListener('click', () => guard(downloadVerifyFailed, 'resultsResult'));
     $('btnDlFinal').addEventListener('click', () => guard(downloadTrackerFile, 'benBox'));
     $('btnClearSaved').addEventListener('click', () => guard(clearSaved, 'resultsResult'));
     $('btnDlTasks').addEventListener('click',() => guard(async () => saveCSV(C.fileName('tasks'), C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
@@ -745,7 +746,11 @@
     await X.writeTasks(C.TASK_COLS, tasks);
     const dv = C.keepMemberIds(res.discoveryVerification, await X.readDiscoveryVerify());
     await X.writeDiscoveryVerify(C.VERIFICATION_COLS, dv);
-    state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv;
+    // Keep ZIPs an admin typed on the Discovery from Verify sheet.
+    const zips = new Map((await X.readVerifyFailed()).filter((r) => String(r.zipCode || '').trim()).map((r) => [String(r.id), String(r.zipCode).trim()]));
+    const vf = res.verificationDiscovery.map((r) => (r.zipCode ? r : { ...r, zipCode: zips.get(String(r.id)) || '' }));
+    await X.writeVerifyFailed(C.DISCOVERY_COLS, vf);
+    state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv; state.verifyFailed = vf;
     for (const id of ['btnDlWork', 'btnDlBen', 'btnDlTasks']) $(id).disabled = false;
     $('fixActions').hidden = false;
     markDone(3); setCurrent(4);
@@ -757,6 +762,13 @@
       $('discVerText').innerHTML = `<b>Discovery found insurance for ${dv.length} patient${dv.length === 1 ? '' : 's'}.</b> Benefits need one more Sohar run: save this verification file, upload it to Sohar, then drop Sohar's output above.`
         + (noId ? ` <span class="warn">${noId} ha${noId === 1 ? 's' : 've'} no member ID yet: type ${noId === 1 ? 'it' : 'them'} in the memberId column on the <b>Discovery Verify</b> sheet first.</span>` : '');
       $('fnDiscVer').textContent = `${dv.length} patient${dv.length === 1 ? '' : 's'} · ${C.fileName('discoveryVerify')}`;
+    }
+
+    // Verification failed (ineligible or error) -> discovery, to find the patient's current coverage.
+    $('verFailBox').hidden = !vf.length;
+    if (vf.length) {
+      $('verFailText').innerHTML = `<b>${vf.length} patient${vf.length === 1 ? '' : 's'} came back ineligible or with an error.</b> Save this discovery file, upload it to Sohar, then drop Sohar's output above. They are listed on the <b>Discovery from Verify</b> sheet.`;
+      $('fnVerFail').textContent = `${vf.length} patient${vf.length === 1 ? '' : 's'} · ${C.fileName('verifyFailed')}`;
     }
 
     const q = res.counts.byQueue, c = res.counts;
@@ -829,6 +841,15 @@
   async function currentDiscoveryVerify() {
     if (state.demo) return state.discoveryVerify || [];
     return X.readDiscoveryVerify(); // the sheet, so member IDs typed there go out
+  }
+  async function currentVerifyFailed() {
+    if (state.demo) return state.verifyFailed || [];
+    return X.readVerifyFailed(); // the sheet, so ZIPs typed there go out
+  }
+  async function downloadVerifyFailed() {
+    const rows = await currentVerifyFailed();
+    if (!rows.length) throw new Error('No failed verifications are waiting for discovery.');
+    await saveCSV(C.fileName('verifyFailed'), C.DISCOVERY_COLS, rows, 'resultsResult');
   }
   async function downloadDiscoveryVerify() {
     const rows = await currentDiscoveryVerify();
@@ -946,7 +967,7 @@
     return {
       // x (patient extras) stays in the pane; the window gets the Pills column instead.
       type: 'data', focus: focus || '', web: isWeb(), results: ((await currentResults()) || []).map(({ x, ...r }) => r), tasks: await currentTasks(), ir: await currentIr(),
-      exports: state.exports || null, discoveryVerify: await currentDiscoveryVerify(), scope: state.cfg ? state.cfg.scope : 'upcoming',
+      exports: state.exports || null, discoveryVerify: await currentDiscoveryVerify(), verifyFailed: await currentVerifyFailed(), scope: state.cfg ? state.cfg.scope : 'upcoming',
       asOf: state.resultsAsOf ? state.resultsAsOf.toISOString() : null,
     };
   }
@@ -1234,6 +1255,7 @@
       ver(200106, 'UMR', 'UMR200106', 'complete.eligible', '500', '0', '2500', '200', '25', '0.1', -2),
       ver(200108, 'Partnership HealthPlan of California', 'PHP200108', 'complete.eligible', '0', '0', '0', '0', '0', '0', -2, 'MEDI-CAL MANAGED CARE'),
       ver(200108, 'Blue Shield of California', 'XEA200108', 'complete.ineligible', '', '', '', '', '', '', -2, ''),
+      ver(200107, 'Carelon Behavioral Health', 'CBH200107', 'error.member.id', '', '', '', '', '', '', -1, ''),
       { requestid: 'disc-200103', id: '200103', responsepayerid: '95567', responsepayername: 'Health Net', created: iso(-2) },
     ].map((rec) => { const kind = rec.responsepayerid ? 'discovery' : 'verification'; return { Kind: kind, Key: C.resultKey(kind, rec), File: 'demo', Uploaded: iso(-1), Record: JSON.stringify(rec) }; });
     return {
@@ -1242,7 +1264,7 @@
       async writeImportRows(r) { rows = r; },
       async importXlsx() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
       async readXlsxRows() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
-      async writeResults() {}, async writeTasks() {}, async writeBenefits() {}, async readTasks() { return []; }, async readUploads() { return demoUploads; }, async readIrUploads() { return []; }, async writeIrUploads() {}, async writeUploads() {}, async readDiscoveryVerify() { return []; }, async writeDiscoveryVerify() {}, async tableRowCount() { return 0; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
+      async writeResults() {}, async writeTasks() {}, async writeBenefits() {}, async readTasks() { return []; }, async readUploads() { return demoUploads; }, async readIrUploads() { return []; }, async writeIrUploads() {}, async writeUploads() {}, async readDiscoveryVerify() { return []; }, async writeDiscoveryVerify() {}, async readVerifyFailed() { return []; }, async writeVerifyFailed() {}, async tableRowCount() { return 0; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
       async readPayerEvidence() { return []; }, async writePayerEvidence() {}, async tableExists() { return false; }, async readClinicFile() { return null; },
       async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, clinicLocation: '' }; },
       async readPayerMap() { return payerMap; },

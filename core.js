@@ -826,6 +826,14 @@
     return lines.join('\n').trim() + '\n';
   }
 
+  /** Sohar resolved/created timestamp in ms (full time when present), NaN when blank. */
+  function soharTime(v) {
+    const t = Date.parse(str(v));
+    if (!isNaN(t)) return t;
+    const d = parseDate(v);
+    return d ? d.getTime() : NaN;
+  }
+
   function verificationAction(status) {
     const s = str(status).toLowerCase();
     if (s === 'complete.eligible') return 'Eligible. No action.';
@@ -1011,8 +1019,11 @@
       const payer = d['Sohar Payer'].toLowerCase();
       const member = idKey(d['Sohar Member ID']);
       const samePolicy = (r) => (member && idKey(r['Sohar Member ID']) ? idKey(r['Sohar Member ID']) === member : !!payer && r['Sohar Payer'].toLowerCase() === payer);
+      // Patient first sent for verification: this discovery followed a failed verification, so only a newer one counts.
+      const dT = soharTime(d['Sohar Date']);
+      const afterDiscovery = (r) => p.Route !== 'verification' || isNaN(dT) || soharTime(r['Sohar Date']) > dT;
       const v = results
-        .filter((r) => r['Sent As'] === 'Verification' && r['Per Nbr'] === d['Per Nbr'] && r['Sohar Status'] !== 'Not in Sohar file' && samePolicy(r))
+        .filter((r) => r['Sent As'] === 'Verification' && r['Per Nbr'] === d['Per Nbr'] && r['Sohar Status'] !== 'Not in Sohar file' && samePolicy(r) && afterDiscovery(r))
         .sort((a, b) => String(b['Sohar Date']).localeCompare(String(a['Sohar Date'])))[0];
       if (!v) {
         d['Discovery Follow-up'] = 'Ready to verify';
@@ -1086,6 +1097,29 @@
       best.Action = /^Coverage ends/.test(best.Action) ? `${best.Action} ${text}` : text;
     }
 
+    // Verification failed (ineligible or any error) -> discovery, so Sohar can look for the patient's real coverage.
+    // Uses each policy's latest result. Skipped when any policy is eligible or still pending, or when the patient
+    // already has a discovery result (no looping between the two).
+    const verificationDiscovery = [];
+    const failed = (r) => /^(complete\.ineligible|error)/i.test(str(r['Sohar Status']));
+    const discovered = new Set(results.filter((r) => r['Sent As'] === 'Discovery' && r['Per Nbr'] && r['Sohar Status'] !== 'Not in Sohar file').map((r) => r['Per Nbr']));
+    for (const [per, all] of vByPer) {
+      const latest = [...all.values()];
+      if (discovered.has(per) || !latest.length || !latest.every(failed)) continue;
+      const p = byPer.get(per);
+      if (!p) continue;
+      // Payer as a hint only for errors (payer right, ID or name wrong); ineligible may mean the patient changed plans.
+      const hint = latest.find((r) => /^error/i.test(str(r['Sohar Status'])) && r['Sohar payerId']);
+      verificationDiscovery.push({
+        firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, zipCode: p.Zip,
+        payerId: hint ? hint['Sohar payerId'] : '', id: p['Per Nbr'],
+      });
+      for (const r of latest) {
+        r['Discovery Follow-up'] = 'Sent to discovery';
+        r.Action = `${r.Action} This patient is on the discovery import (from verification).`;
+      }
+    }
+
     for (const row of results) {
       row['Work Queue'] = workQueue(row);
       counts.byAction[row.Action] = (counts.byAction[row.Action] || 0) + 1;
@@ -1097,7 +1131,7 @@
     // Soonest appointment first; rows with no upcoming appointment last.
     const t = (r) => (r['Next Appt'] ? parseDate(r['Next Appt']).getTime() : Infinity);
     results.sort((a, b) => t(a) - t(b) || a['Last Name'].localeCompare(b['Last Name']));
-    return { results, unknownFiles, counts, asOf, discoveryVerification };
+    return { results, unknownFiles, counts, asOf, discoveryVerification, verificationDiscovery };
   }
 
   /** Stable key for one Sohar result, so a re-upload replaces it and a new file adds to the saved set. */
@@ -1186,7 +1220,7 @@
         continue;
       }
       // Verification
-      if (status.startsWith('complete.ineligible')) add(r, 'Update insurance in NextGen', `Sohar: ${r['Sohar Status']} for ${r['Sohar Payer'] || r['NextGen Payer']}. Confirm current coverage with the patient; consider discovery.`);
+      if (status.startsWith('complete.ineligible')) add(r, 'Update insurance in NextGen', `Sohar: ${r['Sohar Status']} for ${r['Sohar Payer'] || r['NextGen Payer']}. Confirm current coverage with the patient; ${r['Discovery Follow-up'] === 'Sent to discovery' ? 'they are on the discovery import (from verification).' : 'consider discovery.'}`);
       else if (status === 'error.member.id') add(r, 'Fix member ID in NextGen', `Sohar rejected member ID ${r['NextGen Member ID'] || '(blank)'} for ${r['NextGen Payer']}. Check the card, then re-verify.`);
       else if (status === 'error.member.name') add(r, 'Fix name in NextGen', 'Sohar rejected the name. Match it to the insurance card, then re-verify.');
       else if (status === 'complete.eligible') {
@@ -1439,6 +1473,7 @@
     verification: 'Sohar Ready Import - Verification',
     discovery: 'Sohar Ready Import - Discovery',
     discoveryVerify: 'Sohar Ready Import - Verification (from Discovery)',
+    verifyFailed: 'Sohar Ready Import - Discovery (from Verification)',
     tracker: 'Sohar Tracker Import (TMS + ESK)',
     benefits: 'Sohar Benefits',
     worklist: 'Sohar Results Worklist',

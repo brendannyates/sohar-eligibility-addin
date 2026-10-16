@@ -4,7 +4,7 @@
   'use strict';
   const C = window.SoharCore;
   const $ = (id) => document.getElementById(id);
-  let rows = [], tasks = [], irRows = [], exportsData = null, discVerify = [], scope = 'upcoming', asOf = null, list = [], tab = 'prep';
+  let rows = [], tasks = [], irRows = [], exportsData = null, discVerify = [], verFailed = [], scope = 'upcoming', asOf = null, list = [], tab = 'prep';
   let inOffice = false, web = false;
   const take = C.messageAssembler();
   // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
@@ -40,7 +40,7 @@
   }
 
   function load(m) {
-    rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; scope = m.scope || 'upcoming'; web = !!m.web;
+    rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; verFailed = m.verifyFailed || []; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
     $('dStatus').textContent = rows.length
       ? `${rows.length} Sohar results, ${tasks.filter(open).length} open NextGen tasks${asOf ? `, appointments from ${C.fmtDate(asOf)}` : ''}.`
@@ -263,6 +263,9 @@
     } else if (kind === 'discoveryVerify') {
       if (!discVerify.length) { notice('No discovery patients are waiting for verification. Upload a discovery output with coverage found first.', false); return; }
       name = C.fileName('discoveryVerify'); cols = C.VERIFICATION_COLS; data = discVerify;
+    } else if (kind === 'verifyFailed') {
+      if (!verFailed.length) { notice('No failed verifications are waiting for discovery.', false); return; }
+      name = C.fileName('verifyFailed'); cols = C.DISCOVERY_COLS; data = verFailed;
     } else if (kind === 'tasks') { name = C.fileName('tasks').replace('Tasks', 'Tasks (open)'); cols = C.TASK_COLS; data = tasks.filter(open); }
     else if (kind === 'allTasks') { name = C.fileName('tasks'); cols = C.TASK_COLS; data = tasks; }
     else if (kind === 'tracker') {

@@ -293,6 +293,45 @@ test('a later verification upload is added to saved results and closes the disco
   assert.match(tasks.find((t) => t.Task === 'Add insurance in NextGen').Details, /verified: complete\.eligible; benefits are on the verification row/);
 });
 
+test('failed verifications go to a discovery import; eligible, pending and already-discovered patients do not', () => {
+  const v = [VER_HDR,
+    ver({ requestId: 'q-2', id: '102', resolved: '2026-10-14T01:00:00.000Z', payerName: 'Blue Shield of California', status: 'complete.ineligible', statusReason: 'INACTIVE' }),
+    ver({ requestId: 'q-4', id: '105', resolved: '2026-10-14T01:00:00.000Z', memberId: 'C88', payerName: 'Cigna', status: 'error.member.id' }),
+    ver({ requestId: 'q-3', id: '104', resolved: '2026-10-14T01:00:00.000Z', payerName: 'Cigna', status: 'pending' }),
+    ver({ requestId: 'q-1', id: '100', resolved: '2026-10-14T01:00:00.000Z', payerName: 'Blue Shield of California', status: 'complete.eligible' }),
+    ver({ requestId: 'q-7', id: '777', resolved: '2026-10-14T01:00:00.000Z', payerName: 'Aetna', status: 'error.member.id' })];
+  const res = C.mergeSoharResults(MERGE_ROWS(), [{ name: 'verification output.csv', rows: v }], CFG);
+  const byId = Object.fromEntries(res.verificationDiscovery.map((r) => [r.id, r]));
+  assert.deepEqual(Object.keys(byId).sort(), ['102', '105'], 'eligible 100, pending 104 and unmatched 777 stay out');
+  assert.equal(byId['102'].payerId, '', 'ineligible: no payer hint, the patient may have changed plans');
+  assert.equal(byId['105'].payerId, '62308', 'error: the payer is kept as a hint');
+  assert.equal(byId['102'].lastName, 'Lindqvist');
+  assert.equal(C.toCSV(C.DISCOVERY_COLS, res.verificationDiscovery).split('\r\n')[0], C.DISCOVERY_COLS.join(','));
+  const r102 = res.results.find((r) => r['Per Nbr'] === '102');
+  assert.equal(r102['Discovery Follow-up'], 'Sent to discovery');
+  assert.match(r102.Action, /discovery import \(from verification\)/);
+  assert.match(C.buildTasks(res.results).find((t) => t['Per Nbr'] === '102').Details, /on the discovery import/);
+  assert.match(C.fileName('verifyFailed', new Date(2026, 9, 15)), /^Sohar Ready Import - Discovery \(from Verification\) 2026-10-15\.csv$/);
+
+  // The discovery result comes back with the same payer: the patient is not sent again, and the old
+  // failed verification does not count as the follow-up, so the plan goes out for a fresh verification.
+  const d = [DISC_HDR, disc({ requestId: 'r-9', id: '105', resolved: '2026-10-15T02:00:00.000Z', state: 'CA', memberId: 'C88-01', responsePayerId: '62308', responsePayerName: 'Cigna' })];
+  const res2 = C.mergeSoharResults(MERGE_ROWS(), [{ name: 'verification output.csv', rows: v }, { name: 'discovery output.csv', rows: d }], CFG);
+  assert.deepEqual(res2.verificationDiscovery.map((r) => r.id), ['102']);
+  const dv = res2.discoveryVerification.find((r) => r.id === '105');
+  assert.ok(dv, '105 is on the discovery verification import');
+  assert.equal(dv.memberId, 'C88-01');
+});
+
+test('two insurances: one eligible keeps the patient off the discovery import', () => {
+  const rows = [...TITLE, HDR, row({ 'Per Nbr': '300', 'Pat Name': 'Tanaka, Yui', 'Birth Dt': '4/4/1984', 'Appt Dt': '10/22/2026', 'Event': 'Telepsych', 'Loc Name': 'San Rafael', 'Sts': 'Expected', 'Payer Name (Cht Guar)': 'Cigna', 'Pol Nbr (Cht Guar)': 'C30', 'Pol Nbr (Lst Enc)': 'BS30' })];
+  const v = [VER_HDR,
+    ver({ requestId: 'a', id: '300', resolved: '2026-10-14T01:00:00.000Z', memberId: 'C30', payerName: 'Cigna', status: 'complete.ineligible' }),
+    ver({ requestId: 'b', id: '300', resolved: '2026-10-14T01:00:00.000Z', memberId: 'BS30', payerName: 'Blue Shield of California', status: 'complete.eligible' })];
+  const res = C.mergeSoharResults(rows, [{ name: 'v.csv', rows: v }], CFG);
+  assert.deepEqual(res.verificationDiscovery, []);
+});
+
 test('keepMemberIds keeps IDs typed on the Discovery Verify sheet', () => {
   const rows = [{ id: '101', payerId: '62308', memberId: '' }, { id: '103', payerId: '87726', memberId: '' }];
   const kept = C.keepMemberIds(rows, [{ id: '101', payerId: '62308', memberId: 'TYPED1' }, { id: '103', payerId: '99999', memberId: 'OLDPAYER' }]);

@@ -275,6 +275,9 @@
   // Discovery Verify: import-ready verification rows for patients discovery found coverage for. Admins can type member IDs here.
   const writeDiscoveryVerify = (cols, rows) => writeAddinTable('Discovery Verify', 'tblDiscoveryVerify', cols, rows, false);
   async function readDiscoveryVerify() { try { return await readTable('tblDiscoveryVerify'); } catch (e) { return []; } }
+  // Discovery from Verify: import-ready discovery rows for patients whose verification failed. Admins can type ZIPs here.
+  const writeVerifyFailed = (cols, rows) => writeAddinTable('Discovery from Verify', 'tblVerifyFailed', cols, rows, false);
+  async function readVerifyFailed() { try { return await readTable('tblVerifyFailed'); } catch (e) { return []; } }
   // Every Sohar result uploaded so far, one JSON record per row, on a hidden sheet.
   async function readUploads() { try { return await readTable('tblSoharUploads'); } catch (e) { return []; } }
   async function writeUploads(cols, rows) {
@@ -427,5 +430,5 @@
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, upsertPayerMapMany, replaceTable,
     readPayerEvidence, writePayerEvidence, tableExists, readClinicFile,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
-    writeDiscoveryVerify, readDiscoveryVerify, writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

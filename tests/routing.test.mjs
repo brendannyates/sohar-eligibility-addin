@@ -293,7 +293,9 @@ test('mergeSoharResults keeps both verification rows and marks the better one', 
   assert.equal(res.counts.twoInsurances, 2);
 
   const r55 = res.results.filter((r) => r['Per Nbr'] === '55');
-  for (const r of r55) assert.match(r.Action, /Two insurances were checked; neither came back eligible\.$/);
+  for (const r of r55) assert.match(r.Action, /Two insurances were checked; neither came back eligible\. This patient is on the discovery import \(from verification\)\.$/);
+  assert.deepEqual(res.verificationDiscovery.map((r) => r.id), ['55'], 'both insurances failed: one discovery row');
+  assert.ok(!res.verificationDiscovery.some((r) => r.id === '52'), 'one eligible insurance keeps 52 out');
 
   const tr = C.trackerExport(res.results, '');
   assert.equal(tr.rows.find((r) => r['Per Nbr'] === '52')['Sohar Ref'], 'q-2', 'tracker export uses the eligible insurance');
