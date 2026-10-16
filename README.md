@@ -67,6 +67,8 @@ IR Portal and the secondary files are under collapsed sections. Full screen adds
 
 **Load on open.** Nothing needs a manual scan or build. When the pane opens (or a report is uploaded, or Refresh from Import sheet is clicked after pasting) and the Import sheet holds a report, it scans it, builds Patients, Review, Verification and Discovery for the current as-of date, re-matches every saved Sohar upload (hidden `Sohar Uploads`) and re-runs the IR cross-check from the saved insurance-related IR items (hidden `IR Uploads`, `tblIrUploads`). Each refresh or upload writes Config `Last updated` and shows it in the header with the newest Sohar upload time.
 
+**Fail-safe saves.** The add-in's own sheets (Sohar Results, NextGen Tasks, Benefits, Discovery Verify, Discovery from Verify, Export, IR Cross-Ref, Payer Evidence, and the hidden Sohar Uploads and IR Uploads) are never rewritten in place. A save writes the new rows to a hidden `~saving <table>` sheet, makes them a table named `<table>_stg` only when every row is in, then swaps that sheet in for the old one. If a save fails before the swap, nothing changed and the message says so. If Excel closes mid-swap, the next read, save or pane open finishes it and the header says an interrupted save was finished. A report upload is written the same way (hidden `~saving Import`, then one copy), so Import is never left half-written. Because each save replaces the sheet, column widths or filters set by hand on those sheets reset, and **formulas must not point at them** (they would show #REF!). The template tables (Patients, Review, Verification, Discovery) are still rewritten in place; they are rebuilt from Import on every refresh. A structure-protected workbook cannot save these sheets; the message says to unprotect it.
+
 **NextGen Tasks** (`tblNextGenTasks`, created by the add-in) is rebuilt with every results upload: one row per thing to change before the visit (add or update insurance, fix member ID or name, update benefits with the values to enter, add a payer to the Payer Map, find an unmatched result, resend to Sohar). `Done` marks carry over between uploads by `Task Key`.
 
 **Open full screen** floats over the Excel page (an Office dialog with `displayInIframe: true`); it never opens a separate window. Menus and detail cards that pop out over the add-in blur what's behind them. Tabs: Prep by appointment (each visit day, soonest first, with result type, status, benefits and open tasks), Worklist (queue and benefit tiles and filters), NextGen tasks (tick Done; it writes to the sheet), Messages (open tasks, who needs action, deductible/OOP met or approaching), and Upload & save (drop the Sohar verification and discovery outputs; save every CSV). Needs DialogApi 1.2. Data moves between pane and window with `messageChild` / `messageParent` in pieces; nothing leaves Excel.
@@ -115,7 +117,7 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 | `dashboard.html`, `dashboard.js` | Full-screen window (Office dialog): prep, worklist, NextGen tasks, messages, upload and save. |
 | `index.html`, `style.css` | Pane markup and styles. |
 | `manifest.xml` | Ribbon button and host URL. |
-| `tests/*.test.mjs` | `node --test` suite. |
+| `tests/*.test.mjs` | `node --test` suite. `tests/excel.test.mjs` runs the real `excel.js` against `tests/helpers/excel-mock.mjs` (a model of the Excel API with failure injection) and sweeps every save through a failure at every step. |
 | `scripts/serve.mjs` | Static server for demo mode. |
 
 ## Template contract

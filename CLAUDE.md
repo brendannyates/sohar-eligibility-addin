@@ -3,6 +3,7 @@
 Hard rules:
 - `core.js`, `rules.js` and `xlsx.js` stay free of Office.js and DOM. Logic changes go there, with a test in `tests/`.
 - Extra patient data travels on the non-column `x` property, never as new template columns.
+- Add-in sheets are written only through `writeAddinTable` (fail-safe stage-and-swap). A new add-in table goes in `OWNED` in `excel.js`. Never write an add-in table in place, and never let formulas reference those sheets (each save replaces the sheet). Changes to save/read code must keep `tests/excel.test.mjs` green, including the failure sweeps.
 - Synthetic data only in tests, fixtures, demo mode, and commits. No real names, MRNs, member IDs, or exports.
 - Never add a network call. `connect-src 'none'` in `index.html` is deliberate; the only remote script is Office.js.
 - `VERIFICATION_COLS` and `DISCOVERY_COLS` match the Sohar CSV templates exactly, in order. Do not rename or reorder.

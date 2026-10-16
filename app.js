@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.9.1';
+  const VERSION = '0.9.2';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -49,6 +49,12 @@
         return;
       }
       setStatus('Template workbook detected.', 'ok');
+      // A save cut off last time (Excel closed, network drop): finish it before anything reads those sheets.
+      const fixed = await X.recoverAll().catch((e) => { console.error(e); return []; });
+      if (fixed.length) {
+        state.recoveredNote = `An earlier save of ${fixed.join(', ')} was interrupted; the add-in finished it. Nothing was lost.`;
+        setStatus(state.recoveredNote, 'warn');
+      }
     } catch (e) { setStatus(`Could not read the workbook: ${e.message}`, 'bad'); }
     wire();
     await autoRefresh();
@@ -99,7 +105,11 @@
   async function stampUpdated(what) {
     const now = fmtStamp(new Date());
     await X.setConfigValue('Last updated', now).catch(() => {});
-    setStatus(`Updated ${now}: ${what}.`, 'ok');
+    // Saves finished by a read or save since open (an earlier one was cut off) are reported once, then cleared.
+    const more = X.takeRecovered ? X.takeRecovered() : [];
+    const note = [state.recoveredNote, more.length ? `An earlier save of ${more.join(', ')} was interrupted; the add-in finished it. Nothing was lost.` : ''].filter(Boolean).join(' ');
+    state.recoveredNote = '';
+    setStatus(`${note ? `${note} ` : ''}Updated ${now}: ${what}.`, note ? 'warn' : 'ok');
   }
   function fmtStamp(d) {
     if (isNaN(d)) return '';
@@ -1271,7 +1281,7 @@
       async readSoharPayers() { return sohar; },
       async upsertPayerMap(e) { return this.upsertPayerMapMany([e]); },
       async upsertPayerMapMany(list) { for (const e of list) payerMap = payerMap.filter((m) => m.nextgenPayerName.toLowerCase() !== e.nextgenPayerName.toLowerCase()).concat([e]); return list.length; },
-      async replaceTable() {}, async setConfigValue() {}, async activate() {}, async templateCheck() { return []; },
+      async replaceTable() {}, async setConfigValue() {}, async activate() {}, async templateCheck() { return []; }, async recoverAll() { return []; }, takeRecovered() { return []; },
     };
   }
 })();

@@ -39,13 +39,66 @@
   // Rows per read. Excel on the web caps a response at 5MB; Sohar Uploads rows carry ~2KB of JSON each.
   const READ_CHUNK = 500;
 
+  // ---------- fail-safe saves ----------
+  // Sheets + tables the add-in rebuilds with writeAddinTable. hidden: kept off the tab bar.
+  const OWNED = {
+    tblSoharResults: { sheet: 'Sohar Results' }, tblNextGenTasks: { sheet: 'NextGen Tasks' }, tblExport: { sheet: 'Export' },
+    tblIrCrossRef: { sheet: 'IR Cross-Ref' }, tblBenefits: { sheet: 'Benefits' }, tblDiscoveryVerify: { sheet: 'Discovery Verify' },
+    tblVerifyFailed: { sheet: 'Discovery from Verify' }, tblPayerEvidence: { sheet: 'Payer Evidence' },
+    tblSoharUploads: { sheet: 'Sohar Uploads', hidden: true }, tblIrUploads: { sheet: 'IR Uploads', hidden: true },
+  };
+  // A save builds the new rows on a hidden staging sheet (STAGE_SHEET) and only then makes them a table named STG.
+  // So a STG table always holds complete new data. The old sheet is deleted only in the swap that renames the
+  // staging sheet and then the table into place. "Real table missing + STG present" can only mean an interrupted
+  // swap, and rescue() finishes it. Sheet names max 31 chars: '~saving tblDiscoveryVerify' is 26.
+  const STAGE_SHEET = (t) => `~saving ${t}`, STG = (t) => `${t}_stg`, STAGE_IMPORT = '~saving Import';
+
+  /** Finish an interrupted swap: rename the staging sheet and its STG table to the real names. True when done. */
+  async function rescue(ctx, tableName) {
+    const { sheet, hidden } = OWNED[tableName], wb = ctx.workbook;
+    try {
+      const stg = wb.tables.getItem(STG(tableName)), sws = stg.worksheet;
+      sws.load('id,name');
+      const clash = wb.worksheets.getItemOrNullObject(sheet); clash.load('isNullObject,id');
+      await ctx.sync();
+      // A different sheet still holding the real name has already lost its table: it is the old sheet, half-deleted.
+      if (!clash.isNullObject && clash.id !== sws.id) clash.delete();
+      sws.visibility = hidden ? Excel.SheetVisibility.hidden : Excel.SheetVisibility.visible;
+      if (sws.name !== sheet) sws.name = sheet;
+      stg.name = tableName; // last: the real name only ever appears on complete data
+      await ctx.sync();
+      return true;
+    } catch (e) { console.warn(`could not finish the interrupted save of ${sheet}`, e); return false; }
+  }
+
+  /**
+   * The table to read for tableName: the real one, else (interrupted save) the STG copy after trying to finish
+   * the swap, else null. Never treats a recoverable save as missing.
+   */
+  async function settle(ctx, tableName) {
+    const wb = ctx.workbook;
+    const probe = () => {
+      const real = wb.tables.getItemOrNullObject(tableName); real.load('isNullObject');
+      const stg = OWNED[tableName] ? wb.tables.getItemOrNullObject(STG(tableName)) : null;
+      if (stg) stg.load('isNullObject');
+      return { real, stg };
+    };
+    let p = probe();
+    await ctx.sync();
+    if (!p.real.isNullObject) return p.real;
+    if (!p.stg || p.stg.isNullObject) return null;
+    if (await rescue(ctx, tableName)) recovered.add(OWNED[tableName].sheet);
+    p = probe();
+    await ctx.sync();
+    return !p.real.isNullObject ? p.real : !p.stg.isNullObject ? p.stg : null;
+  }
+  const recovered = new Set(); // sheets whose interrupted save was finished, for the pane to report
+
   /** Table rows as objects. Throws if the table is missing, unless missingOk (then []). Other errors always throw. */
   async function readTable(tableName, missingOk) {
     return run(async (ctx) => {
-      const t = ctx.workbook.tables.getItemOrNullObject(tableName);
-      t.load('isNullObject');
-      await ctx.sync();
-      if (t.isNullObject) {
+      const t = await settle(ctx, tableName);
+      if (!t) {
         if (missingOk) return [];
         throw new Error(`Table ${tableName} is missing. Use the Sohar Eligibility template workbook.`);
       }
@@ -168,8 +221,17 @@
     });
   }
 
-  /** Replace all body rows of a table with `rows` (array of objects keyed by column header). */
+  /**
+   * Replace all body rows of a template table with `rows` (array of objects keyed by column header).
+   * Not fail-safe (rewritten in place); these tables are rebuilt from the Import sheet on every refresh.
+   */
   async function replaceTable(tableName, cols, rows) {
+    return replaceTableInPlace(tableName, cols, rows).catch((e) => {
+      if (!/is missing|columns; this version/.test(e.message)) e.message = `Writing ${tableName} failed: ${e.message}. That table may be incomplete; click refresh (⟳) to rebuild it.`;
+      throw e;
+    });
+  }
+  async function replaceTableInPlace(tableName, cols, rows) {
     return run(async (ctx) => {
       const t = ctx.workbook.tables.getItemOrNullObject(tableName);
       t.load('isNullObject');
@@ -225,13 +287,37 @@
 
   /** Replace the Import sheet with CSV rows, written as text so IDs and ZIPs keep leading zeros. */
   async function writeImportRows(rows) {
+    const width = rows.reduce((m, r) => Math.max(m, r.length), 0);
+    const grid = rows.map((r) => { const o = r.slice(); while (o.length < width) o.push(''); return o; });
+    const failed = (s) => (e) => { e.message = `Could not load the report (${s}): ${e.message}. The Import sheet was not changed.`; throw e; };
     return run(async (ctx) => {
-      const ws = ctx.workbook.worksheets.getItem(SHEETS.import);
+      const wb = ctx.workbook, ws = wb.worksheets.getItem(SHEETS.import);
+      if (grid.length && width && Office.context.requirements.isSetSupported('ExcelApi', '1.9')) {
+        // Fail-safe: rows go to a hidden staging sheet first, then onto Import in one batch (clear + server-side
+        // copy), so a cut-off upload leaves Import untouched, empty or complete, never a partial report to build from.
+        const old = wb.worksheets.getItemOrNullObject(STAGE_IMPORT); old.load('isNullObject');
+        await ctx.sync().catch(failed('checking the workbook'));
+        if (!old.isNullObject) old.delete();
+        const stage = wb.worksheets.add(STAGE_IMPORT);
+        stage.visibility = Excel.SheetVisibility.hidden;
+        await ctx.sync().catch(failed('preparing'));
+        for (const [i, chunk] of writeChunks(grid)) {
+          ctx.application.suspendApiCalculationUntilNextSync();
+          const rg = stage.getRangeByIndexes(i, 0, chunk.length, width);
+          rg.numberFormat = chunk.map((r) => r.map(() => '@'));
+          rg.values = chunk;
+          await ctx.sync().catch(failed(`rows ${i + 1}-${i + chunk.length}`));
+        }
+        ws.getRange().clear();
+        ws.getRangeByIndexes(0, 0, grid.length, width).copyFrom(stage.getRangeByIndexes(0, 0, grid.length, width), Excel.RangeCopyType.all);
+        await ctx.sync().catch((e) => { e.message = `Could not load the report: ${e.message}. Upload it again.`; throw e; });
+        stage.delete();
+        await ctx.sync().catch((e) => console.warn('report staging sheet left', e));
+        return;
+      }
       ws.getRange().clear();
       await ctx.sync();
-      const width = rows.reduce((m, r) => Math.max(m, r.length), 0);
-      if (!rows.length || !width) return;
-      const grid = rows.map((r) => { const o = r.slice(); while (o.length < width) o.push(''); return o; });
+      if (!grid.length || !width) return;
       for (let i = 0; i < grid.length; i += CHUNK) {
         ctx.application.suspendApiCalculationUntilNextSync();
         const chunk = grid.slice(i, i + CHUNK);
@@ -311,24 +397,20 @@
   // Every Sohar result uploaded so far, one JSON record per row, on a hidden sheet.
   async function readUploads() { return readOwned('tblSoharUploads'); }
   async function writeUploads(cols, rows) {
-    await writeAddinTable('Sohar Uploads', 'tblSoharUploads', cols, rows, false);
-    await run(async (ctx) => { ctx.workbook.worksheets.getItem('Sohar Uploads').visibility = Excel.SheetVisibility.hidden; await ctx.sync(); }).catch(() => {});
+    await writeAddinTable('Sohar Uploads', 'tblSoharUploads', cols, rows, false); // hidden: OWNED
   }
   // Insurance-related IR Portal items from the last IR upload, so the cross-check re-runs on open. Hidden sheet.
   async function readIrUploads() {
     return (await readOwned('tblIrUploads')).map((r) => { try { return JSON.parse(r.Record); } catch (e) { return null; } }).filter(Boolean);
   }
   async function writeIrUploads(records) {
-    await writeAddinTable('IR Uploads', 'tblIrUploads', ['Record'], records.map((r) => ({ Record: JSON.stringify(r) })), false);
-    await run(async (ctx) => { ctx.workbook.worksheets.getItem('IR Uploads').visibility = Excel.SheetVisibility.hidden; await ctx.sync(); }).catch(() => {});
+    await writeAddinTable('IR Uploads', 'tblIrUploads', ['Record'], records.map((r) => ({ Record: JSON.stringify(r) })), false); // hidden: OWNED
   }
   /** Rows in a table the add-in owns, or 0 if it does not exist yet. */
   async function tableRowCount(tableName) {
     return run(async (ctx) => {
-      const t = ctx.workbook.tables.getItemOrNullObject(tableName);
-      t.load('isNullObject');
-      await ctx.sync();
-      if (t.isNullObject) return 0;
+      const t = await settle(ctx, tableName);
+      if (!t) return 0;
       const b = t.getDataBodyRange(); b.load('values');
       await ctx.sync();
       return b.values.filter((r) => r.some((v) => v !== '' && v != null)).length;
@@ -362,10 +444,8 @@
   /** Mark one NextGen task done (or not) by Task Key. */
   async function setTaskDone(key, done) {
     return run(async (ctx) => {
-      const t = ctx.workbook.tables.getItemOrNullObject(TASKS_TABLE);
-      t.load('isNullObject');
-      await ctx.sync();
-      if (t.isNullObject) return;
+      const t = await settle(ctx, TASKS_TABLE);
+      if (!t) return;
       const h = t.getHeaderRowRange(); h.load('values');
       const b = t.getDataBodyRange(); b.load('values');
       await ctx.sync();
@@ -375,61 +455,172 @@
     });
   }
 
+  /** Row blocks for writing: at most CHUNK rows and about 2MB each (Excel on the web rejects a request over ~5MB). */
+  function writeChunks(all) {
+    const out = [];
+    for (let i = 0; i < all.length;) {
+      let j = i, bytes = 0;
+      while (j < all.length && j - i < CHUNK && (j === i || bytes < 2e6)) bytes += JSON.stringify(all[j++]).length;
+      out.push([i, all.slice(i, j)]);
+      i = j;
+    }
+    return out;
+  }
+
   /**
-   * Create (or rebuild) a sheet + table the add-in owns. Not part of the template.
-   * Writes every row as plain cells first, then turns the block into a table in one step,
-   * so there is no table resize (that path left Sohar Results empty in Excel).
+   * Create (or rebuild) a sheet + table the add-in owns (OWNED). Fail-safe: the new rows are written to a hidden
+   * staging sheet and become a table only when every row is in; the old sheet is replaced in one small swap at the
+   * end. If anything fails before the swap, the old sheet is untouched. If the swap is cut off, the complete new
+   * table is on the staging sheet and the next read, save or pane open finishes it (rescue). Writes cells first and
+   * makes the table in one step: no table resize (that path left Sohar Results empty in Excel).
    */
   async function writeAddinTable(sheetName, tableName, cols, rows, activate, opts) {
+    const own = OWNED[tableName] || { sheet: sheetName };
     const pct = new Set((opts && opts.pctCols) || []);
     const values = rows.map((r) => cols.map((c) => { const v = r[c]; return v == null ? '' : v; }));
     const fmt = (r, hdr) => r.map((v, j) => (!hdr && pct.has(cols[j]) ? '0%' : '@'));
-    const stage = (s) => (e) => { e.message = `Writing the ${sheetName} sheet (${s}): ${e.message}`; throw e; };
+    const unchanged = (s) => (e) => { e.message = `Could not save the ${sheetName} sheet (${s}): ${e.message}. The ${sheetName} sheet was not changed; its previous data is still there.`; throw e; };
     await run(async (ctx) => {
-      const old = ctx.workbook.tables.getItemOrNullObject(tableName);
-      old.load('isNullObject');
-      let ws = ctx.workbook.worksheets.getItemOrNullObject(sheetName);
-      ws.load('isNullObject');
-      await ctx.sync();
-      if (!old.isNullObject) old.delete();
-      const existed = !ws.isNullObject;
-      if (existed) ws.tables.load('items/name');
-      else ws = ctx.workbook.worksheets.add(sheetName);
-      await ctx.sync().catch(stage('preparing the sheet'));
-      // clear() leaves tables in place; a renamed or extra table on this sheet would make tables.add overlap.
-      if (existed) for (const t of ws.tables.items) t.delete();
-      ws.getRange().clear();
-      await ctx.sync().catch(stage('clearing'));
+      const wb = ctx.workbook;
+      const probe = () => {
+        const p = { real: wb.tables.getItemOrNullObject(tableName), stg: wb.tables.getItemOrNullObject(STG(tableName)),
+          stage: wb.worksheets.getItemOrNullObject(STAGE_SHEET(tableName)), ws: wb.worksheets.getItemOrNullObject(sheetName) };
+        p.real.load('isNullObject'); p.stg.load('isNullObject'); p.stage.load('isNullObject,id'); p.ws.load('isNullObject,id,position,visibility');
+        return p;
+      };
+      let p = probe();
+      const active = wb.worksheets.getActiveWorksheet(); active.load('id');
+      const prot = Office.context.requirements.isSetSupported('ExcelApi', '1.7') ? wb.protection : null;
+      if (prot) prot.load('protected');
+      await ctx.sync().catch(unchanged('checking the workbook'));
+      // Saves add, rename and delete sheets, which a structure-protected workbook refuses.
+      if (prot && prot.protected) unchanged('checking the workbook')(new Error('the workbook structure is protected; unprotect it (Review > Protect Workbook) and try again'));
+      // An earlier save was cut off mid-swap: its complete rows are the only copy. Finish it before anything else.
+      if (p.real.isNullObject && !p.stg.isNullObject && OWNED[tableName]) {
+        if (!(await rescue(ctx, tableName))) throw new Error(`Could not save the ${sheetName} sheet: an earlier save of it was cut off and could not be finished. Nothing was overwritten: its rows are safe on the hidden sheet "${STAGE_SHEET(tableName)}". Close and reopen the pane.`);
+        recovered.add(sheetName);
+        p = probe();
+        await ctx.sync().catch(unchanged('checking the workbook'));
+      }
+      const wasActive = !p.ws.isNullObject && active.id === p.ws.id; // deleting it would bounce the user to a neighbour
+      let oldTableSheetId = null;
+      if (!p.real.isNullObject) { const w = p.real.worksheet; w.load('id'); await ctx.sync().catch(unchanged('checking the workbook')); oldTableSheetId = w.id; }
+
+      // Leftovers from an unfinished save are partial or superseded (the real table is intact): sweep them, by name
+      // in this same batch (see sweepStage), so a sheet another window has just swapped into place is never hit.
+      if (!p.stage.isNullObject && p.stage.id !== oldTableSheetId) {
+        if (!p.real.isNullObject) sweepStage(ctx, tableName);
+        else wb.worksheets.getItem(STAGE_SHEET(tableName)).delete(); // first save ever: nothing real to protect
+      }
+      // A stray STG table off the staging sheet (the real table is intact here) would block the name: drop it.
+      else if (!p.stg.isNullObject) wb.tables.getItem(STG(tableName)).delete();
+      const stage = wb.worksheets.add(STAGE_SHEET(tableName));
+      stage.visibility = Excel.SheetVisibility.hidden;
+      stage.load('id');
+      await ctx.sync().catch(unchanged('preparing'));
+      const stageId = stage.id;
 
       const all = [cols, ...values];
-      for (let i = 0; i < all.length; i += CHUNK) {
+      for (const [i, chunk] of writeChunks(all)) {
         ctx.application.suspendApiCalculationUntilNextSync();
-        const chunk = all.slice(i, i + CHUNK);
-        const rg = ws.getRangeByIndexes(i, 0, chunk.length, cols.length);
+        const rg = stage.getRangeByIndexes(i, 0, chunk.length, cols.length);
         rg.numberFormat = chunk.map((r, k) => fmt(r, i + k === 0)); // text, so IDs and ZIPs keep leading zeros; % columns stay numbers
         rg.values = chunk;
-        await ctx.sync().catch(stage(`rows ${i + 1}-${i + chunk.length}`));
+        await ctx.sync().catch(unchanged(`rows ${i + 1}-${i + chunk.length}`));
       }
-      const tbl = ws.tables.add(ws.getRangeByIndexes(0, 0, Math.max(2, all.length), cols.length), true);
-      tbl.name = tableName;
-      await ctx.sync().catch(stage('making the table'));
-      ws.freezePanes.freezeRows(1);
-      tbl.getRange().format.autofitColumns();
-      if (values.length && Office.context.requirements.isSetSupported('ExcelApi', '1.6')) {
-        try { // cosmetic only: never let data bars break a save
+      // The completeness marker: only now does a table named STG exist.
+      stage.tables.add(stage.getRangeByIndexes(0, 0, Math.max(2, all.length), cols.length), true).name = STG(tableName);
+      await ctx.sync().catch(unchanged('making the table'));
+
+      // The swap, in an order where any cut-off point leaves either the old table intact or a complete STG table.
+      const vis = own.hidden ? Excel.SheetVisibility.hidden : p.ws.isNullObject ? Excel.SheetVisibility.visible : p.ws.visibility;
+      stage.visibility = vis; // before the delete, so a visible sheet always remains
+      if (!p.real.isNullObject && oldTableSheetId !== (p.ws.isNullObject ? null : p.ws.id)) p.real.delete(); // old table on a renamed sheet
+      if (!p.ws.isNullObject) p.ws.delete(); // takes the old table with it
+      stage.name = sheetName;
+      wb.tables.getItem(STG(tableName)).name = tableName;
+      if (!p.ws.isNullObject) stage.position = p.ws.position;
+      try { await ctx.sync(); } catch (e) {
+        // Find out how far the swap got. Decide by where the real table lives, never by names alone: another
+        // Excel window can be saving the same table with the same staging names.
+        const later = () => { throw finishLater(sheetName, e); };
+        const q = probe();
+        await ctx.sync().catch(later);
+        if (q.real.isNullObject && !q.stg.isNullObject && !(await rescue(ctx, tableName))) later(); // cut off mid-swap
+        const now = wb.tables.getItemOrNullObject(tableName); now.load('isNullObject');
+        await ctx.sync().catch(later);
+        if (now.isNullObject) throw Object.assign(e, { message: `Saving the ${sheetName} sheet failed and the sheet is gone (${e.message}). Run the step again to rebuild it.` });
+        const home = now.worksheet; home.load('id');
+        await ctx.sync().catch(later);
+        if (home.id !== stageId) {
+          // The real table is not the one built here: the old rows are still in place. Drop this save's own staging
+          // sheet (by id: it is ours whatever it is named now) and say the save did not happen.
+          const mine = wb.worksheets.getItemOrNullObject(stageId); mine.load('isNullObject');
+          await ctx.sync().catch(() => {});
+          if (mine.isNullObject === false) { mine.delete(); await ctx.sync().catch(() => {}); }
+          unchanged('swapping in the new sheet')(e);
+        }
+        // Otherwise the swap (or the rescue) put this save's table in place: the save stands.
+      }
+
+      try { // cosmetic only: never fails a save
+        const ws = wb.worksheets.getItem(sheetName), tbl = wb.tables.getItem(tableName);
+        ws.freezePanes.freezeRows(1);
+        tbl.getRange().format.autofitColumns();
+        if (values.length && Office.context.requirements.isSetSupported('ExcelApi', '1.6')) {
           for (const c of pct) {
             const j = cols.indexOf(c); if (j < 0) continue;
             const bar = ws.getRangeByIndexes(1, j, values.length, 1).conditionalFormats.add('DataBar');
             bar.dataBar.lowerBoundRule = { type: 'Number', formula: '0' };
             bar.dataBar.upperBoundRule = { type: 'Number', formula: '1' };
           }
-        } catch (e) { console.warn('data bars skipped', e); }
-      }
-      if (activate) ws.activate();
-      await ctx.sync().catch(() => {}); // cosmetic only
+        }
+        if ((activate || wasActive) && vis !== Excel.SheetVisibility.hidden) ws.activate();
+        await ctx.sync();
+      } catch (e) { console.warn(`formatting of ${sheetName} skipped`, e); }
     });
     return values.length;
   }
+  const finishLater = (sheetName, e) => {
+    e.message = `Saving the ${sheetName} sheet did not finish: ${e.message}. Nothing was lost: the add-in finishes or undoes the save the next time it opens. Close and reopen the pane.`;
+    return e;
+  };
+
+  /**
+   * On pane open: finish any save that was cut off mid-swap and sweep unfinished staging sheets.
+   * Returns the sheet names that were put back (plus any finished by reads earlier in this session).
+   */
+  async function recoverAll() {
+    await run(async (ctx) => {
+      const wb = ctx.workbook, names = Object.keys(OWNED);
+      const ps = names.map((t) => {
+        const p = { real: wb.tables.getItemOrNullObject(t), stg: wb.tables.getItemOrNullObject(STG(t)), stage: wb.worksheets.getItemOrNullObject(STAGE_SHEET(t)) };
+        p.real.load('isNullObject'); p.stg.load('isNullObject'); p.stage.load('isNullObject');
+        return p;
+      });
+      const imp = wb.worksheets.getItemOrNullObject(STAGE_IMPORT); imp.load('isNullObject');
+      await ctx.sync();
+      if (!imp.isNullObject) { imp.delete(); await ctx.sync().catch((e) => console.warn('report staging sheet left', e)); }
+      for (let i = 0; i < names.length; i++) {
+        const p = ps[i];
+        if (p.real.isNullObject && !p.stg.isNullObject) { if (await rescue(ctx, names[i])) recovered.add(OWNED[names[i]].sheet); }
+        else if (!p.stage.isNullObject) { await sweepStage(ctx, names[i]); await ctx.sync().catch((e) => console.warn('staging sheet left', e)); }
+      }
+    });
+    return takeRecovered();
+  }
+  /**
+   * Queue (no sync) the removal of an unfinished save's staging sheet, guarded so it can never remove the only copy.
+   * Fresh proxies resolved by name when the batch runs: a sheet proxy loaded in an earlier sync follows the sheet's
+   * id, so if another window's save had since renamed its staging sheet into place, it would delete the live sheet.
+   * The first op fails the batch (nothing deleted) unless the real table exists at that moment.
+   */
+  function sweepStage(ctx, tableName) {
+    ctx.workbook.tables.getItem(tableName).getRange().load('address');
+    ctx.workbook.worksheets.getItem(STAGE_SHEET(tableName)).delete();
+  }
+  /** Sheets whose interrupted save was finished since the last call (by a read, a save or recoverAll). */
+  function takeRecovered() { const out = [...recovered]; recovered.clear(); return out; }
 
   async function setConfigValue(setting, value) {
     return run(async (ctx) => {
@@ -464,5 +655,5 @@
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, upsertPayerMapMany, replaceTable,
     readPayerEvidence, writePayerEvidence, tableExists, readClinicFile,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
-    writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);
