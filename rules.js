@@ -1,8 +1,9 @@
-/* rules.js — pure clinic rules (R5-R12), no Office.js, no DOM. Loaded by index.html, dashboard.html and tests/. */
+/* rules.js — pure clinic rules (R5-R12), no Office.js, no DOM. Loaded by index.html, dashboard.html and tests/.
+   Needs core.js loaded first (R9 shares core.reverifyCheck with the build's re-verify skip). */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory();
-  else root.SoharRules = factory();
-})(typeof self !== 'undefined' ? self : this, function () {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./core.js'));
+  else root.SoharRules = factory(root.SoharCore);
+})(typeof self !== 'undefined' ? self : this, function (C) {
   'use strict';
 
   const REVERIFY_URL = 'https://app.soharhealth.com/create?type=verification';
@@ -270,20 +271,20 @@
       out.push(mk('DUAL', `Sent both to verification: ${vrows.map((v) => `${str(v.nextgenPayer) || str(v.payerName)}${v.source ? ` (${v.source})` : ''}`).join(' and ')}. The Sohar results decide which to choose in NextGen.`));
     }
 
-    // R9 Re-verify when the latest verification is stale or missing.
+    // R9 Re-verify: the same due rule as the build's skip window (core.reverifyCheck), per insurance sent (verifyRows),
+    // else from any verification. Due when missing, not eligible, Re-verify days or more old, coverage ending before the
+    // visit, or a next visit in a new month within Re-verify days (Re-verify in new month: any month change).
     if (up.length) {
-      const days = c.reverifyDays != null ? +c.reverifyDays : 7;
-      let last = null;
-      for (const r of rows) {
-        if (!isVerification(r)) continue;
-        const d = parseDate(r['Sohar Date']);
-        if (d && (!last || d > last)) last = d;
-      }
-      const age = last ? daysBetween(last, today) : null;
-      if (!last || age > days) {
-        out.push(mk('REVERIFY', last
-          ? `Last Sohar verification ${fmtDate(last)} (${age} days ago). Resubmit before the ${fmtDate(up[0]._d)} visit.`
-          : `No Sohar verification on file. Submit before the ${fmtDate(up[0]._d)} visit.`, { link: REVERIFY_URL }));
+      const opts = { today, nextAppt: up[0]._d, days: c.reverifyDays != null ? +c.reverifyDays : 7, newMonth: !!c.reverifyNewMonth };
+      const checks = vrows.length ? vrows.map((v) => C.reverifyCheck(rows, v, opts)) : [C.reverifyCheck(rows, null, opts)];
+      const due = checks.find((k) => k.due);
+      if (due) {
+        const visit = fmtDate(up[0]._d);
+        let detail;
+        if (due.code === 'none') detail = `No Sohar verification on file${vrows.length > 1 ? ' for one of the insurances' : ''}. Submit before the ${visit} visit.`;
+        else if (due.code === 'window') detail = `Last Sohar verification ${due.verified} (${due.daysSince} days ago). Resubmit before the ${visit} visit.`;
+        else detail = `Last Sohar verification ${due.verified}: ${due.reason}. Resubmit before the ${visit} visit.`;
+        out.push(mk('REVERIFY', detail, { link: REVERIFY_URL }));
       }
     }
 

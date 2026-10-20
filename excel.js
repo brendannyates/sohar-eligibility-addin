@@ -46,6 +46,10 @@
     tblIrCrossRef: { sheet: 'IR Cross-Ref' }, tblBenefits: { sheet: 'Benefits' }, tblDiscoveryVerify: { sheet: 'Discovery Verify' },
     tblVerifyFailed: { sheet: 'Discovery from Verify' }, tblPayerEvidence: { sheet: 'Payer Evidence' },
     tblSoharUploads: { sheet: 'Sohar Uploads', hidden: true }, tblIrUploads: { sheet: 'IR Uploads', hidden: true },
+    // Payer learning (v0.10): the outcomes ledger is hidden (it has Per Nbr); the log and the rollup have no patient identifiers.
+    tblPayerOutcomes: { sheet: 'Payer Outcomes', hidden: true }, tblPayerMapLog: { sheet: 'Payer Map Log' }, tblPayerLearning: { sheet: 'Payer Learning' },
+    // Sohar ref -> Per Nbr memory (append-only, kept by "Clear saved Sohar results") and "Re-verify anyway" requests.
+    tblSoharRefs: { sheet: 'Sohar Refs', hidden: true }, tblReverifyRequests: { sheet: 'Re-verify Requests', hidden: true },
   };
   // A save builds the new rows on a hidden staging sheet (STAGE_SHEET) and only then makes them a table named STG.
   // So a STG table always holds complete new data. The old sheet is deleted only in the swap that renames the
@@ -146,8 +150,34 @@
       // days before a Sohar verification counts as stale, and the Clinic tab's last location.
       sfhpProviders: String(cfg['SFHP providers'] ?? '').split(/[;\n]/).map((s) => s.trim()).filter(Boolean),
       reverifyDays: (() => { const n = parseInt(String(cfg['Re-verify days'] ?? ''), 10); return isNaN(n) || n < 0 ? 7 : n; })(),
+      // Re-verify skip window: Skip recent verifications (On), Re-verify days (7), Re-verify in new month (Off). See core.reverifyConfig.
+      reverify: root.SoharCore.reverifyConfig(cfg),
       clinicLocation: String(cfg['Clinic location'] ?? '').trim(),
+      // Payer learning: optional rows (Learning, Learn: ...), defaults when missing. See core.learningConfig.
+      learning: root.SoharCore.learningConfig(cfg),
     };
+  }
+
+  /**
+   * Add Config rows that are missing (by Setting), with their plain-English description in the third column when the
+   * table has one. Existing rows are never changed. rows: [{setting, value, what}]. Returns the settings added.
+   */
+  async function ensureConfigRows(rows) {
+    return run(async (ctx) => {
+      const t = ctx.workbook.tables.getItem(TABLES.config);
+      const h = t.getHeaderRowRange(); h.load('values');
+      const b = t.getDataBodyRange(); b.load('values');
+      await ctx.sync();
+      const headers = h.values[0].map((x) => String(x).trim());
+      const si = Math.max(0, headers.indexOf('Setting')), vi = headers.indexOf('Value') >= 0 ? headers.indexOf('Value') : 1;
+      const di = headers.findIndex((x, j) => j !== si && j !== vi);
+      const have = new Set(b.values.map((r) => String(r[si] ?? '').trim().toLowerCase()).filter(Boolean));
+      const add = (rows || []).filter((r) => !have.has(String(r.setting).trim().toLowerCase()));
+      if (!add.length) return [];
+      t.rows.add(null, add.map((r) => headers.map((x, j) => (j === si ? r.setting : j === vi ? r.value : j === di ? (r.what || '') : ''))));
+      await ctx.sync();
+      return add.map((r) => r.setting);
+    });
   }
 
   async function readPayerMap() {
@@ -163,11 +193,18 @@
     return rows.map((r) => ({ payerId: String(r.payerId || ''), payerName: String(r.payerName || ''), aliasPayerNames: String(r.aliasPayerNames || '') }));
   }
 
-  async function upsertPayerMap(entry) { return upsertPayerMapMany([entry]); }
+  async function upsertPayerMap(entry, opts) { return upsertPayerMapMany([entry], opts); }
 
-  /** Add or update Payer Map rows by NextGen name in one pass (auto-mapping can add dozens at once). */
-  async function upsertPayerMapMany(entries) {
+  /**
+   * Add or update Payer Map rows by NextGen name in one pass (auto-mapping can add dozens at once).
+   * Notes: the new note goes first and earlier notes are kept after " | " (core.mergeNotes, ~500 characters).
+   * Last reviewed: stamped with today only for a person's write (opts.human, or entry.human); automatic writes keep
+   * the row's value (new automatic rows leave it blank). It is always written as text MM/DD/YYYY; an older date
+   * serial on a row that is rewritten becomes that text too. Other columns on an updated row are kept.
+   */
+  async function upsertPayerMapMany(entries, opts) {
     if (!entries || !entries.length) return 0;
+    const C = root.SoharCore;
     return run(async (ctx) => {
       const t = ctx.workbook.tables.getItem(TABLES.payerMap);
       const h = t.getHeaderRowRange(); h.load('values');
@@ -175,45 +212,54 @@
       await ctx.sync();
       const headers = h.values[0].map((x) => String(x).trim());
       const col = (name) => headers.indexOf(name);
+      const get = (vals, name) => { const j = col(name); return j >= 0 ? vals[j] : ''; };
       const set = (vals, name, v) => { const j = col(name); if (j >= 0) vals[j] = v; };
-      const today = root.SoharCore.fmtDate(new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())));
-      const verifiable = root.SoharCore.VERIFIABLE;
+      const today = C.fmtDate(new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate())));
+      const asText = (v) => (typeof v === 'number' ? (v > 59 ? C.fmtDate(C.excelSerialToDate(v)) : '') : v instanceof Date ? C.fmtDate(v) : String(v ?? '').trim());
       const keyOf = (v) => String(v ?? '').trim().toLowerCase();
       const existing = new Map();
-      b.values.forEach((r, i) => { const k = keyOf(r[col('NextGen Payer Name')]); if (k && !existing.has(k)) existing.set(k, i); });
-      let blank = b.rowCount === 1 && b.values[0].every((v) => v === '' || v == null) ? 0 : -1;
+      const body = b.values.map((r) => r.slice()); // local copy: rows written in this batch are updated here
+      body.forEach((r, i) => { const k = keyOf(r[col('NextGen Payer Name')]); if (k && !existing.has(k)) existing.set(k, i); });
+      let blank = b.rowCount === 1 && body[0].every((v) => v === '' || v == null) ? 0 : -1;
       // Sohar payerIds like 01111 must stay text, or Excel stores 1111 and verification gets the wrong payerId.
-      const idCol = col('Sohar payerId');
+      // Last reviewed is text too, so the column never mixes date serials and text.
+      const textCols = ['Sohar payerId', 'Last reviewed'].map(col).filter((j) => j >= 0);
       const writeRow = (i, rowVals) => {
         const rg = b.getRow(i);
-        if (idCol >= 0) rg.getCell(0, idCol).numberFormat = [['@']];
+        for (const j of textCols) rg.getCell(0, j).numberFormat = [['@']];
         rg.values = [rowVals];
       };
-      const adds = [];
+      const adds = [], addAt = new Map();
       for (const entry of entries) {
-        const rowVals = headers.map(() => '');
+        const i = existing.get(keyOf(entry.nextgenPayerName));
+        const a = addAt.get(keyOf(entry.nextgenPayerName)); // same name twice in one batch: the later entry wins
+        const prev = i != null ? body[i] : a != null ? adds[a] : null;
+        const rowVals = prev ? prev.slice() : headers.map(() => '');
+        const human = !!((opts && opts.human) || entry.human);
         set(rowVals, 'NextGen Payer Name', entry.nextgenPayerName);
         set(rowVals, 'Sohar payerId', entry.payerId);
         set(rowVals, 'Sohar payerName', entry.payerName);
         set(rowVals, 'Confidence', entry.confidence);
-        set(rowVals, 'Action', entry.payerId && verifiable.has(keyOf(entry.confidence)) ? 'verification' : 'discovery');
-        set(rowVals, 'Notes', entry.notes || '');
-        set(rowVals, 'Last reviewed', today);
-        const i = existing.get(keyOf(entry.nextgenPayerName));
-        if (i != null) writeRow(i, rowVals);
-        else if (blank === 0) { writeRow(0, rowVals); blank = -1; existing.set(keyOf(entry.nextgenPayerName), 0); }
-        else adds.push(rowVals);
+        set(rowVals, 'Action', entry.payerId && C.VERIFIABLE.has(keyOf(entry.confidence)) ? 'verification' : 'discovery');
+        set(rowVals, 'Notes', C.mergeNotes(entry.notes, prev ? get(prev, 'Notes') : ''));
+        set(rowVals, 'Last reviewed', human ? today : prev ? asText(get(prev, 'Last reviewed')) : '');
+        if (i != null) { writeRow(i, rowVals); body[i] = rowVals; }
+        else if (a != null) adds[a] = rowVals;
+        else if (blank === 0) { writeRow(0, rowVals); blank = -1; existing.set(keyOf(entry.nextgenPayerName), 0); body[0] = rowVals; }
+        else { addAt.set(keyOf(entry.nextgenPayerName), adds.length); adds.push(rowVals); }
       }
       if (adds.length) {
         t.rows.add(null, adds);
         await ctx.sync();
-        if (idCol >= 0) {
-          // Re-write the new rows' payerIds as text (rows.add may have turned "01111" into 1111).
+        if (textCols.length) {
+          // Re-write the new rows' text columns as text (rows.add may have turned "01111" into 1111).
           const nb = t.getDataBodyRange(); nb.load('rowCount');
           await ctx.sync();
-          const ids = nb.getCell(nb.rowCount - adds.length, idCol).getResizedRange(adds.length - 1, 0);
-          ids.numberFormat = adds.map(() => ['@']);
-          ids.values = adds.map((r) => [r[idCol]]);
+          for (const j of textCols) {
+            const cells = nb.getCell(nb.rowCount - adds.length, j).getResizedRange(adds.length - 1, 0);
+            cells.numberFormat = adds.map(() => ['@']);
+            cells.values = adds.map((r) => [r[j]]);
+          }
         }
       }
       await ctx.sync();
@@ -422,6 +468,28 @@
   async function readPayerEvidence() { return readOwned('tblPayerEvidence'); }
   const writePayerEvidence = (cols, rows) => writeAddinTable('Payer Evidence', 'tblPayerEvidence', cols, rows, false);
 
+  // Payer learning (v0.10). The ledger and the log are append-only: callers pass every earlier row plus the new ones
+  // (core.appendOutcomes / log rows appended), and each save replaces the sheet fail-safe like the others.
+  async function readPayerOutcomes() { return readOwned('tblPayerOutcomes'); }
+  const writePayerOutcomes = (cols, rows) => writeAddinTable('Payer Outcomes', 'tblPayerOutcomes', cols, rows, false); // hidden: OWNED
+  async function readPayerMapLog() { return readOwned('tblPayerMapLog'); }
+  const writePayerMapLog = (cols, rows) => writeAddinTable('Payer Map Log', 'tblPayerMapLog', cols, rows, false);
+  /** Read the Payer Map Log and save it with rows added at the end. Returns the number added. */
+  async function appendPayerMapLog(cols, rows) {
+    if (!rows || !rows.length) return 0;
+    const prev = await readPayerMapLog();
+    await writePayerMapLog(cols, prev.concat(rows));
+    return rows.length;
+  }
+  const writePayerLearning = (cols, rows) => writeAddinTable('Payer Learning', 'tblPayerLearning', cols, rows, false);
+
+  // Sohar ref memory (core.SOHAR_REF_COLS): append-only through core.appendRefs, so callers pass every earlier row.
+  async function readSoharRefs() { return readOwned('tblSoharRefs'); }
+  const writeSoharRefs = (cols, rows) => writeAddinTable('Sohar Refs', 'tblSoharRefs', cols, rows, false); // hidden: OWNED
+  // "Re-verify anyway" requests (core.REVERIFY_REQUEST_COLS), pruned by core.pruneReverifyRequests on each build.
+  async function readReverifyRequests() { return readOwned('tblReverifyRequests'); }
+  const writeReverifyRequests = (cols, rows) => writeAddinTable('Re-verify Requests', 'tblReverifyRequests', cols, rows, false); // hidden: OWNED
+
   /** True when the workbook has this table (used to tell the Sohar template from a clinic file). */
   async function tableExists(tableName) {
     return run(async (ctx) => {
@@ -566,7 +634,8 @@
       try { // cosmetic only: never fails a save
         const ws = wb.worksheets.getItem(sheetName), tbl = wb.tables.getItem(tableName);
         ws.freezePanes.freezeRows(1);
-        tbl.getRange().format.autofitColumns();
+        // Hidden sheets (uploads, the outcomes ledger) are never looked at: autofit on a big ledger is wasted time.
+        if (!own.hidden) tbl.getRange().format.autofitColumns();
         if (values.length && Office.context.requirements.isSetSupported('ExcelApi', '1.6')) {
           for (const c of pct) {
             const j = cols.indexOf(c); if (j < 0) continue;
@@ -653,7 +722,9 @@
   }
 
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, upsertPayerMapMany, replaceTable,
-    readPayerEvidence, writePayerEvidence, tableExists, readClinicFile,
+    readPayerEvidence, writePayerEvidence, tableExists, readClinicFile, ensureConfigRows,
+    readPayerOutcomes, writePayerOutcomes, readPayerMapLog, writePayerMapLog, appendPayerMapLog, writePayerLearning,
+    readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

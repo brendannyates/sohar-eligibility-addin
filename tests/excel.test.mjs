@@ -16,6 +16,17 @@ const uploads = (n, tag) => Array.from({ length: n }, (_, i) => ({
 const tasks = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(C.TASK_COLS.map((c) =>
   [c, c === 'Done' ? (i % 2 ? 'Yes' : '') : c === 'MRN' ? `000${i}` : `${tag} ${c} ${i}`])));
 const expected = (cols, rows) => rows.map((r) => Object.fromEntries(cols.map((c) => [c, r[c] == null ? '' : r[c]])));
+// Payer learning tables (v0.10). All text.
+const outcomes = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(C.PAYER_OUTCOME_COLS.map((c) =>
+  [c, c === 'Per Nbr' ? `00${i}` : c === 'Sent payerId' ? '01111' : c === 'Key' ? `${tag}|${i}` : `${tag} ${c} ${i}`])));
+const mapLog = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(C.PAYER_MAP_LOG_COLS.map((c) =>
+  [c, c === 'New payerId' ? '01111' : c === 'Score' ? '0.81' : `${tag} ${c} ${i}`])));
+const learning = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(C.PAYER_LEARNING_COLS.map((c) =>
+  [c, c === 'Sohar payerId' ? '01111' : c === 'Evidence score' ? '83' : `${tag} ${c} ${i}`])));
+// Sohar ref memory and Re-verify anyway requests. All text (Per Nbr keeps leading zeros).
+const refs = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'Sohar Ref': `${tag}-q-${i}`, 'Per Nbr': `00${i}`, Kind: i % 2 ? 'discovery' : 'verification',
+  'Result Key': `v|00${i}|synthetic payer|0${i}`, 'First Matched': '10/20/2026 9:00 AM' }));
+const requests = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'Per Nbr': `0${i}`, Requested: `2026-10-20T1${i % 10}:00:00.000Z` }));
 
 // ---------- happy path ----------
 
@@ -154,6 +165,125 @@ test('upsertPayerMapMany keeps payerIds as text, including rows added below', as
   assert.deepEqual(map.map((r) => r.payerId), ['01111', '02222', '03333']);
 });
 
+test('Payer Outcomes (hidden), Payer Map Log and Payer Learning round-trip as text; the log appends', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  assert.deepEqual(await X.readPayerOutcomes(), []);
+  assert.deepEqual(await X.readPayerMapLog(), []);
+  await X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, outcomes(4, 'a'));
+  assert.equal(m.sheetVisibility('Payer Outcomes'), 'Hidden');
+  assert.equal(m.autofits('Payer Outcomes'), 0, 'no autofit on the hidden ledger');
+  assert.deepEqual(await X.readPayerOutcomes(), expected(C.PAYER_OUTCOME_COLS, outcomes(4, 'a')));
+  assert.equal((await X.readPayerOutcomes())[0]['Per Nbr'], '000', 'leading zeros kept');
+  // Append-only through core.appendOutcomes: the old rows plus the new ones.
+  const more = C.appendOutcomes(await X.readPayerOutcomes(), [...outcomes(2, 'a'), ...outcomes(3, 'b')]);
+  assert.equal(more.added, 3);
+  await X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, more.rows);
+  assert.deepEqual(await X.readPayerOutcomes(), expected(C.PAYER_OUTCOME_COLS, [...outcomes(4, 'a'), ...outcomes(3, 'b')]));
+  assert.equal(m.sheetVisibility('Payer Outcomes'), 'Hidden');
+
+  assert.equal(await X.appendPayerMapLog(C.PAYER_MAP_LOG_COLS, mapLog(2, 'first')), 2);
+  assert.equal(await X.appendPayerMapLog(C.PAYER_MAP_LOG_COLS, []), 0);
+  await X.appendPayerMapLog(C.PAYER_MAP_LOG_COLS, mapLog(1, 'second'));
+  assert.deepEqual(await X.readPayerMapLog(), expected(C.PAYER_MAP_LOG_COLS, [...mapLog(2, 'first'), ...mapLog(1, 'second')]));
+  assert.equal(m.sheetVisibility('Payer Map Log'), 'Visible');
+  assert.ok(m.autofits('Payer Map Log') > 0, 'visible sheets are still autofit');
+  assert.equal((await X.readPayerMapLog())[0]['New payerId'], '01111');
+
+  await X.writePayerLearning(C.PAYER_LEARNING_COLS, learning(3, 'x'));
+  assert.deepEqual(m.tableRows('tblPayerLearning'), expected(C.PAYER_LEARNING_COLS, learning(3, 'x')));
+  await X.writePayerLearning(C.PAYER_LEARNING_COLS, learning(1, 'y'));
+  assert.deepEqual(m.tableRows('tblPayerLearning'), expected(C.PAYER_LEARNING_COLS, learning(1, 'y')), 'rewritten each refresh');
+  assert.equal(m.sheetVisibility('Payer Learning'), 'Visible');
+  assert.equal(m.activeSheet(), 'Import', 'none of them activates');
+  // Clearing the saved Sohar results leaves the ledger alone.
+  await X.writeUploads(C.UPLOAD_COLS, []);
+  assert.equal((await X.readPayerOutcomes()).length, 7);
+});
+
+test('Sohar Refs and Re-verify Requests (hidden) round-trip as text; refs survive clearing saved results', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  assert.deepEqual(await X.readSoharRefs(), []);
+  assert.deepEqual(await X.readReverifyRequests(), []);
+  await X.writeSoharRefs(C.SOHAR_REF_COLS, refs(3, 'a'));
+  assert.equal(m.sheetVisibility('Sohar Refs'), 'Hidden');
+  assert.deepEqual(await X.readSoharRefs(), expected(C.SOHAR_REF_COLS, refs(3, 'a')));
+  assert.equal((await X.readSoharRefs())[0]['Per Nbr'], '000', 'leading zeros kept');
+  // Append-only through core.appendRefs.
+  const more = C.appendRefs(await X.readSoharRefs(), [...refs(1, 'a'), ...refs(2, 'b')], 'now');
+  assert.equal(more.added, 2);
+  await X.writeSoharRefs(C.SOHAR_REF_COLS, more.rows);
+  assert.deepEqual(await X.readSoharRefs(), expected(C.SOHAR_REF_COLS, [...refs(3, 'a'), ...refs(2, 'b')]));
+  await X.writeUploads(C.UPLOAD_COLS, []);
+  assert.equal((await X.readSoharRefs()).length, 5, '"Clear saved Sohar results" keeps the ref memory');
+
+  await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, C.addReverifyRequest([], '0042', '2026-10-20T16:00:00.000Z'));
+  assert.equal(m.sheetVisibility('Re-verify Requests'), 'Hidden');
+  assert.deepEqual(await X.readReverifyRequests(), [{ 'Per Nbr': '0042', Requested: '2026-10-20T16:00:00.000Z' }]);
+  const pr = C.pruneReverifyRequests(await X.readReverifyRequests(), [{ 'Per Nbr': '0042', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-21' }]);
+  await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, pr.rows);
+  assert.deepEqual(await X.readReverifyRequests(), [], 'dropped once a newer verification exists');
+  assert.equal(m.activeSheet(), 'Import', 'neither activates');
+});
+
+test('readConfig: re-verify settings with defaults; ensureConfigRows adds the re-verify rows', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  m.seedTable('Config', 'tblConfig', ['Setting', 'Value', 'What it does'], [{ Setting: 'Re-verify days', Value: '10', 'What it does': 'mine' }]);
+  m.seedTable('Location', 'tblLocationState', ['Location', 'State'], [{ Location: 'San Rafael', State: 'CA' }]);
+  let cfg = await X.readConfig();
+  assert.deepEqual(cfg.reverify, { skip: true, days: 10, newMonth: false });
+  assert.equal(cfg.reverifyDays, 10, 'one setting shared by the skip rule and the clinic Re-verify flag');
+  assert.deepEqual(await X.ensureConfigRows(C.REVERIFY_CONFIG_ROWS), ['Skip recent verifications', 'Re-verify in new month']);
+  assert.equal(m.tableRows('tblConfig').find((r) => r.Setting === 'Re-verify days').Value, '10', 'existing row unchanged');
+  await X.setConfigValue('Re-verify in new month', 'On');
+  cfg = await X.readConfig();
+  assert.equal(cfg.reverify.newMonth, true);
+});
+
+test('ensureConfigRows adds only missing settings, with the description, and never changes existing ones', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  m.seedTable('Config', 'tblConfig', ['Setting', 'Value', 'What it does'], [{ Setting: 'Scope', Value: 'All patients', 'What it does': 'x' },
+    { Setting: 'Learn: promote patients', Value: '5', 'What it does': 'mine' }]);
+  const added = await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS);
+  assert.deepEqual(added, C.LEARNING_CONFIG_ROWS.map((r) => r.setting).filter((s) => s !== 'Learn: promote patients'));
+  const rows = m.tableRows('tblConfig');
+  assert.deepEqual(rows.find((r) => r.Setting === 'Learn: promote patients'), { Setting: 'Learn: promote patients', Value: '5', 'What it does': 'mine' });
+  assert.equal(rows.find((r) => r.Setting === 'Learning')['What it does'], C.LEARNING_CONFIG_ROWS[0].what);
+  assert.deepEqual(await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS), [], 'second run adds nothing');
+  m.seedTable('Location', 'tblLocationState', ['Location', 'State'], [{ Location: 'San Rafael', State: 'CA' }]);
+  const cfg = await X.readConfig();
+  assert.equal(cfg.learning.on, true);
+  assert.equal(cfg.learning.promotePatients, 5);
+  assert.equal(cfg.learning.demoteDiscoveryShare, 0.5);
+  assert.equal(cfg.learning.suggestShare, 0.8);
+});
+
+test('upsertPayerMapMany keeps earlier notes, stamps Last reviewed only for a person, and writes it as text', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  const cols = ['NextGen Payer Name', 'Sohar payerId', 'Sohar payerName', 'Confidence', 'Action', 'Notes', 'Last reviewed', 'Owner'];
+  m.seedTable('Payer Map', 'tblPayerMap', cols, [
+    { 'NextGen Payer Name': 'Plan A', 'Sohar payerId': '01111', 'Sohar payerName': 'A', Confidence: 'Auto-Medium', Notes: 'Auto-matched by the add-in: x', 'Last reviewed': 46300, Owner: 'Ana' },
+    { 'NextGen Payer Name': 'Plan B', 'Sohar payerId': '02222', 'Sohar payerName': 'B', Confidence: 'Auto-Low', Notes: 'old', 'Last reviewed': '09/01/2026' },
+  ], { text: false });
+  await X.upsertPayerMapMany([
+    { nextgenPayerName: 'Plan A', payerId: '01111', payerName: 'A', confidence: 'Learned', notes: 'Learned from Sohar: 3 patients agreed' },
+    { nextgenPayerName: 'Plan C', payerId: '03333', payerName: 'C', confidence: 'Auto-Low', notes: 'Auto-matched by the add-in: y' },
+  ]);
+  await X.upsertPayerMap({ nextgenPayerName: 'plan b', payerId: '02222', payerName: 'B', confidence: 'Confirmed', notes: 'Confirmed in the add-in' }, { human: true });
+  const rows = m.tableRows('tblPayerMap');
+  const a = rows.find((r) => r['NextGen Payer Name'] === 'Plan A'), b = rows.find((r) => r['NextGen Payer Name'] === 'plan b'), c = rows.find((r) => r['NextGen Payer Name'] === 'Plan C');
+  assert.equal(a.Notes, 'Learned from Sohar: 3 patients agreed | Auto-matched by the add-in: x');
+  assert.equal(a['Last reviewed'], C.fmtDate(C.excelSerialToDate(46300)), 'automatic write keeps the date, as text');
+  assert.equal(a.Owner, 'Ana', 'other columns kept');
+  assert.equal(a.Action, 'verification', 'Learned verifies');
+  assert.equal(b['Last reviewed'], C.fmtDate(new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()))), 'a person\'s write stamps today');
+  assert.equal(b.Notes, 'Confirmed in the add-in | old');
+  assert.equal(c['Last reviewed'], '', 'new automatic rows leave it blank');
+  assert.equal(c['Sohar payerId'], '03333');
+  assert.equal(c.Action, 'discovery');
+  const fm = m.numberFormats('Payer Map', 'G2:G4').map((r) => r[0]);
+  assert.deepEqual(fm, ['@', '@', '@'], 'Last reviewed is always text');
+});
+
 test('writeImportRows / readImportRows round-trip text', async () => {
   const m = createMock(), X = m.SoharExcel;
   await X.writeImportRows([['Per Nbr', 'Zip'], ['001', '02134'], ['002']]);
@@ -241,6 +371,11 @@ test('mock: APIs above the supported set fail at sync; payload cap rejects big r
 const CASES = {
   uploads: { write: (X, rows) => X.writeUploads(C.UPLOAD_COLS, rows), read: (X) => X.readUploads(), cols: C.UPLOAD_COLS, make: uploads, sheet: 'Sohar Uploads', hidden: true },
   tasks: { write: (X, rows) => X.writeTasks(C.TASK_COLS, rows), read: (X) => X.readTasks(), cols: C.TASK_COLS, make: tasks, sheet: 'NextGen Tasks', hidden: false },
+  outcomes: { write: (X, rows) => X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, rows), read: (X) => X.readPayerOutcomes(), cols: C.PAYER_OUTCOME_COLS, make: outcomes, sheet: 'Payer Outcomes', hidden: true },
+  mapLog: { write: (X, rows) => X.writePayerMapLog(C.PAYER_MAP_LOG_COLS, rows), read: (X) => X.readPayerMapLog(), cols: C.PAYER_MAP_LOG_COLS, make: mapLog, sheet: 'Payer Map Log', hidden: false },
+  learning: { write: (X, rows) => X.writePayerLearning(C.PAYER_LEARNING_COLS, rows), read: (X) => X.readTable('tblPayerLearning', true), cols: C.PAYER_LEARNING_COLS, make: learning, sheet: 'Payer Learning', hidden: false },
+  refs: { write: (X, rows) => X.writeSoharRefs(C.SOHAR_REF_COLS, rows), read: (X) => X.readSoharRefs(), cols: C.SOHAR_REF_COLS, make: refs, sheet: 'Sohar Refs', hidden: true },
+  requests: { write: (X, rows) => X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, rows), read: (X) => X.readReverifyRequests(), cols: C.REVERIFY_REQUEST_COLS, make: requests, sheet: 'Re-verify Requests', hidden: true },
 };
 const KNOBS = { op: 'failAtOp', sync: 'failAtSync', kill: 'killAfterSync' };
 const short = (v) => (v instanceof Error ? `Error: ${v.message}` : Array.isArray(v) ? `${v.length} rows` : inspect(v));
@@ -297,6 +432,22 @@ test('fail-safe: reopening the pane after any failure recovers or keeps the old 
   await sweep('tasks', 'op', 1100, 3, true);
   await sweep('tasks', 'kill', 1100, 3, true);
 });
+// Payer learning tables (v0.10): the ledger grows past one chunk; the log and the rollup are rewritten from fewer rows.
+// Sohar Refs grows past one chunk (append-only); Re-verify Requests shrinks when requests are dropped.
+for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2]]) {
+  test(`fail-safe: ${CASES[kase].sheet} survives a failure at every op, a failed sync, and Excel closing`, async () => {
+    await sweep(kase, 'op', nOld, nNew);
+    await sweep(kase, 'sync', nOld, nNew);
+    await sweep(kase, 'kill', nOld, nNew);
+  });
+  test(`fail-safe: ${CASES[kase].sheet} after any failure, reopened or first-ever, recovers or keeps the old rows`, async () => {
+    await sweep(kase, 'op', nOld, nNew, true);
+    await sweep(kase, 'kill', nOld, nNew, true);
+    await sweep(kase, 'op', null, nNew);
+    await sweep(kase, 'kill', null, nNew);
+  });
+}
+
 // First-ever write: nothing to lose, but a half-made sheet or table must not block the next save.
 test('fail-safe: a failed first-ever write never blocks the next save (uploads)', async () => {
   await sweep('uploads', 'op', null, 1100);

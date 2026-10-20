@@ -301,7 +301,7 @@ test('mergeSoharResults keeps both verification rows and marks the better one', 
   assert.equal(tr.rows.find((r) => r['Per Nbr'] === '52')['Sohar Ref'], 'q-2', 'tracker export uses the eligible insurance');
   const tasks = C.buildTasks(res.results).filter((t) => t['Per Nbr'] === '52').map((t) => t.Task).sort();
   assert.deepEqual(tasks, ['Update benefits in NextGen', 'Update insurance in NextGen'], 'no task for the superseded row');
-  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => k !== 'x').sort(), [...C.RESULTS_COLS].sort());
+  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
 });
 
 test('two insurances: an old eligible result on another policy does not override a fresh ineligible one', () => {

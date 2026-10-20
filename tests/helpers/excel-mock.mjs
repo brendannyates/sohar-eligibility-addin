@@ -696,6 +696,7 @@ export function createMock(opts = {}) {
     sheetVisibility: (name) => sheetOrThrow(name).visibility,
     activeSheet: () => (wb.active ? wb.active.name : null),
     frozenRows: (name) => sheetOrThrow(name).frozenRows,
+    autofits: (name) => sheetOrThrow(name).autofits,
     conditionalFormats: (name) => sheetOrThrow(name).cfs.map((cf) => ({ type: cf.type, address: a1(cf.g), rules: cf.rules })),
     tableNames: () => wb.tables.map((t) => t.name),
     tableInfo(name) { const t = tableOrThrow(name); return { sheet: t.sheet.name, address: a1(wb.tableGeom(t)), rows: t.rows - 1, cols: t.cols }; },

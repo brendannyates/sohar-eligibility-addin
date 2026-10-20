@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.9.2';
+  const VERSION = '0.10.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -9,7 +9,9 @@
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
   const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, discoveryVerify: null, pendingFocus: '', demo: false,
-    flags: new Map(), clinic: null, evidence: null, clinicFile: false, clinicFilter: '' };
+    flags: new Map(), clinic: null, evidence: null, clinicFile: false, clinicFilter: '',
+    // outcomes / finClasses start null ("not read yet"): build reads the ledger once, and retries after a read error.
+    outcomes: null, learning: null, finClasses: null, learnRowsChecked: false };
   const $ = (id) => document.getElementById(id);
 
   // ---------- boot ----------
@@ -172,6 +174,10 @@
   function wire() {
     $('btnScan').addEventListener('click', () => guard(refreshAll, 'scanResult'));
     $('btnBuild').addEventListener('click', () => guard(build, 'buildResult'));
+    $('skipBox').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-reverify]');
+      if (b) guard(() => reverifyAnyway(b.dataset.reverify), 'skipBox');
+    });
     $('btnDlVer').addEventListener('click', () => guard(() => download('verification'), 'preflight'));
     $('btnDlDisc').addEventListener('click', () => guard(() => download('discovery'), 'preflight'));
     dropZone('dropReport', 'fileImport', (files) => guard(() => uploadImport(files), 'scanResult'));
@@ -286,43 +292,90 @@
     return counts;
   }
 
-  const AUTO_ORDER = { 'auto-low': 0, '': 0, 'auto-medium': 1, 'auto-high': 2 };
+  const AUTO_ORDER = { 'auto-low': 0, '': 0, 'auto-medium': 1, 'auto-high': 2, 'learned': 3 };
+  const HUMAN_LABELS = new Set(['exact', 'probable', 'confirmed']); // "Looks right" keeps these as they are
+
   /**
-   * Optional review list: every NextGen name in this report that the add-in mapped itself (Auto-Low first).
-   * Nothing here blocks the build. Confirming or changing a row writes a manual confidence, which always wins.
+   * Write Payer Map rows and log each change on the Payer Map Log. by: Auto-match, Pane, Learning, Re-score, Suggestion.
+   * human: a person's write (stamps Last reviewed). changes: [{entry, score, evidence}] or plain entries.
+   */
+  async function writeMap(changes, by, human) {
+    const list = changes.map((c) => (c.entry ? c : { entry: c, evidence: c.notes || '' }));
+    const old = state.payerMap || await X.readPayerMap();
+    await X.upsertPayerMapMany(list.map((c) => c.entry), { human: !!human });
+    // Rows an earlier log save lost go first, so the log keeps the order things happened in.
+    const rows = (state.pendingLog || []).concat(C.mapChangeLog(old, list.map((c) => ({ ...c, by: c.by || by })), fmtStamp(new Date())));
+    if (!rows.length) return;
+    try {
+      await X.appendPayerMapLog(C.PAYER_MAP_LOG_COLS, rows);
+      state.pendingLog = [];
+    } catch (e) {
+      // Kept and tried again on the next build (ahead of the sheet-edit check, so the change keeps By = Pane). Said in
+      // the status line: the payer list is redrawn right after this and would wipe a note there.
+      console.error(e);
+      state.pendingLog = rows;
+      setStatus(`The Payer Map change is saved, but the Payer Map Log was not updated (${e.message}). The add-in logs it on the next build.`, 'warn');
+    }
+  }
+
+  /**
+   * Payer list for this report. Needs a person (top block): unmapped, Auto-Low, Review or an unrecognized label, a human
+   * label Sohar disagrees with (learning FLAG), or a name with a Sohar suggestion. Optional list: Auto-High, Auto-Medium,
+   * Learned. Each row shows the Sohar evidence (learnPayers). Nothing here blocks the build; a person's choice always wins.
    */
   function renderPayers() {
     const idx = C.payerMapIndex(state.payerMap || []);
+    const learned = new Map((state.learning || []).map((r) => [r.key, r]));
     const counts = payersInImport();
-    const items = [...counts].map(([name, pers]) => {
+    const item = (name, n) => {
       const h = idx.get(name.toLowerCase());
       const conf = h ? String(h.confidence || '').toLowerCase() : '';
-      return { name, n: pers.size, h, conf };
-    }).filter((it) => (!it.h && !C.isVip(it.name) && !/self\s*-?\s*pay/i.test(it.name)) || it.conf.startsWith('auto-'))
-      .sort((a, b) => (AUTO_ORDER[a.conf] ?? 0) - (AUTO_ORDER[b.conf] ?? 0) || b.n - a.n || a.name.localeCompare(b.name));
+      const lr = learned.get(name.toLowerCase()) || null;
+      const flagged = !!(lr && lr.decision === 'flag');
+      const needs = !h || C.needsClassification(h.confidence, h.payerId) || flagged || !!(lr && lr.suggestion);
+      return { name, n, h, conf, lr, flagged, needs };
+    };
+    const inReport = new Set([...counts.keys()].map((n) => n.toLowerCase()));
+    // Flags and suggestions come from every payer in the ledger, so the build note and Review sheet count names no one
+    // in this report carries. List those too, or their "Use" / "Looks right" buttons could not be reached.
+    const offReport = (state.learning || []).filter((r) => !inReport.has(r.key) && (r.decision === 'flag' || r.suggestion)).map((r) => item(r.nextgenPayer, 0));
+    const items = [...counts].map(([name, pers]) => item(name, pers.size)).concat(offReport)
+      .filter((it) => !C.isVip(it.name) && !C.isSelfPay(it.name) && (it.needs || C.isAutoLabel(it.conf)))
+      .sort((a, b) => (b.needs - a.needs) || (AUTO_ORDER[a.conf] ?? 0) - (AUTO_ORDER[b.conf] ?? 0) || b.n - a.n || a.name.localeCompare(b.name));
     const box = $('payerList');
     box.hidden = !items.length;
     if (!items.length) { box.innerHTML = ''; return; }
-    // Auto-Low and unmapped names need a person to classify them; Auto-High / Auto-Medium stay in an optional list.
-    const isLow = (it) => it.conf === 'auto-low' || !it.h;
+    const isLow = (it) => it.needs;
     const low = items.filter(isLow).length, rest = items.length - low;
     const keepOpen = box.querySelector('details') && box.querySelector('details').open;
-    box.innerHTML = (low ? `<div class="needclass"><p class="warn"><b>${low} insurance name${low === 1 ? '' : 's'} need${low === 1 ? 's' : ''} manual classification.</b> The add-in could not match ${low === 1 ? 'it' : 'them'} confidently, so those patients go to discovery (or to both insurances when the last visit was billed differently). Pick the right Sohar payer once and it is remembered.</p><div class="needrows"></div></div>` : '')
+    box.innerHTML = (low ? `<div class="needclass"><p class="warn"><b>${low} insurance name${low === 1 ? '' : 's'} need${low === 1 ? 's' : ''} manual classification.</b> Not matched confidently, labeled Review or with a label the add-in does not know, or Sohar disagrees with the mapping. Unclassified names go to discovery (or to both insurances when the last visit was billed differently). Pick the right Sohar payer once and it is remembered.</p><div class="needrows"></div></div>` : '')
       + (rest ? `<details class="more payerreview"${keepOpen ? ' open' : ''}><summary>Review auto-mapped payers (${rest})</summary>
-      <p class="hint">Matched confidently (Auto-High / Auto-Medium) and sent to verification. Optional: fix a wrong match and it is remembered.</p>
+      <p class="hint">Matched confidently (Auto-High / Auto-Medium) or learned from Sohar results (Learned) and sent to verification. Optional: fix a wrong match and it is remembered.</p>
       <div class="payerrows"></div></details>` : '');
     for (const it of items) {
       const list = box.querySelector(isLow(it) ? '.needrows' : '.payerrows');
       const h = it.h || {};
-      const label = it.h ? h.confidence : 'Not mapped';
-      const cls = it.conf === 'auto-high' ? 'ok' : it.conf === 'auto-medium' ? 'mid' : 'low';
+      const label = it.h ? (h.confidence || 'No confidence') : 'Not mapped';
+      const cls = it.conf === 'auto-high' || it.conf === 'learned' ? 'ok' : it.conf === 'auto-medium' ? 'mid' : 'low';
+      const latestNote = String(h.notes || '').split(' | ')[0].replace(/^Auto-matched by the add-in:\s*/, '');
+      const evidence = C.learningEvidence(it.lr);
+      const sg = it.lr && it.lr.suggestion;
       const wrap = document.createElement('div');
       wrap.className = 'payer';
-      wrap.innerHTML = `<div class="name">${esc(it.name)} <span class="n">(${it.n} patient${it.n > 1 ? 's' : ''})</span> <span class="conf ${cls}">${esc(label)}</span></div>
+      wrap.innerHTML = `<div class="name">${esc(it.name)} <span class="n">(${it.n ? `${it.n} patient${it.n > 1 ? 's' : ''}` : 'not in this report'})</span> <span class="conf ${cls}">${esc(label)}</span></div>
         <div class="guess">${h.payerId ? `→ ${esc(h.payerName || '')} <span class="id">${esc(h.payerId)}</span>` : '<span class="hint">No Sohar payer guessed</span>'}</div>
-        ${h.notes ? `<div class="hint ev">${esc(String(h.notes).replace(/^Auto-matched by the add-in:\s*/, ''))}</div>` : ''}
+        ${latestNote ? `<div class="hint ev">${esc(latestNote)}</div>` : ''}
+        ${evidence ? `<div class="hint ev">${esc(evidence)}</div>` : ''}
+        ${it.flagged ? `<p class="warn">${esc(it.lr.note)}</p>` : ''}
+        ${sg ? `<div class="alt-actions"><button class="small" data-act="suggest">Use ${esc(sg.payerName || sg.payerId)} <span class="id">${esc(sg.payerId)}</span></button> <span class="hint">${sg.n} of ${it.lr.discovery} discovery patients</span></div>` : ''}
         <div class="alt-actions">${h.payerId ? '<button class="link" data-act="ok">Looks right</button>' : ''}<button class="link" data-act="change">Change</button><button class="link" data-act="notpayer">Not a payer</button></div>
         <div class="pick" hidden><input type="search" placeholder="Search Sohar payers" aria-label="Search Sohar payers for ${esc(it.name)}"><div class="sugg"></div></div>`;
+      const use = wrap.querySelector('[data-act="suggest"]');
+      if (use) use.addEventListener('click', () => guard(async () => {
+        await writeMap([{ entry: { nextgenPayerName: it.name, payerId: sg.payerId, payerName: sg.payerName, confidence: 'Confirmed', notes: `Suggested by Sohar results (${sg.n} of ${it.lr.discovery} discovery patients), confirmed in the add-in` },
+          evidence: `${sg.n} of ${it.lr.discovery} discovery patients returned ${sg.payerName || sg.payerId}` }], 'Suggestion', true);
+        await afterMap();
+      }, 'payerList'));
       const pick = wrap.querySelector('.pick');
       const input = wrap.querySelector('input');
       const sugg = wrap.querySelector('.sugg');
@@ -334,7 +387,7 @@
           b.className = 'small';
           b.innerHTML = `<span>${esc(s.payerName)}</span><span class="id">${esc(s.payerId)}</span>`;
           b.addEventListener('click', () => guard(async () => {
-            await X.upsertPayerMap({ nextgenPayerName: it.name, payerId: s.payerId, payerName: s.payerName, confidence: 'Confirmed', notes: 'Mapped in the add-in' });
+            await writeMap([{ nextgenPayerName: it.name, payerId: s.payerId, payerName: s.payerName, confidence: 'Confirmed', notes: 'Mapped in the add-in' }], 'Pane', true);
             await afterMap();
           }, 'payerList'));
           sugg.appendChild(b);
@@ -343,12 +396,19 @@
       input.addEventListener('input', () => show(input.value));
       const ok = wrap.querySelector('[data-act="ok"]');
       if (ok) ok.addEventListener('click', () => guard(async () => {
-        await X.upsertPayerMap({ nextgenPayerName: it.name, payerId: h.payerId, payerName: h.payerName, confidence: 'Confirmed', notes: `Confirmed in the add-in (was ${h.confidence})` });
+        // A human label stays as it is (Exact stays Exact); anything else becomes Confirmed. With Sohar conflicts on
+        // record, the note marks them reviewed, so the flag stays quiet until more conflicts arrive (core.learnPayers).
+        const keep = HUMAN_LABELS.has(it.conf);
+        const conflicts = it.lr ? it.lr.conflicts : 0;
+        const ack = conflicts > 0 ? C.flagAckNote(conflicts, fmtStamp(new Date())) : '';
+        const what = keep ? `Checked in the add-in (${h.confidence})` : `Confirmed in the add-in (was ${h.confidence || 'blank'})`;
+        await writeMap([{ entry: { nextgenPayerName: it.name, payerId: h.payerId, payerName: h.payerName, confidence: keep ? h.confidence : 'Confirmed', notes: [ack, what].filter(Boolean).join('; ') },
+          evidence: ack ? `${ack}${it.lr.note ? `: ${it.lr.note}` : ''}` : what, always: !!ack }], 'Pane', true);
         await afterMap();
       }, 'payerList'));
       wrap.querySelector('[data-act="change"]').addEventListener('click', () => { pick.hidden = !pick.hidden; if (!pick.hidden) { show(''); input.focus(); } });
       wrap.querySelector('[data-act="notpayer"]').addEventListener('click', () => guard(async () => {
-        await X.upsertPayerMap({ nextgenPayerName: it.name, payerId: '', payerName: '', confidence: 'Not a payer', notes: 'Marked in the add-in' });
+        await writeMap([{ nextgenPayerName: it.name, payerId: '', payerName: '', confidence: 'Not a payer', notes: 'Marked in the add-in' }], 'Pane', true);
         await afterMap();
       }, 'payerList'));
       list.appendChild(wrap);
@@ -358,29 +418,97 @@
   // ---------- step 3 ----------
   async function build(opts) {
     busy('btnBuild', 'Building…');
+    // Payer Map Log rows collected during this build. They are saved at the end, or in the finally below if the build
+    // stops after the Payer Map was already written, so a change is never left to look like a "Sheet edit" later.
+    const logRows = [];
+    let logSaved = false;
+    const saveLog = async () => {
+      if (logSaved || !logRows.length) return '';
+      logSaved = true;
+      const hadPending = !!(state.pendingLog && state.pendingLog.length);
+      // appendPayerMapLog re-reads the log before saving, so a failed read earlier never overwrites it.
+      try {
+        await X.appendPayerMapLog(C.PAYER_MAP_LOG_COLS, logRows);
+        state.pendingLog = [];
+        if (hadPending) setStatus('Payer Map Log caught up: the pane change that could not be logged earlier is on it now.', 'ok');
+        return '';
+      } catch (e) {
+        console.error(e);
+        state.pendingLog = logRows.slice(); // tried again on the next build or pane change
+        return `Payer Map Log not updated: ${e.message}. The add-in tries again on the next build.`;
+      }
+    };
     try {
       state.cfg = await X.readConfig();
       state.cfg.scope = $('scope').value;
       state.cfg.asOf = $('asOf').value ? new Date($('asOf').value + 'T00:00:00Z') : null;
+      // Optional Config rows for payer learning, added once per session when missing (never changes existing rows).
+      if (!state.learnRowsChecked) {
+        state.learnRowsChecked = true;
+        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
+      }
+      const learn = state.cfg.learning || C.LEARN_DEFAULTS;
       state.payerMap = await X.readPayerMap();
       if (!state.soharPayers) state.soharPayers = await X.readSoharPayers();
-      let res = C.buildPatients(state.rows, { ...state.cfg, payerMap: state.payerMap, soharPayers: state.soharPayers });
+      const when = fmtStamp(new Date());
+      // Payer Map Log: pane changes whose log save failed come first (they explain the map), then edits made on the
+      // sheet since the last logged state (or a Baseline), before the add-in writes anything.
+      const pending = state.pendingLog || [];
+      logRows.push(...pending);
+      try { logRows.push(...C.sheetEditLog(state.payerMap, (await X.readPayerMapLog()).concat(pending), when)); } catch (e) { console.error(e); }
+      // The outcomes ledger feeds learning. Read once per pane session; processResults keeps state.outcomes current
+      // after each upload. If it cannot be read, nothing is learned this time (never a guess from nothing) and the
+      // next build tries again.
+      if (!state.outcomes) state.outcomes = await X.readPayerOutcomes().catch((e) => { console.error(e); return null; });
+      const outcomes = state.outcomes || [];
+      state.finClasses = learn.on ? C.learnFinClasses(outcomes, learn) : [];
+      const cfgFor = () => ({ ...state.cfg, payerMap: state.payerMap, soharPayers: state.soharPayers, learnedFinClasses: state.finClasses });
+      let res = C.buildPatients(state.rows, cfgFor());
       const out = $('buildResult'); out.hidden = false;
       if (res.error) { out.innerHTML = `<p class="bad">${esc(res.error)}</p>`; return; }
       // R2: new NextGen payer names are matched to Sohar payers automatically and saved on the Payer Map once
       // (editable there; a manual confidence always wins). Build again so the Fin Class index sees them too.
-      let autoNote = '';
+      let autoNote = '', rebuild = false;
       if (res.autoMapped && res.autoMapped.length) {
         const add = res.autoMapped.map(({ nextgenPayerName, payerId, payerName, confidence, notes }) => ({ nextgenPayerName, payerId, payerName, confidence, notes }));
         await X.upsertPayerMapMany(add);
+        logRows.push(...C.mapChangeLog(state.payerMap, res.autoMapped.map((a) => ({ entry: a, by: 'Auto-match', score: a.score,
+          evidence: `${String(a.notes).replace(/^Auto-matched by the add-in:\s*/, '')}; ${a.patients} patient${a.patients === 1 ? '' : 's'} in this report` })), when));
         state.payerMap = await X.readPayerMap();
-        res = C.buildPatients(state.rows, { ...state.cfg, payerMap: state.payerMap, soharPayers: state.soharPayers });
-        if (res.error) { out.innerHTML = `<p class="bad">${esc(res.error)}</p>`; return; }
+        rebuild = true;
         const lowN = add.filter((a) => a.confidence === 'Auto-Low').length;
         autoNote = `<p class="hint">${add.length} new insurance name${add.length === 1 ? ' was' : 's were'} matched to Sohar payers and added to the Payer Map${lowN ? ` (${lowN} low confidence)` : ''}. ${lowN ? ' The low-confidence ones are listed above for classification.' : ''}</p>`;
       }
+      // Payer learning: promote / demote the add-in's own labels from Sohar outcomes, then re-score Auto-Low rows.
+      // Human labels are never changed (Config: Learning, Learn: ...). Every change goes on the Payer Map Log.
+      const plan = C.planLearning(outcomes, state.payerMap, state.soharPayers, learn);
+      if (plan.changes.length) {
+        await X.upsertPayerMapMany(plan.changes.map((c) => c.entry));
+        logRows.push(...C.mapChangeLog(state.payerMap, plan.changes, when));
+        state.payerMap = await X.readPayerMap();
+        rebuild = true;
+      }
+      state.learning = plan.rollup;
+      if (rebuild) {
+        res = C.buildPatients(state.rows, cfgFor());
+        if (res.error) { out.innerHTML = `<p class="bad">${esc(res.error)}</p>`; return; }
+      }
+      const sheetWarn = [];
+      const logWarn = await saveLog();
+      if (logWarn) sheetWarn.push(logWarn);
+      await X.writePayerLearning(C.PAYER_LEARNING_COLS, C.payerLearningRows(state.learning)).catch((e) => { console.error(e); sheetWarn.push(`Payer Learning sheet not updated: ${e.message}`); });
+      const k = plan.counts;
+      const learnNote = outcomes.length || plan.changes.length
+        ? `<p class="hint">Learning: ${k.promoted} promoted, ${k.demoted} demoted, ${k.suggestions} suggestion${k.suggestions === 1 ? '' : 's'}, ${k.rescored} re-scored${k.flagged ? `; Sohar disagrees with ${k.flagged} human-labeled payer${k.flagged === 1 ? '' : 's'} (Review sheet)` : ''}${state.finClasses.length ? `; ${state.finClasses.length} Fin Class${state.finClasses.length === 1 ? '' : 'es'} learned` : ''}.${learn.on ? '' : ' Learning is Off in Config: outcomes are recorded, nothing changes automatically.'} See the Payer Learning sheet.</p>`
+        : '';
+      // Re-verify skip window: patients whose same insurance Sohar verified eligible recently leave the verification file.
+      const sk = await applySkips(res, cfgFor);
+      res.patients = sk.patients;
+      if (sk.warn) sheetWarn.push(sk.warn);
+      const nSkip = state.skipped.length;
+      const skipNote = nSkip ? `<p class="hint">${nSkip} skipped: verified within ${sk.days} days (listed in step 2).</p>` : '';
       renderPayers();
-      state.patients = res.patients; state.review = res.review;
+      state.patients = res.patients; state.review = res.review.concat(C.learningReviewRows(state.learning));
       state.exports = C.buildExports(res.patients, state.cfg);
       await X.replaceTable(X.TABLES.patients, C.PATIENT_COLS, res.patients);
       // The Review sheet is written by refreshRules (build review + clinic rule flags).
@@ -399,7 +527,7 @@
           <div class="count d"><div class="n">${s.discovery}</div><div class="l">discovery<br>(insurance missing or unmapped)</div></div>
           <div class="count x"><div class="n">${s.exclude || 0}</div><div class="l">left out</div></div>
         </div>
-        <p class="issues" id="buildIssues"></p>${autoNote}`;
+        <p class="issues" id="buildIssues"></p>${skipNote}${autoNote}${learnNote}${sheetWarn.map((w) => `<p class="warn">${esc(w)}</p>`).join('')}`;
       // widths set through the CSSOM so the strict style-src policy holds
       const bar = out.querySelector('.routebar');
       for (const [cls, n] of [['v', s.verification], ['d', s.discovery], ['x', s.exclude || 0]]) {
@@ -412,15 +540,75 @@
       $('btnDlVer').disabled = !nv; $('btnDlDisc').disabled = !nd;
       $('fnVer').textContent = `${nvp} patient${nvp === 1 ? '' : 's'}${nv > nvp ? ` (${nv} rows: ${nv - nvp} with two insurances)` : ''} · ${C.fileName('verification')}`;
       $('fnDisc').textContent = `${nd} patient${nd === 1 ? '' : 's'} · ${C.fileName('discovery')}`;
+      renderSkipped(sk.days);
       if (!(opts && opts.deferRules)) await refreshRules();
-    } finally { unbusy('btnBuild', 'Rebuild with these options'); }
+    } finally {
+      // The build stopped early (an error or an early return): log the Payer Map changes it already made.
+      if (!logSaved && logRows.length) {
+        const w = await saveLog();
+        if (w) setStatus(w, 'warn');
+      }
+      unbusy('btnBuild', 'Rebuild with these options');
+    }
+  }
+
+  /**
+   * Re-verify skip window (Config: Skip recent verifications, Re-verify days, Re-verify in new month; core.applyReverifySkips).
+   * The history is the saved Sohar uploads matched again (Per Nbr, Sohar ref or Member ID; never a name match).
+   * "Re-verify anyway" requests are dropped once a newer verification exists. If the uploads, refs or requests cannot
+   * be read, nobody is skipped this time: a patient is never left out on a guess.
+   */
+  async function applySkips(res, cfgFor) {
+    const rc = (state.cfg && state.cfg.reverify) || C.REVERIFY_DEFAULTS;
+    state.skipped = [];
+    const none = (warn) => ({ patients: res.patients, days: rc.days, warn });
+    if (!rc.skip) return none('');
+    let saved, refs, requests;
+    try {
+      saved = await X.readUploads();
+      refs = await X.readSoharRefs();
+      requests = await X.readReverifyRequests();
+    } catch (e) { console.error(e); return none(`Recent verifications not checked, so nobody was skipped: ${e.message}`); }
+    if (!saved.length) return none('');
+    const acc = C.accumulateResults(saved, [], '', refs);
+    const merged = C.mergeSoharResults(state.rows, acc.files, { ...cfgFor(), refs });
+    if (merged.error) return none('');
+    const pr = C.pruneReverifyRequests(requests, merged.results);
+    if (pr.dropped) await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, pr.rows).catch((e) => console.warn('Re-verify Requests not pruned', e));
+    const out = C.applyReverifySkips(res.patients, merged.results, { ...rc, today: new Date(), requests: pr.active });
+    state.skipped = out.skipped;
+    return { patients: out.patients, days: rc.days, warn: '' };
+  }
+
+  /** Step 2: patients left out of the verification file because Sohar verified them eligible recently. */
+  function renderSkipped(days) {
+    const box = $('skipBox');
+    if (!box) return;
+    const list = state.skipped || [];
+    box.hidden = !list.length;
+    if (!list.length) { box.innerHTML = ''; return; }
+    const short = (d) => esc(String(d || '').slice(0, 5));
+    box.innerHTML = `<p><b>Skipped (verified recently): ${list.length}</b>. Sohar verified the same insurance eligible within ${esc(days)} days, so ${list.length === 1 ? 'this patient is' : 'these patients are'} not on the verification file. They stay on the Patients sheet.</p>
+      <table class="watch"><thead><tr><th>Patient</th><th>Verified</th><th>Next check</th><th></th></tr></thead><tbody>${list.map((s) => `<tr>
+        <td><b>${esc(C.lasfir(s.last, s.first))}</b><br><span class="hint">Per ${esc(s.per)}${s.partial ? ' · other insurance still sent' : ''}</span></td>
+        <td title="${esc(s.verified)}">${short(s.verified)}</td><td title="${esc(s.due)}">${short(s.due)}</td>
+        <td><button class="link" data-reverify="${esc(s.per)}">Re-verify anyway</button></td></tr>`).join('')}</tbody></table>`;
+  }
+
+  /** Put a skipped patient back on the verification file until a newer Sohar verification comes back. */
+  async function reverifyAnyway(per) {
+    const s = (state.skipped || []).find((x) => x.per === per);
+    await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, C.addReverifyRequest(await X.readReverifyRequests(), per, new Date().toISOString()));
+    await build();
+    const who = s ? C.lasfir(s.last, s.first) : '';
+    note('preflight', `${who ? `${who} · ` : ''}Per ${per} is back on the verification file. Save it again before uploading to Sohar.`, 'ok');
   }
 
   // ---------- clinic rules (R5-R10): flags, Review sheet, payer evidence, clinic view ----------
   const inScopePatients = () => (state.patients || []).filter((p) => p['In Scope'] === 'Yes');
   function rulesCfg() {
     const c = state.cfg || {};
-    return { today: new Date(), sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? c.reverifyDays : 7 };
+    return { today: new Date(), sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? c.reverifyDays : 7, reverifyNewMonth: !!(c.reverify && c.reverify.newMonth) };
   }
   function computeFlags() {
     state.flags = state.patients ? R.allFlags(inScopePatients(), state.results || [], rulesCfg()) : new Map();
@@ -443,7 +631,8 @@
     computeFlags();
     const pts = inScopePatients();
     const flagRows = R.reviewRows(state.flags, pts);
-    const review = (state.review || []).concat(flagRows);
+    // One High row for Sohar results with no patient identifiers (no NextGen task each).
+    const review = (state.review || []).concat(C.noIdentifierReviewRows(state.results || []), flagRows);
     await X.replaceTable(X.TABLES.review, C.REVIEW_COLS, review);
     const sev = { High: 0, Medium: 0, Low: 0 };
     for (const r of review) sev[r.Severity] = (sev[r.Severity] || 0) + 1;
@@ -719,6 +908,18 @@
     ol.replaceWith(d); d.appendChild(ol);
   }
 
+  /**
+   * Learned Fin Classes for the merge: the ones the last build used (they made the imports), else (no build yet this
+   * session) learned from the ledger now, none when Learning is Off.
+   */
+  async function learnedFinClassesFor(cfg) {
+    if (state.finClasses) return state.finClasses;
+    const learn = (cfg && cfg.learning) || C.LEARN_DEFAULTS;
+    if (!learn.on) return [];
+    if (!state.outcomes) state.outcomes = await X.readPayerOutcomes().catch((e) => { console.error(e); return null; });
+    return C.learnFinClasses(state.outcomes || [], learn);
+  }
+
   /** Match Sohar files to the Import report, write Sohar Results + NextGen Tasks, return a summary (HTML). Shared by pane and full screen. */
   async function processResults(list, onStep) {
     const step = (m) => { progress(m); if (onStep) onStep(m); };
@@ -729,21 +930,40 @@
     }
     // New files are added to the results saved in the workbook, so the verification of discovery patients
     // can be uploaded on its own later without losing the first round.
-    const acc = C.accumulateResults(await X.readUploads(), list, new Date().toISOString());
-    if (list.length && !acc.added && !acc.replaced) throw new Error(`None of these files look like a Sohar verification or discovery output${acc.unknownFiles.length ? ` (${acc.unknownFiles.join(', ')})` : ''}.`);
-    if (!acc.files.length) return '';
-    if (list.length) {
-      step(`${acc.added} new result${acc.added === 1 ? '' : 's'}${acc.replaced ? `, ${acc.replaced} replaced` : ''}; ${acc.saved.length} saved in this workbook.`);
-      await X.writeUploads(C.UPLOAD_COLS, acc.saved);
-    }
+    // Sohar ref memory: a re-export with blank identifiers keys and matches like the record its ref was first seen on.
+    // A read error means no refs this time (and none saved), never an overwrite.
+    let refs = null;
+    try { refs = await X.readSoharRefs(); } catch (e) { console.error(e); note('resultsResult', `Sohar Refs not read (rows with blank identifiers may not match this time): ${e.message}`, 'warn'); }
+    const saved = await X.readUploads();
+    const first = C.accumulateResults(saved, list, '', refs || []);
+    if (list.length && !first.added && !first.replaced) throw new Error(`None of these files look like a Sohar verification or discovery output${first.unknownFiles.length ? ` (${first.unknownFiles.join(', ')})` : ''}.`);
+    if (!first.files.length) return '';
     step('Reading the appointment report on the Import sheet…');
     state.rows = await X.readImportRows();
     const cfg = await X.readConfig();
     if ($('asOf').value) cfg.asOf = new Date($('asOf').value + 'T00:00:00Z');
     if (!state.soharPayers) state.soharPayers = await X.readSoharPayers();
-    const res = C.mergeSoharResults(state.rows, acc.files, { ...cfg, payerMap: await X.readPayerMap(), soharPayers: state.soharPayers });
+    // Same learned Fin Classes as the build that made the imports, so a patient sent to verification through a learned
+    // Fin Class matches its last-encounter row here (and its outcome is recorded against that Fin Class).
+    // combineResults matches again when a blank re-export's ref is only learned in this pass, and records the payerId
+    // sent on this upload's verification records (Sohar exports have none) for the skip window.
+    const cr = C.combineResults(state.rows, saved, list, new Date().toISOString(), refs || [], { ...cfg, payerMap: await X.readPayerMap(), soharPayers: state.soharPayers, learnedFinClasses: await learnedFinClassesFor(cfg) });
+    const { acc, res } = cr;
+    if (list.length) {
+      step(`${acc.added} new result${acc.added === 1 ? '' : 's'}${acc.replaced ? `, ${acc.replaced} replaced` : ''}; ${acc.saved.length} saved in this workbook.`);
+      await X.writeUploads(C.UPLOAD_COLS, cr.saved); // saved even when the report is missing: it matches once it is back
+    }
     if (res.error) throw new Error(res.error);
-    step(`Matched ${res.counts.matched} results to patients (${res.counts.unmatched} unmatched)${res.counts.twoInsurances ? `; ${res.counts.twoInsurances} patient${res.counts.twoInsurances === 1 ? '' : 's'} had two insurances checked` : ''}. Writing the Sohar Results sheet…`);
+    const learnedRefs = cr.refs;
+    const noIds = res.counts.noIdentifiers || 0;
+    step(`Matched ${res.counts.matched} results to patients (${res.counts.unmatched} unmatched${noIds ? `, ${noIds} with no patient identifiers` : ''})${res.counts.twoInsurances ? `; ${res.counts.twoInsurances} patient${res.counts.twoInsurances === 1 ? '' : 's'} had two insurances checked` : ''}. Writing the Sohar Results sheet…`);
+    // Remember the refs of records matched by Per Nbr or Member ID (append-only; "Clear saved Sohar results" keeps them).
+    if (refs && learnedRefs.length) {
+      try {
+        const kept = C.appendRefs(refs, learnedRefs, fmtStamp(new Date()));
+        if (kept.added) await X.writeSoharRefs(C.SOHAR_REF_COLS, kept.rows);
+      } catch (e) { console.error(e); note('resultsResult', `Sohar Refs not updated: ${e.message}`, 'warn'); }
+    }
     // Flags need the new results (re-verify, Medi-Cal from Sohar); the Results sheet gets a Pills column after RESULTS_COLS.
     state.results = res.results;
     computeFlags();
@@ -761,6 +981,21 @@
     const vf = res.verificationDiscovery.map((r) => (r.zipCode ? r : { ...r, zipCode: zips.get(String(r.id)) || '' }));
     await X.writeVerifyFailed(C.DISCOVERY_COLS, vf);
     state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv; state.verifyFailed = vf;
+    // Payer outcomes ledger (hidden Payer Outcomes sheet): every Sohar outcome, append-only, for payer learning.
+    // "Clear saved Sohar results" does not touch it. A read error skips the update, so the ledger is never overwritten.
+    let newOutcomes = 0;
+    try {
+      const ledger = C.appendOutcomes(await X.readPayerOutcomes(), C.payerOutcomes(res.results, res.patients, fmtStamp(new Date())));
+      if (ledger.added) {
+        await X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, ledger.rows);
+        step(`${ledger.added} new Sohar outcome${ledger.added === 1 ? '' : 's'} recorded for payer learning.`);
+      }
+      newOutcomes = ledger.added;
+      state.outcomes = ledger.rows;
+    } catch (e) { console.error(e); note('resultsResult', `Payer Outcomes not updated (payer learning waits for the next upload): ${e.message}`, 'warn'); }
+    // New outcomes can promote, demote or suggest payers: rebuild so the Payer Map, Patients and imports follow.
+    // (The Sohar Results sheet picks up a changed mapping on the next refresh.)
+    if (newOutcomes && state.patients) await build({ deferRules: true });
     for (const id of ['btnDlWork', 'btnDlBen', 'btnDlTasks']) $(id).disabled = false;
     $('fixActions').hidden = false;
     markDone(3); setCurrent(4);
@@ -793,6 +1028,7 @@
           <div class="count clr"><div class="n">${q.Clear || 0}</div><div class="l">clear</div></div>
         </div>
         ${open ? `<p><b>${open} NextGen fix${open === 1 ? '' : 'es'}</b> to make before visits (NextGen Tasks sheet).</p>` : ''}
+        ${noIds ? `<p class="warn"><b>${noIds} Sohar result${noIds === 1 ? ' has' : 's have'} no patient identifiers</b> (no id, member ID or name): likely an export anomaly or a check run outside the batch. Open the Sohar link on those rows (Match = No identifiers); one item is on the Review sheet.</p>` : ''}
         ${acc.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar output): ${acc.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
     await renderBenefits(res.results, cfg, kinds);
     if (list.length) {
@@ -889,7 +1125,7 @@
     clearArmed = 0;
     await X.writeUploads(C.UPLOAD_COLS, []);
     $('btnClearSaved').textContent = 'Clear saved Sohar results';
-    note('resultsResult', 'Saved Sohar results cleared. The next upload starts fresh; the sheets stay as they are until then.', 'ok');
+    note('resultsResult', 'Saved Sohar results cleared. The next upload starts fresh; the sheets stay as they are until then. The payer outcomes ledger (payer learning) and the Sohar ref memory are kept.', 'ok');
   }
 
   // ---------- step 6: IR Portal cross-check ----------
@@ -976,7 +1212,7 @@
   async function payload(focus) {
     return {
       // x (patient extras) stays in the pane; the window gets the Pills column instead.
-      type: 'data', focus: focus || '', web: isWeb(), results: ((await currentResults()) || []).map(({ x, ...r }) => r), tasks: await currentTasks(), ir: await currentIr(),
+      type: 'data', focus: focus || '', web: isWeb(), results: ((await currentResults()) || []).map(({ x, resultKey, chooseGuess, ...r }) => r), tasks: await currentTasks(), ir: await currentIr(),
       exports: state.exports || null, discoveryVerify: await currentDiscoveryVerify(), verifyFailed: await currentVerifyFailed(), scope: state.cfg ? state.cfg.scope : 'upcoming',
       asOf: state.resultsAsOf ? state.resultsAsOf.toISOString() : null,
     };
@@ -1268,6 +1504,23 @@
       ver(200107, 'Carelon Behavioral Health', 'CBH200107', 'error.member.id', '', '', '', '', '', '', -1, ''),
       { requestid: 'disc-200103', id: '200103', responsepayerid: '95567', responsepayername: 'Health Net', created: iso(-2) },
     ].map((rec) => { const kind = rec.responsepayerid ? 'discovery' : 'verification'; return { Kind: kind, Key: C.resultKey(kind, rec), File: 'demo', Uploaded: iso(-1), Record: JSON.stringify(rec) }; });
+    // Synthetic payer-learning history (made-up Per Nbrs, earlier weeks): discovery keeps agreeing with the Partnership guess
+    // (promoted to Learned), keeps finding Senior Advantage for "Kaiser Medicare Northern CA" (a suggestion), and two
+    // Blue Card verifications came back eligible (evidence only).
+    const past = (per, kind, payer, sent, ret, retName, signal, off) => ({ Key: `demo|${per}|${payer}`, 'Per Nbr': per, Kind: kind, 'NextGen Payer': payer, 'Fin Class': '',
+      Source: kind === 'Discovery' ? 'discovery' : 'chart', 'Sent payerId': sent, 'Sent Confidence': '', 'Sohar Status': kind === 'Discovery' ? 'Coverage found' : 'complete.eligible',
+      'Returned payerId': ret, 'Returned Payer': retName, Signal: signal, 'Sohar Date': iso(off), Recorded: 'demo' });
+    let outcomes = /fresh/.test(location.search) ? [] : [
+      past('290001', 'Discovery', 'Partnership HealthPlan Medi-Cal', 'PHPCA', 'PHPCA', 'Partnership HealthPlan of California', 'agree', -40),
+      past('290002', 'Discovery', 'Partnership HealthPlan Medi-Cal', 'PHPCA', 'PHPCA', 'Partnership HealthPlan of California', 'agree', -33),
+      past('290003', 'Discovery', 'Partnership HealthPlan Medi-Cal', 'PHPCA', 'PHPCA', 'Partnership HealthPlan of California', 'agree', -26),
+      past('290004', 'Discovery', 'Kaiser Medicare Northern CA', '94135', 'KPSA1', 'Kaiser Permanente Senior Advantage', 'other payer', -40),
+      past('290005', 'Discovery', 'Kaiser Medicare Northern CA', '94135', 'KPSA1', 'Kaiser Permanente Senior Advantage', 'other payer', -33),
+      past('290006', 'Discovery', 'Kaiser Medicare Northern CA', '94135', 'KPSA1', 'Kaiser Permanente Senior Advantage', 'other payer', -26),
+      past('290007', 'Verification', 'Blue Shield CA Blue Card', '94036', '', 'Blue Shield of California', 'agree', -30),
+      past('290008', 'Verification', 'Blue Shield CA Blue Card', '94036', '', 'Blue Shield of California', 'agree', -23),
+    ];
+    let mapLog = [], soharRefs = [], reverifyRequests = [];
     return {
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
@@ -1276,11 +1529,25 @@
       async readXlsxRows() { throw new Error('Demo mode reads .csv only. Inside Excel, .xlsx works too.'); },
       async writeResults() {}, async writeTasks() {}, async writeBenefits() {}, async readTasks() { return []; }, async readUploads() { return demoUploads; }, async readIrUploads() { return []; }, async writeIrUploads() {}, async writeUploads() {}, async readDiscoveryVerify() { return []; }, async writeDiscoveryVerify() {}, async readVerifyFailed() { return []; }, async writeVerifyFailed() {}, async tableRowCount() { return 0; }, async setTaskDone() {}, async writeIr() {}, async readIr() { return []; }, async writeExport(c, r) { return r.length; },
       async readPayerEvidence() { return []; }, async writePayerEvidence() {}, async tableExists() { return false; }, async readClinicFile() { return null; },
-      async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, clinicLocation: '' }; },
+      // Payer learning: the ledger and the log live in memory; the ledger starts with a few synthetic outcomes (below).
+      async readPayerOutcomes() { return outcomes; }, async writePayerOutcomes(c, r) { outcomes = r; },
+      async readPayerMapLog() { return mapLog; }, async writePayerMapLog(c, r) { mapLog = r; },
+      async appendPayerMapLog(c, r) { mapLog = mapLog.concat(r || []); return (r || []).length; },
+      async writePayerLearning() {}, async ensureConfigRows() { return []; },
+      // Sohar ref memory and Re-verify anyway requests, in memory.
+      async readSoharRefs() { return soharRefs; }, async writeSoharRefs(c, r) { soharRefs = r; },
+      async readReverifyRequests() { return reverifyRequests; }, async writeReverifyRequests(c, r) { reverifyRequests = r; },
+      async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', learning: C.learningConfig({}) }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },
-      async upsertPayerMap(e) { return this.upsertPayerMapMany([e]); },
-      async upsertPayerMapMany(list) { for (const e of list) payerMap = payerMap.filter((m) => m.nextgenPayerName.toLowerCase() !== e.nextgenPayerName.toLowerCase()).concat([e]); return list.length; },
+      async upsertPayerMap(e, o) { return this.upsertPayerMapMany([e], o); },
+      async upsertPayerMapMany(list) {
+        for (const e of list) {
+          const prev = payerMap.find((m) => m.nextgenPayerName.toLowerCase() === e.nextgenPayerName.toLowerCase());
+          payerMap = payerMap.filter((m) => m !== prev).concat([{ ...e, notes: C.mergeNotes(e.notes, prev && prev.notes) }]);
+        }
+        return list.length;
+      },
       async replaceTable() {}, async setConfigValue() {}, async activate() {}, async templateCheck() { return []; }, async recoverAll() { return []; }, takeRecovered() { return []; },
     };
   }
