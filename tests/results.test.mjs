@@ -84,7 +84,7 @@ test('verification output matches on id and carries in-network tier-one benefits
   const res = merged();
   assert.equal(res.error, undefined);
   assert.deepEqual(res.unknownFiles, ['junk.csv']);
-  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
+  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
   assert.ok(res.results.find((r) => r['Per Nbr'] === '100').x.appointments.length, 'non-column x carries the patient extras');
   const by = (per, sent) => res.results.find((r) => r['Per Nbr'] === per && r['Sent As'] === sent);
 

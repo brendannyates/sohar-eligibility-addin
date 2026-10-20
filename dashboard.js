@@ -6,6 +6,10 @@
   const $ = (id) => document.getElementById(id);
   let rows = [], tasks = [], irRows = [], exportsData = null, discVerify = [], verFailed = [], scope = 'upcoming', asOf = null, list = [], tab = 'prep';
   let inOffice = false, web = false;
+  // Fee estimates (v0.11, a test): null unless the pane sends them (Config "Fee estimates" On). estOver: the open
+  // estimate panel's codes and toggles.
+  const F = window.SoharFees;
+  let fees = null, estOver = null;
   const take = C.messageAssembler();
   // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
   const PILL_COLOR = new Map(((window.SoharRules && window.SoharRules.PILLS) || []).map((p) => [p.label, p.color]));
@@ -33,6 +37,7 @@
       if (m.notice) notice(m.notice.text, m.notice.ok);
       if (m.focus) showTab(m.focus === 'exports' ? 'upload' : m.focus);
     } else if (m.type === 'notice') { notice(m.text, m.ok); $('upState').textContent = ''; }
+    else if (m.type === 'fee-update') { fees = m.fees || null; renderFeeBar(); renderBenefits(); refreshEstimate(); }
   }
   function toPane(obj) {
     if (!inOffice) { notice('Demo mode: nothing is sent to Excel.', false); return; }
@@ -42,6 +47,8 @@
   function load(m) {
     rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; verFailed = m.verifyFailed || []; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
+    fees = F && m.fees && m.fees.on ? m.fees : null;
+    renderFeeBar();
     $('dStatus').textContent = rows.length
       ? `${rows.length} Sohar results, ${tasks.filter(open).length} open NextGen tasks${asOf ? `, appointments from ${C.fmtDate(asOf)}` : ''}.`
       : 'No Sohar results yet. Upload the verification and discovery outputs on the Upload & save tab.';
@@ -122,7 +129,7 @@
       ${cell([r['Sohar Payer'], r.Plan].filter(Boolean).join(' · '), 'mid')}${cell(r.Copay === '' ? '' : usd(r.Copay))}${cell(r.Coinsurance)}
       ${progressCell(r['OOP Met'], r['OOP Max'], r['OOP % Met'], r['OOP Status'])}${cell(r['OOP Remaining'] === '' ? '' : usd(r['OOP Remaining']))}
       ${progressCell(r['Deductible Met'], r.Deductible, r['Deductible % Met'], r['Deductible Status'])}${cell(r['Deductible Remaining'] === '' ? '' : usd(r['Deductible Remaining']))}
-      ${r.Flag ? cell(r.Flag, r.Flag === 'OOP max met' ? 'flag met' : r.Flag.startsWith('OOP') ? 'flag' : '') : r['OOP Max'] === '' && r.Deductible === '' ? '<td class="hint">No amounts from Sohar</td>' : cell('')}</tr>`).join('') || `<tr><td colspan="13" class="hint">${all.length ? 'No one matches these filters.' : 'No verified benefits yet. Benefits come from Sohar\'s verification output; discovery alone has none.'}</td></tr>`;
+      ${r.Flag ? cell(r.Flag, r.Flag === 'OOP max met' ? 'flag met' : r.Flag.startsWith('OOP') ? 'flag' : '') : r['OOP Max'] === '' && r.Deductible === '' ? '<td class="hint">No amounts from Sohar</td>' : cell('')}${fees ? estCells(r['Per Nbr']) : ''}</tr>`).join('') || `<tr><td colspan="${fees ? 15 : 13}" class="hint">${all.length ? 'No one matches these filters.' : 'No verified benefits yet. Benefits come from Sohar\'s verification output; discovery alone has none.'}</td></tr>`;
     tb.querySelectorAll('.meter').forEach((m) => { m.firstElementChild.style.width = `${Math.round(Math.min(1, +m.dataset.pct) * 100)}%`; });
   }
 
@@ -206,14 +213,121 @@
         ${grp('Benefits (in-network)', ['Benefit Flag', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status', 'Coverage Level'])}
         ${grp('Coverage', ['Sent As', 'Sohar Status', 'Action', 'Choose in NextGen', 'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Plan', 'Network', 'Coverage Start', 'Coverage End', 'Match', 'Sohar Date', 'Sohar Link'])}
         ${others.map((o) => grp(`Also: ${esc(o['Sent As'])} result`, ['Sohar Status', 'Action', 'Sohar Payer', 'Benefit Flag', 'Sohar Date'], o)).join('')}
+        ${fees ? `<div class="dgroup est" id="estPanel" data-per="${esc(r['Per Nbr'])}"></div>` : ''}
       </div>`;
     box.hidden = false;
+    if (fees) renderEstimatePanel(r['Per Nbr']);
     $('btnHide').addEventListener('click', hideDetail);
     if (!$('detailBackdrop')){ const bd = document.createElement('div'); bd.className = 'backdrop'; bd.id = 'detailBackdrop'; bd.addEventListener('click', hideDetail); document.body.append(bd); }
     $('btnHide').focus();
   }
   // the detail card floats over the dashboard; everything behind it is blurred
-  function hideDetail() { $('detail').hidden = true; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
+  function hideDetail() { $('detail').hidden = true; estOver = null; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
+
+  // ---------- fee estimates (v0.11, a test; only when the pane sends fee data) ----------
+  const money2 = (n) => (n == null ? '—' : F.usd(n));
+  function renderFeeBar() {
+    const bar = $('feeBar');
+    document.querySelectorAll('.feecol').forEach((th) => { th.hidden = !fees; });
+    bar.hidden = !fees;
+    if (!fees) return;
+    const st = fees.status || {};
+    $('feeState').innerHTML = `${esc(st.text || 'No fee schedule uploaded yet.')}${st.warn ? ` <b class="warn-text">${esc(st.warn)}</b>` : ''}`;
+  }
+  /** Default estimate (codes and toggles as saved) for the Benefits table. */
+  function estimateFor(per, over) {
+    const ctx = fees && fees.contexts ? fees.contexts[per] : null;
+    return ctx ? { ctx, e: F.estimatePatient(ctx, fees.tables, over || null) } : null;
+  }
+  function estCells(per) {
+    const x = estimateFor(per);
+    if (!x) return '<td class="hint">—</td><td class="hint">—</td>';
+    const { e } = x;
+    if (!e.md && !e.np) return `<td class="hint" colspan="2" title="${esc(e.flags.join('; '))}">${esc(e.flags[0] || 'No estimate')}</td>`;
+    const cell = (est) => { const p = F.partialNote(est); return `<td${p ? ` title="${esc(p)}"` : ''}>${esc(money2(est && est.patient))}${p ? ` <span class="hint">${esc(p)}</span>` : ''}</td>`; };
+    return `${cell(e.md)}${cell(e.np)}`;
+  }
+  /** The estimate panel in the patient card: code + units editors, the three toggles, MD and NP math. */
+  function renderEstimatePanel(per) {
+    const box = $('estPanel');
+    if (!box) return;
+    const x = estimateFor(per);
+    if (!x) {
+      box.innerHTML = `<h3>Estimate</h3><p class="hint">${fees.status && fees.status.loaded ? 'No estimate: no verification with benefits for this patient.' : 'Upload the fee schedule on the Benefits tab first.'}</p>`;
+      return;
+    }
+    const { ctx } = x;
+    if (!estOver || estOver.per !== per) estOver = { per, codes: (ctx.codes || []).map((c) => ({ ...c })), toggles: { ...ctx.defaults } };
+    const T = fees.toggles || F.TOGGLES;
+    const sel = (kind, label) => `<label>${label}<select data-etoggle="${kind}">${T[kind].map((o) => `<option${estOver.toggles[kind] === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select></label>`;
+    box.innerHTML = `<h3>Estimate, not a guarantee <span class="hint">next visit${ctx.appt ? ` ${esc(ctx.appt)}` : ''}${ctx.event ? ` · ${esc(ctx.event)}` : ''}</span></h3>
+      <p class="hint">${esc([ctx.telehealth ? `Telehealth: home clinic ${ctx.home || 'unknown'}` : ctx.location, ctx.payer ? `${ctx.payer} (${ctx.payerSource})` : '', ctx.codeKeyword ? `codes from "${ctx.codeKeyword}"${ctx.codeNote ? `: ${ctx.codeNote}` : ''}` : ''].filter(Boolean).join(' · '))}</p>
+      <div class="estcodes">${estOver.codes.map((c, i) => `<span class="estcode"><input data-ecode="${i}" value="${esc(c.code)}" aria-label="Code ${i + 1}" maxlength="8"> x <input data-eunits="${i}" type="number" min="1" step="1" value="${esc(c.units)}" aria-label="Units for code ${i + 1}"> <button class="link" data-edel="${i}" aria-label="Remove code ${i + 1}">Remove</button></span>`).join('')}
+        <button class="small" data-eadd="1">Add code</button> <button class="link" data-ereset="1">Reset</button></div>
+      <div class="filters esttoggles">${sel('deductible', 'Deductible')}${sel('coinsurance', 'Coinsurance')}${sel('copay', 'Copay')}</div>
+      <p class="hint">${ctx.feePayer ? `Toggle changes are remembered for ${esc(ctx.feePayer)} (Estimate Defaults sheet).` : 'Toggle changes are for this estimate only: no fee payer column is mapped for this patient, so they are not remembered.'} Code changes are for this estimate only.</p>
+      <div id="estResults"></div>`;
+    renderEstimateResults();
+  }
+  function renderEstimateResults() {
+    const out = $('estResults');
+    if (!out || !estOver) return;
+    const x = estimateFor(estOver.per, { codes: estOver.codes.filter((c) => c.code), toggles: estOver.toggles });
+    if (!x) { out.innerHTML = ''; return; }
+    const { ctx, e } = x;
+    const col = (lbl, est) => `<div class="estcol"><h4>${lbl}: ${esc(est && est.patient != null ? F.usd(est.patient) : '—')}</h4>${est && est.none ? `<p class="hint">${esc(est.none)}</p>` : est ? `<ul class="estlines">${F.estimateText(est).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}</div>`;
+    out.innerHTML = `${e.flags.length ? `<ul class="pc-items">${e.flags.map((f) => `<li class="sev-medium">${esc(f)}</li>`).join('')}</ul>` : ''}
+      ${e.basis ? `<p class="hint">${esc(e.basis)}${ctx.oon ? ' (out of network)' : ''}</p>` : ''}
+      ${e.md || e.np ? `<div class="estcols">${col('MD', e.md)}${col('NP', e.np)}</div>` : ''}`;
+  }
+  function refreshEstimate() {
+    const p = $('estPanel');
+    if (!p || $('detail').hidden) return;
+    if (!fees) { p.remove(); return; }
+    // New fee data (an upload or saved defaults): toggles follow the saved defaults, codes typed here are kept.
+    const keep = estOver && estOver.per === p.dataset.per ? estOver.codes : null;
+    estOver = null;
+    renderEstimatePanel(p.dataset.per);
+    if (keep && estOver) { estOver.codes = keep; renderEstimatePanel(p.dataset.per); }
+  }
+  $('detail').addEventListener('input', (e) => {
+    const c = e.target.closest('[data-ecode],[data-eunits]');
+    if (!c || !estOver) return;
+    const i = +(c.dataset.ecode ?? c.dataset.eunits);
+    if (!estOver.codes[i]) return;
+    if (c.dataset.ecode != null) estOver.codes[i].code = c.value.trim().toUpperCase();
+    else estOver.codes[i].units = Math.max(1, Number(c.value) || 1);
+    renderEstimateResults();
+  });
+  $('detail').addEventListener('change', (e) => {
+    const s = e.target.closest('[data-etoggle]');
+    if (!s || !estOver) return;
+    estOver.toggles[s.dataset.etoggle] = s.value;
+    renderEstimateResults();
+    const x = estimateFor(estOver.per);
+    // Only the toggle staff changed is remembered; the others shown here may be this patient's defaults (e.g. copay
+    // None for a $0 copay) and must not be saved for every patient on the fee payer.
+    if (x && x.ctx.feePayer) toPane({ type: 'fee-defaults', feePayer: x.ctx.feePayer, toggles: { [s.dataset.etoggle]: s.value } });
+  });
+  $('detail').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-eadd],[data-edel],[data-ereset]');
+    if (!b || !estOver) return;
+    const per = estOver.per;
+    if (b.dataset.eadd) estOver.codes.push({ code: '', units: 1 });
+    else if (b.dataset.edel != null) estOver.codes.splice(+b.dataset.edel, 1);
+    else estOver = null;
+    renderEstimatePanel(per);
+  });
+  async function uploadFee(files) {
+    const f = files && files[0];
+    if (!f) return;
+    if (!/\.xls[xm]$/i.test(f.name)) { notice(`${f.name} is not an .xlsx file. The fee schedule must be the Excel workbook.`, false); return; }
+    try {
+      const [file] = await readFiles([f]);
+      $('feeState').textContent = `Sending ${f.name} to Excel…`;
+      toPane({ type: 'fee-upload', name: file.name, base64: file.base64 });
+    } catch (e) { notice(e.message, false); }
+  }
 
   function queueClass(q) { return { 'Action needed': 'act', Unmatched: 'unm', Pending: 'pen', Clear: 'clr' }[q] || ''; }
 
@@ -343,6 +457,8 @@
   $('drop').addEventListener('dragleave', () => $('drop').classList.remove('over'));
   $('drop').addEventListener('drop', (e) => { e.preventDefault(); $('drop').classList.remove('over'); upload(e.dataTransfer.files); });
   document.querySelectorAll('[data-save]').forEach((b) => b.addEventListener('click', () => save(b.dataset.save)));
+  $('btnFee').addEventListener('click', () => $('fileFee').click());
+  $('fileFee').addEventListener('change', (e) => { uploadFee(e.target.files); e.target.value = ''; });
   $('btnCopy').addEventListener('click', async () => {
     const ta = $('msg');
     let ok = false;
@@ -368,7 +484,14 @@
     ].map((r) => ({ ...r, 'Benefit Flag': C.benefitFlag(r), 'Work Queue': C.workQueue(r) }));
     const demoPills = { 100100: 'NP-TMS', 100101: 'Medi-Cal; New Medi-Cal; Re-verify', 100102: 'Kaiser/VA MM no auth; Kaiser/VA MM', 100103: 'QMB' };
     for (const r of res) r.Pills = demoPills[r['Per Nbr']] || '';
-    load({ results: res, tasks: C.buildTasks(res), exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z' });
+    // ?fees=1: fee estimates with the made-up demo fee schedule (fees.js), as the pane would send them.
+    let demoFees = null;
+    if (F && /[?&]fees=1\b/.test(location.search)) {
+      const s = F.demoSchedule();
+      const prep = F.prepareEstimates({ results: res, scheduleRows: s.rows, tabSummary: s.tabs, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: '' });
+      demoFees = { on: true, status: F.feeStatus(F.feeMetaRows('Demo fee schedule (made-up rates).xlsx', new Date().toISOString(), s), s.rows.length, new Date()), contexts: prep.contexts, tables: prep.tables, toggles: F.TOGGLES };
+    }
+    load({ results: res, tasks: C.buildTasks(res), exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees });
     if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
   }
 

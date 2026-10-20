@@ -50,7 +50,16 @@
     tblPayerOutcomes: { sheet: 'Payer Outcomes', hidden: true }, tblPayerMapLog: { sheet: 'Payer Map Log' }, tblPayerLearning: { sheet: 'Payer Learning' },
     // Sohar ref -> Per Nbr memory (append-only, kept by "Clear saved Sohar results") and "Re-verify anyway" requests.
     tblSoharRefs: { sheet: 'Sohar Refs', hidden: true }, tblReverifyRequests: { sheet: 'Re-verify Requests', hidden: true },
+    // Fee estimates (v0.11, a test, Off by default). Created only when Config "Fee estimates" is On; every one is safe to
+    // delete. The schedule and its info hold rates, so they are hidden; the mapping tables are visible and editable.
+    tblFeeSchedule: { sheet: 'Fee Schedule', hidden: true }, tblFeeMeta: { sheet: 'Fee Schedule Info', hidden: true },
+    tblFeeLocations: { sheet: 'Fee Locations' }, tblProviderHome: { sheet: 'Provider Home Clinic' },
+    tblFeePayerMap: { sheet: 'Fee Payer Map' }, tblFeePayerMapLog: { sheet: 'Fee Payer Map Log' },
+    tblEstimateCodes: { sheet: 'Estimate Codes' }, tblEstimateDefaults: { sheet: 'Estimate Defaults' },
   };
+  // Fee estimate tables by short name (app.js uses readFee / writeFee with these).
+  const FEE_TABLES = { schedule: 'tblFeeSchedule', meta: 'tblFeeMeta', locations: 'tblFeeLocations', homes: 'tblProviderHome',
+    payerMap: 'tblFeePayerMap', payerLog: 'tblFeePayerMapLog', codes: 'tblEstimateCodes', defaults: 'tblEstimateDefaults' };
   // A save builds the new rows on a hidden staging sheet (STAGE_SHEET) and only then makes them a table named STG.
   // So a STG table always holds complete new data. The old sheet is deleted only in the swap that renames the
   // staging sheet and then the table into place. "Real table missing + STG present" can only mean an interrupted
@@ -155,6 +164,8 @@
       clinicLocation: String(cfg['Clinic location'] ?? '').trim(),
       // Payer learning: optional rows (Learning, Learn: ...), defaults when missing. See core.learningConfig.
       learning: root.SoharCore.learningConfig(cfg),
+      // Fee estimates (v0.11): Off unless Config "Fee estimates" is On. Off when fees.js is not loaded.
+      fees: root.SoharFees ? root.SoharFees.feeConfig(cfg) : { on: false },
     };
   }
 
@@ -490,6 +501,15 @@
   async function readReverifyRequests() { return readOwned('tblReverifyRequests'); }
   const writeReverifyRequests = (cols, rows) => writeAddinTable('Re-verify Requests', 'tblReverifyRequests', cols, rows, false); // hidden: OWNED
 
+  // Fee estimates (v0.11): read / write by short name (FEE_TABLES). Missing table = nothing saved yet (readOwned).
+  function feeTable(kind) {
+    const t = FEE_TABLES[kind];
+    if (!t) throw new Error(`Unknown fee table ${kind}`);
+    return t;
+  }
+  async function readFee(kind) { return readOwned(feeTable(kind)); }
+  async function writeFee(kind, cols, rows) { const t = feeTable(kind); return writeAddinTable(OWNED[t].sheet, t, cols, rows, false); }
+
   /** True when the workbook has this table (used to tell the Sohar template from a clinic file). */
   async function tableExists(tableName) {
     return run(async (ctx) => {
@@ -724,7 +744,7 @@
   root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, upsertPayerMapMany, replaceTable,
     readPayerEvidence, writePayerEvidence, tableExists, readClinicFile, ensureConfigRows,
     readPayerOutcomes, writePayerOutcomes, readPayerMapLog, writePayerMapLog, appendPayerMapLog, writePayerLearning,
-    readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests,
+    readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests, FEE_TABLES, readFee, writeFee,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

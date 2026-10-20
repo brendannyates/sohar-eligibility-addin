@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.10.0">
+  <link rel="stylesheet" href="style.css?v=0.11.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -142,6 +142,22 @@
             <button class="primary alt" id="btnCopyBen">Copy OOP / deductible message</button>
             <button class="link" data-goto="Benefits">Benefits sheet</button>
           </div>
+          <details class="more" id="feeSection" hidden>
+            <summary>Fee estimates (test)</summary>
+            <p class="hint">Upload the fee schedule workbook. Each verified patient's next visit is matched to a fee tab (by location; telehealth uses the provider's home clinic) and a payer column, and the pane estimates what the patient pays, MD and NP. Estimates are not a guarantee. Turn off: Config <b>Fee estimates</b> = Off.</p>
+            <input type="file" id="fileFee" accept=".xlsx,.xlsm" hidden>
+            <div id="dropFee" class="drop slim" tabindex="0" role="button" aria-label="Upload the fee schedule">
+              Drop the fee schedule here, or <u>choose the file</u><br><span class="hint">.xlsx; it replaces the one saved in this workbook</span>
+            </div>
+            <div id="feeStatus" class="result"></div>
+            <div class="actions">
+              <button class="link" data-goto="Fee Locations">Fee Locations</button>
+              <button class="link" data-goto="Fee Payer Map">Fee Payer Map</button>
+              <button class="link" data-goto="Estimate Codes">Estimate Codes</button>
+              <button class="link" data-goto="Provider Home Clinic">Provider Home Clinic</button>
+              <button class="link" id="btnFeeRefresh">Re-read fee sheets</button>
+            </div>
+          </details>
         </div>
       </li>
     </ol>
@@ -197,10 +213,11 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="core.js?v=0.10.0"></script>
-  <script src="rules.js?v=0.10.0"></script>
-  <script src="xlsx.js?v=0.10.0"></script>
-  <script src="excel.js?v=0.10.0"></script>
-  <script src="app.js?v=0.10.0"></script>
+  <script src="core.js?v=0.11.0"></script>
+  <script src="rules.js?v=0.11.0"></script>
+  <script src="fees.js?v=0.11.0"></script>
+  <script src="xlsx.js?v=0.11.0"></script>
+  <script src="excel.js?v=0.11.0"></script>
+  <script src="app.js?v=0.11.0"></script>
 </body>
 </html>

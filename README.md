@@ -63,6 +63,44 @@ Approved by Brendan on 2026-10-20. Config (optional rows, added on build when mi
 - A record with a blank `id` and a remembered ref matches that Per Nbr (`Match` = `Sohar ref`) and keeps the result key of the original record, so a re-export never duplicates a row on Sohar Uploads or the Payer Outcomes ledger. When it replaces the saved copy of the same Sohar check, the identifiers it lacks are kept from the earlier copy. A ref learned in the same pass (the original and its blank re-export in one upload, or an original saved before the Sohar Refs sheet existed) is used straight away: the upload is matched once more before anything is saved (`core.combineResults`).
 - A result with no `id`, no remembered ref, and no member ID or name (verification) or no name or DOB (discovery) gets `Match` = `No identifiers` and an Action saying it is likely an export anomaly or a check run outside the batch (open the Sohar link). It gets no `Find patient for Sohar result` task; instead one High Review row `Sohar results with no patient identifiers` with the count, and a note in step 3. A result with identifiers that are not found stays an ordinary `No match`.
 
+### Fee estimates (test, off by default) (v0.11)
+
+A test feature: it estimates what a verified patient pays at the **next visit**, MD and NP, from an uploaded fee schedule. Estimates are not a guarantee.
+
+**Turn on:** Config `Fee estimates` = `On`, then refresh (⟳). The add-in adds the row (`Off`) on the next build if it is missing. **Turn off:** set it back to `Off` and refresh. Off means v0.10 behaviour: no fee UI, no `Est MD` / `Est NP` columns on the Benefits sheet, no fee sheets read, nothing sent to the full-screen window. No template table or column changes either way, and no network calls.
+
+**Upload:** Admin step 4 > *Fee estimates (test)*, or the Benefits & OOP tab in full screen. The `.xlsx` is read in the pane by a small pure-JS reader (`xlsx.js` `readWorkbook`, DEFLATE through the browser's `DecompressionStream`), never through Excel sheets. Re-uploading replaces the saved schedule completely; nothing is bundled in the add-in. The pane shows `Fee schedule: <file>, uploaded <date>, N tabs, N codes` and warns when it is more than 90 days old.
+
+**Parsing** (`fees.js` `parseFeeSchedule`): visible tabs only (hidden tabs such as Summary or the payer tabs are skipped). Per tab: a `Locations:` / `Location:` line (split on commas, periods and "and"), the title's `Locality N`, the row with `CPT Code` (any column, any row), then Gross Charge, Cash and payer names over MD and Nurse / NP columns (a name carries over its merged cells or onto the NP column right after its MD column; "Imperial" over MD next to "Med Adv" over NP is one payer). `99417/G2212` (or `99417G2212`) gives both codes. `0`, `0.00`, blank, `NA`, `#REF!`, percentages and text are not rates (kept as a note). Code rows stop at the first row whose code cell is a note. Tabs with no MD / NP payer columns are skipped.
+
+**Matching (never a guess):**
+- Next visit location -> fee tab: the tab's Locations list and tab name, as whole words, case and punctuation ignored. A tie between tabs is no match. Telehealth (Config `Telehealth keywords`) uses the rendering provider's home clinic.
+- Payer (Sohar payer from an eligible verification, else the NextGen payer) -> payer column on that tab: every word of the column name (or one side of a `/` name) must be in the payer name, the most specific wins, a Medicare / Advantage payer only matches a Medicare / Advantage column. Low confidence or a tie: no estimate, flagged *Map payer to a fee column*.
+- Out of network (Sohar `networkType` OON / out of network): allowed = Gross Charge, with Sohar's out-of-network benefits.
+
+**Sheets** (all add-in owned, saved fail-safe, safe to delete; created only when On):
+
+| Sheet | Table | What |
+|---|---|---|
+| Fee Schedule (hidden) | `tblFeeSchedule` | Tab, Locality, Locations, Code, Description, Payer, Level (MD / NP / Gross / Cash), Rate, Note |
+| Fee Schedule Info (hidden) | `tblFeeMeta` | File, upload time, counts, tab summary |
+| Fee Locations | `tblFeeLocations` | NextGen Location -> Fee Tab |
+| Provider Home Clinic | `tblProviderHome` | Provider -> Home Location (most frequent in-person location in the report) |
+| Fee Payer Map | `tblFeePayerMap` | Payer + Fee Tab -> Fee Payer, Confidence. A row with a blank Fee Tab applies to every tab. |
+| Fee Payer Map Log | `tblFeePayerMapLog` | Every Fee Payer Map change (Auto-match or Sheet edit) |
+| Estimate Codes | `tblEstimateCodes` | Event keyword -> codes with units (`90868 x1; 99417 x2`). Seeded once, marked `default, review`; the longest keyword found in the event wins. Esketamine seeds use G2083: confirm 56 mg (G2082) vs 84 mg. |
+| Estimate Defaults | `tblEstimateDefaults` | Deductible / Coinsurance / Copay toggles remembered per fee payer |
+
+On the mapping sheets, change the value column and the add-in keeps it (the row becomes `manual`); delete a row to hand it back to automatic matching. Edits are read on refresh (⟳) or *Re-read fee sheets*.
+
+**Math, per visit** (several codes: allowed amounts summed first): deductible (`Applies`: min(allowed, remaining) or `Waived`); coinsurance (`After deductible`: rate x (allowed - deductible part); `Before deductible`: rate x allowed, no deductible step, and it lowers the deductible left; or `None`); copay (`Added` by default only when Sohar returned one above $0, or `None`); then capped at the allowed amount and the OOP max remaining, never below $0, rounded to cents. Coinsurance accepts 0.2, 20 or 20%. Defaults come from Config (`Estimate deductible`, `Estimate coinsurance`, `Estimate copay`) until staff change them for a fee payer. A missing benefit is named and the estimate uses what is known; with no deductible, coinsurance or copay at all there is no patient amount.
+
+**Where it shows (On only):** the Clinic tab card (MD / NP totals), the Benefits sheet (`Est MD`, `Est NP`), and full screen (Benefits tab columns; click a patient for the estimate panel with code and units editors, the three toggles and the line-by-line math). The window gets only the contexts and the rate tables it needs, through the chunked pane messages; it never reads Excel.
+
+**Remove completely:** set `Fee estimates` = `Off`; delete the sheets above (unhide `Fee Schedule` and `Fee Schedule Info` first: right-click a sheet tab > Unhide); optionally delete the four `Fee estimates` / `Estimate ...` Config rows. To remove the code, revert to tag `v0.10.0`.
+
+**Demo:** `npm run serve`, then `http://localhost:8080/?fees=1` (made-up fee schedule; `dashboard.html?fees=1#benefits` for the window on its own).
+
 ### Clinic files and payer evidence
 
 - **Clinic files and emails** (Admin): one `Sohar Clinic - <Location> YYYY-MM-DD.xlsx` per location, saved to Downloads like the CSVs (save-tab fallback on the web). Sheets: `Clinic` (`tblClinic`, `rules.CLINIC_COLS`, run date, benefits, pills, review items, re-verify hyperlink), `Review` (`tblClinicReview`), hidden `Clinic Info` (`tblClinicMeta`: Kind = Sohar Clinic, Location, Run Date, Add-in Version). The file also carries the Office web-extension parts so Excel can open the pane with it; if Excel ignores them, open the add-in from the Home tab. **Copy email** per location: LASFIR + Per Nbr, grouped by date, pills and OOP/deductible met or approaching.
@@ -145,7 +183,8 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 |---|---|
 | `core.js` | Pure logic: header detection, name/date parsing, routing, auto payer matching, exports, CSV. Shared with tests. |
 | `rules.js` | Pure clinic rules (R5-R10): flags and pills, Review rows, clinic sheet and email, payer evidence. Loads after `core.js` (R9 uses `core.reverifyCheck`). |
-| `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts). |
+| `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts), and a small reader (`readWorkbook`) for the fee schedule upload. |
+| `fees.js` | Pure fee estimate logic (v0.11, a test, Off by default): fee schedule parsing, location / payer matching, estimate math, made-up demo schedule. Loads after `core.js`. |
 | `save.html`, `save.js` | Fallback save tab for Excel on the web; takes CSV text or base64 (.xlsx). |
 | `excel.js` | Everything that reads or writes the workbook. Table names must match the template. |
 | `app.js` | Pane behaviour, step flow, payer mapping UI, uploads, downloads, demo mode. |

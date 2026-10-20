@@ -1,4 +1,5 @@
-/* xlsx.js — tiny .xlsx writer. Pure: no Office.js, no DOM, no dependencies, no network.
+/* xlsx.js — tiny .xlsx writer and reader. Pure: no Office.js, no DOM, no dependencies, no network.
+   readWorkbook(bytes) -> {sheets: [{name, hidden, rows, merges}]} (v0.11, for the fee schedule upload).
    buildWorkbook(spec) -> Uint8Array (a valid Office Open XML workbook, ZIP STORE, no compression).
    Each sheet gets a real Excel table, a frozen header row, text-format ID columns and optional hyperlinks.
    Optional webExtension tags the file so the add-in task pane opens with the document. */
@@ -448,8 +449,154 @@
     return zip(parts.files, spec && spec.now instanceof Date ? spec.now : new Date());
   }
 
+  // ---------- reading (v0.11 fee schedule upload) ----------
+  // A small .xlsx reader: ZIP central directory, STORE or DEFLATE entries (DEFLATE through the platform's
+  // DecompressionStream('deflate-raw'), no library), shared strings, sheet XML, sheet visibility and merged cells.
+  // Values only: numbers stay numbers, error cells come back as their text ('#REF!'), formulas give their cached value.
+
+  const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  function unescapeXml(s) {
+    return String(s)
+      .replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos);/gi, (m, e) => (e[0] === '#'
+        ? String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10))
+        : ENT[e.toLowerCase()]))
+      .replace(/_x([0-9A-Fa-f]{4})_/g, (m, h) => String.fromCharCode(parseInt(h, 16)));
+  }
+  function attrs(s) {
+    const out = {};
+    for (const m of String(s).matchAll(/([\w:]+)\s*=\s*"([^"]*)"/g)) out[m[1]] = unescapeXml(m[2]);
+    return out;
+  }
+  // "B12" -> {r: 11, c: 1} (0-based).
+  function parseRef(ref) {
+    const m = /^([A-Z]+)(\d+)$/i.exec(String(ref || '').replace(/\$/g, ''));
+    if (!m) return null;
+    let c = 0;
+    for (const ch of m[1].toUpperCase()) c = c * 26 + ch.charCodeAt(0) - 64;
+    return { r: parseInt(m[2], 10) - 1, c: c - 1 };
+  }
+
+  async function inflateRaw(data) {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('This version of Excel cannot unpack .xlsx files in the pane (no DecompressionStream). Use Excel on the web or a current Excel for Windows or Mac.');
+    }
+    const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+  }
+
+  const MAX_UNZIPPED = 80 * 1024 * 1024;
+  /** Entries of a ZIP (STORE or DEFLATE): Map name -> async () => Uint8Array. */
+  function zipEntries(u8) {
+    const v = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    let e = u8.length - 22;
+    while (e >= 0 && v.getUint32(e, true) !== 0x06054b50) e--;
+    if (e < 0) throw new Error('This is not an .xlsx file (no ZIP directory). Open it in Excel and save it as an Excel Workbook (.xlsx).');
+    const count = v.getUint16(e + 10, true), cdOff = v.getUint32(e + 16, true);
+    const dec = new TextDecoder();
+    const out = new Map();
+    let p = cdOff;
+    for (let i = 0; i < count; i++) {
+      if (v.getUint32(p, true) !== 0x02014b50) throw new Error('The .xlsx file is damaged (bad ZIP directory).');
+      const method = v.getUint16(p + 10, true), csize = v.getUint32(p + 20, true), usize = v.getUint32(p + 24, true);
+      const nl = v.getUint16(p + 28, true), xl = v.getUint16(p + 30, true), cl = v.getUint16(p + 32, true), lo = v.getUint32(p + 42, true);
+      const name = dec.decode(u8.subarray(p + 46, p + 46 + nl));
+      p += 46 + nl + xl + cl;
+      if (v.getUint32(lo, true) !== 0x04034b50) throw new Error(`The .xlsx file is damaged (bad entry ${name}).`);
+      const start = lo + 30 + v.getUint16(lo + 26, true) + v.getUint16(lo + 28, true);
+      const raw = u8.subarray(start, start + csize);
+      if (usize > MAX_UNZIPPED) throw new Error(`${name} in this .xlsx is too large to read in the pane.`);
+      out.set(name, async () => {
+        if (method === 0) return raw;
+        if (method === 8) return inflateRaw(raw);
+        throw new Error(`The .xlsx file uses an unsupported compression (${method}).`);
+      });
+    }
+    return out;
+  }
+
+  function sharedStrings(xml) {
+    const out = [];
+    for (const m of String(xml).matchAll(/<si\b[^>]*>([\s\S]*?)<\/si>/g)) {
+      const body = m[1].replace(/<rPh\b[\s\S]*?<\/rPh>/g, '');
+      out.push([...body.matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((t) => unescapeXml(t[1])).join(''));
+    }
+    return out;
+  }
+
+  /** Cell grid (0-based rows of 0-based columns; missing cells undefined) and merged ranges of one sheet's XML. */
+  function sheetGrid(xml, strings) {
+    const rows = [];
+    const data = (/<sheetData\b[^>]*>([\s\S]*?)<\/sheetData>/.exec(xml) || [])[1] || '';
+    let rowIdx = -1;
+    for (const rm of data.matchAll(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g)) {
+      const ra = attrs(rm[1]);
+      rowIdx = ra.r ? parseInt(ra.r, 10) - 1 : rowIdx + 1;
+      if (!rm[2]) continue;
+      const row = rows[rowIdx] || (rows[rowIdx] = []);
+      let colIdx = -1;
+      for (const cm of rm[2].matchAll(/<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g)) {
+        const ca = attrs(cm[1]);
+        const ref = parseRef(ca.r);
+        colIdx = ref ? ref.c : colIdx + 1;
+        const body = cm[2] || '';
+        const t = ca.t || 'n';
+        let val;
+        if (t === 'inlineStr') {
+          const is = (/<is\b[^>]*>([\s\S]*?)<\/is>/.exec(body) || [])[1] || '';
+          val = [...is.replace(/<rPh\b[\s\S]*?<\/rPh>/g, '').matchAll(/<t\b[^>]*>([\s\S]*?)<\/t>/g)].map((x) => unescapeXml(x[1])).join('');
+        } else {
+          const vm = /<v\b[^>]*>([\s\S]*?)<\/v>/.exec(body);
+          if (!vm) continue;
+          const raw = unescapeXml(vm[1]);
+          if (t === 's') val = strings[parseInt(raw, 10)] ?? '';
+          else if (t === 'b') val = raw === '1';
+          else if (t === 'str' || t === 'e' || t === 'd') val = raw;
+          else { const n = Number(raw); val = raw.trim() !== '' && !isNaN(n) ? n : raw; }
+        }
+        row[colIdx] = val;
+      }
+    }
+    const merges = [];
+    for (const mm of String(xml).matchAll(/<mergeCell\b[^>]*\bref="([^"]+)"/g)) {
+      const [a, b] = mm[1].split(':').map(parseRef);
+      if (a && b) merges.push({ r1: Math.min(a.r, b.r), c1: Math.min(a.c, b.c), r2: Math.max(a.r, b.r), c2: Math.max(a.c, b.c) });
+    }
+    return { rows, merges };
+  }
+
+  /**
+   * Read an .xlsx (Uint8Array or ArrayBuffer). Returns {sheets: [{name, hidden, rows, merges}]} in workbook order;
+   * hidden is true for hidden and very hidden sheets. Async because DEFLATE goes through DecompressionStream.
+   */
+  async function readWorkbook(bytes) {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    const entries = zipEntries(u8);
+    const dec = new TextDecoder();
+    const text = async (name) => { const f = entries.get(name); return f ? dec.decode(await f()) : null; };
+    const wb = await text('xl/workbook.xml');
+    if (wb == null) throw new Error('This file is not an Excel workbook (no xl/workbook.xml). Save it as .xlsx and upload that.');
+    const rels = (await text('xl/_rels/workbook.xml.rels')) || '';
+    const target = {};
+    for (const m of rels.matchAll(/<Relationship\b([^>]*?)\/?>/g)) { const a = attrs(m[1]); if (a.Id) target[a.Id] = a.Target || ''; }
+    const ssXml = await text('xl/sharedStrings.xml');
+    const strings = ssXml ? sharedStrings(ssXml) : [];
+    const sheets = [];
+    for (const m of wb.matchAll(/<sheet\b([^>]*?)\/?>/g)) {
+      const a = attrs(m[1]);
+      const rid = a['r:id'] || Object.keys(a).filter((k) => /:id$/.test(k)).map((k) => a[k])[0];
+      let path = target[rid] || '';
+      path = path.startsWith('/') ? path.slice(1) : `xl/${path}`;
+      path = path.split('/').reduce((acc, seg) => { if (seg === '..') acc.pop(); else if (seg && seg !== '.') acc.push(seg); return acc; }, []).join('/');
+      const xml = await text(path);
+      const grid = xml ? sheetGrid(xml, strings) : { rows: [], merges: [] };
+      sheets.push({ name: a.name || '', hidden: /hidden/i.test(a.state || ''), rows: grid.rows, merges: grid.merges });
+    }
+    return { sheets };
+  }
+
   return {
     MIME, ID_COL_RE,
+    readWorkbook, zipEntries, unescapeXml, parseRef,
     buildWorkbook, buildParts, toBase64,
     zip, unzipStored, crc32, utf8,
     escapeXml, stripControl, colLetter, cellRef, tableRef, uniqueNames, sanitizeSheetName, sanitizeTableName,

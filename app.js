@@ -1,17 +1,20 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.10.0';
+  const VERSION = '0.11.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
   const XL = window.SoharXlsx;
+  const F = window.SoharFees; // fee estimates (v0.11, a test, Off by default)
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
   const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, discoveryVerify: null, pendingFocus: '', demo: false,
     flags: new Map(), clinic: null, evidence: null, clinicFile: false, clinicFilter: '',
     // outcomes / finClasses start null ("not read yet"): build reads the ledger once, and retries after a read error.
-    outcomes: null, learning: null, finClasses: null, learnRowsChecked: false };
+    outcomes: null, learning: null, finClasses: null, learnRowsChecked: false,
+    // Fee estimates (v0.11): null while Off; the fee sheets are read only when Config "Fee estimates" is On.
+    fees: null };
   const $ = (id) => document.getElementById(id);
 
   // ---------- boot ----------
@@ -82,6 +85,7 @@
 
   /** Scan the Import sheet, build the patient list and Sohar imports, then re-match saved Sohar and IR uploads. */
   async function refreshAll() {
+    if (state.fees) state.fees.loaded = false; // fee estimates (On only): pick up edits made on the fee sheets
     await scan();
     if ($('btnBuild').disabled) return;
     await build({ deferRules: true });
@@ -200,6 +204,15 @@
       else note('irResult', 'Copy is blocked here. Open full screen > Messages to copy it.', 'warn');
     }, 'irResult'));
     $('btnDlIr').addEventListener('click', () => guard(async () => saveCSV(C.fileName('ir'), C.IR_COLS, await currentIr(), 'irResult'), 'irResult'));
+    // Fee estimates (shown only when Config "Fee estimates" is On).
+    dropZone('dropFee', 'fileFee', (files) => guard(() => uploadFee(files), 'feeStatus'));
+    $('btnFeeRefresh').addEventListener('click', () => guard(async () => {
+      await loadConfig();
+      if (!feesOn()) { note('feeStatus', 'Fee estimates are Off in Config.', 'warn'); return; }
+      if (state.fees) state.fees.loaded = false;
+      await refreshFees();
+      await afterFeeChange();
+    }, 'feeStatus'));
     diagnostics();
     document.querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => X.activate(b.dataset.goto)));
     $('scope').addEventListener('change', () => X.setConfigValue('Scope', $('scope').value === 'all' ? 'All patients' : 'Upcoming appointments').catch(() => {}));
@@ -213,6 +226,7 @@
       state.cfg = await X.readConfig();
       $('scope').value = state.cfg.scope;
       $('asOf').value = state.cfg.asOf ? state.cfg.asOf.toISOString().slice(0, 10) : '';
+      showFeeUi();
     } catch (e) { setStatus(e.message, 'bad'); }
   }
 
@@ -445,7 +459,9 @@
       // Optional Config rows for payer learning, added once per session when missing (never changes existing rows).
       if (!state.learnRowsChecked) {
         state.learnRowsChecked = true;
-        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
+        // Fee estimates: only the "Fee estimates" (Off) row while Off; its estimate defaults once it is On.
+        const feeRows = F ? (feesOn() ? F.FEE_CONFIG_ROWS : F.FEE_CONFIG_ROWS.slice(0, 1)) : [];
+        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, feeRows)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
       }
       const learn = state.cfg.learning || C.LEARN_DEFAULTS;
       state.payerMap = await X.readPayerMap();
@@ -779,6 +795,7 @@
           ${r['Choose in NextGen'] ? `<dt>NextGen</dt><dd>${choose.quoted ? `Choose "${esc(choose.text)}"` : esc(choose.text)}</dd>` : ''}
           <dt>Sohar</dt><dd>${esc(plainStatus(r['Sohar Status']))}${r.Plan ? ` · ${esc(r.Plan)}` : ''}<br><span class="hint">${ver}</span></dd>
           ${r.Copay !== '' || r.Coinsurance !== '' ? `<dt>Copay</dt><dd>${r.Copay !== '' ? esc(usd(r.Copay) || r.Copay) : '—'}${r.Coinsurance !== '' ? ` · coins ${esc(r.Coinsurance)}` : ''}</dd>` : ''}
+          ${feeCardHtml(per)}
         </dl>
         ${ben ? `<div class="pc-ben">${ben}</div>` : ''}
         ${items.length ? `<ul class="pc-items">${items.map((t) => `<li class="sev-${t.severity || 'high'}">${SEV_WORD[t.severity] ? `<b>${SEV_WORD[t.severity]}:</b> ` : ''}${esc(t.detail)}</li>`).join('')}</ul>` : ''}
@@ -1046,11 +1063,13 @@
 
   /** Write the Benefits sheet and show OOP / deductible progress, with the patients at or near their OOP max listed. */
   async function renderBenefits(results, cfg, kinds) {
+    // Fee estimates (On only) first, so the Benefits sheet gets its Est MD / Est NP columns.
+    if (feesOn()) await refreshFees(results).catch((e) => { console.error(e); note('feeStatus', `Fee estimates not updated: ${e.message}`, 'warn'); });
     const view = C.benefitsView(results);
     const s = C.benefitsSummary(view);
     const box = $('benBox');
     const pctTxt = `${Math.round((cfg.approachingPct ?? 0.2) * 100)}%`;
-    await X.writeBenefits(C.BENEFIT_SHEET_COLS.concat('Pills'), view.rows.map((r) => ({ ...r, Pills: pillsFor(r['Per Nbr']) })), C.BENEFIT_PCT_COLS);
+    await X.writeBenefits(benefitCols(), benefitRows(view), C.BENEFIT_PCT_COLS);
     state.benefits = view;
     $('benActions').hidden = !s.verified;
     if (!s.verified) {
@@ -1082,6 +1101,177 @@
       <p class="hint">Approaching = ${pctTxt} or less left (Config: Benefit approaching %).${s.verified - s.withAmounts ? ` ${s.verified - s.withAmounts} verified patient${s.verified - s.withAmounts === 1 ? ' has' : 's have'} no amounts from Sohar.` : ''}${s.pending ? ` ${s.pending} patient${s.pending === 1 ? ' is' : 's are'} still waiting on the step 3 verification and not counted.` : ''}</p>`;
     // widths set through the CSSOM so the strict style-src policy holds
     box.querySelectorAll('.meter').forEach((m) => { m.firstElementChild.style.width = `${Math.round(Math.min(1, +m.dataset.pct) * 100)}%`; });
+  }
+
+  // ---------- fee estimates (v0.11, a test, Off by default) ----------
+  // Config "Fee estimates" = On turns it on. Off: none of this runs, no fee sheet is read, the Benefits sheet keeps its
+  // v0.10 columns and the full-screen window gets no fee data. All fee sheets are add-in owned and safe to delete.
+  const feesOn = () => !!(F && state.cfg && state.cfg.fees && state.cfg.fees.on);
+  const benefitCols = () => C.BENEFIT_SHEET_COLS.concat('Pills', ...(feesOn() ? ['Est MD', 'Est NP'] : []));
+  function benefitRows(view) {
+    return view.rows.map((r) => ({ ...r, Pills: pillsFor(r['Per Nbr']), ...(feesOn() ? estCols(r['Per Nbr']) : {}) }));
+  }
+  const estAmount = (e) => (e && e.patient != null ? `${e.patient.toFixed(2)}${F.partialNote(e) ? ` (${F.partialNote(e)})` : ''}` : '');
+  function estCols(per) {
+    const e = state.fees && state.fees.est ? state.fees.est.get(String(per)) : null;
+    return { 'Est MD': estAmount(e && e.md), 'Est NP': estAmount(e && e.np) };
+  }
+  function showFeeUi() {
+    const box = $('feeSection');
+    if (box) box.hidden = !feesOn();
+    if (!feesOn()) state.fees = null;
+  }
+  /** Appointments on the Import sheet ({rendering, loc, event}), for the provider home clinic. */
+  function importAppts() {
+    const det = state.detection || (state.rows && C.detectHeader(state.rows));
+    if (!det || !state.rows) return [];
+    const cm = det.colMap, out = [];
+    const end = det.dataEnd ?? state.rows.length;
+    for (let r = det.headerRow + 1; r < end; r++) {
+      const row = state.rows[r] || [];
+      const g = (f) => (cm[f] == null ? '' : String(row[cm[f]] ?? '').trim());
+      if (g('perNbr')) out.push({ rendering: g('rendering'), loc: g('loc'), event: g('event') });
+    }
+    return out;
+  }
+  // The small sheets staff edit. Read again before every refresh, so an edit made on the sheet since the last read is
+  // never overwritten from a stale copy when the refresh writes the sheet back.
+  const FEE_EDITABLE = ['locations', 'homes', 'payerMap', 'payerLog', 'codes', 'defaults'];
+  /** The fee sheets: the schedule once per pane session (and after an upload or "Re-read fee sheets"); editable sheets every time. */
+  async function loadFeeData() {
+    if (state.fees && state.fees.loaded) {
+      for (const k of FEE_EDITABLE) state.fees[k] = await X.readFee(k);
+      return state.fees;
+    }
+    const f = { loaded: true };
+    for (const k of ['schedule', 'meta', 'locations', 'homes', 'payerMap', 'payerLog', 'codes', 'defaults']) f[k] = await X.readFee(k);
+    if (!state.feeRowsChecked) {
+      state.feeRowsChecked = true;
+      await X.ensureConfigRows(F.FEE_CONFIG_ROWS).catch((e) => console.warn('Config fee estimate rows not added', e));
+    }
+    state.fees = f;
+    return f;
+  }
+  const sameRows = (cols, a, b) => JSON.stringify((a || []).map((r) => cols.map((c) => String(r[c] ?? '')))) === JSON.stringify((b || []).map((r) => cols.map((c) => String(r[c] ?? ''))));
+  /**
+   * Match each verified patient's next visit to a fee tab and payer column, save the mapping sheets (a person's edits
+   * on them are kept), and estimate. Nothing is guessed: what cannot be matched is flagged.
+   */
+  async function refreshFees(results) {
+    if (!feesOn()) { state.fees = null; return; }
+    const f = await loadFeeData();
+    const rs = results || state.results || [];
+    f.status = F.feeStatus(f.meta, f.schedule.length, new Date());
+    f.warn = [];
+    if (!f.schedule.length) { f.prep = null; f.est = new Map(); renderFeeStatus(); return; }
+    const prep = F.prepareEstimates({
+      // Info saved for a different upload (half-failed save) must not lend its Locations to these rows.
+      results: rs, scheduleRows: f.schedule, tabSummary: F.metaMatches(f.meta, f.schedule.length) ? F.readMeta(f.meta).tabSummary : [], locations: f.locations, homes: f.homes,
+      payerMap: f.payerMap, payerLog: f.payerLog, codes: f.codes, defaults: f.defaults, appts: importAppts(),
+      teleKeywords: (state.cfg && state.cfg.teleKeywords) || ['Tele'], cfgDefaults: state.cfg.fees.defaults, when: fmtStamp(new Date()),
+      pers: C.benefitsView(rs).rows.map((r) => r['Per Nbr']),
+    });
+    const save = async (kind, cols, rows, label) => {
+      if (sameRows(cols, rows, f[kind])) return;
+      try { await X.writeFee(kind, cols, rows); f[kind] = rows; } catch (e) { console.error(e); f.warn.push(`${label} not saved: ${e.message}`); }
+    };
+    await save('locations', F.FEE_LOCATION_COLS, prep.locationRows, 'Fee Locations');
+    await save('homes', F.PROVIDER_HOME_COLS, prep.homeRows, 'Provider Home Clinic');
+    await save('payerMap', F.FEE_PAYER_MAP_COLS, prep.payerRows, 'Fee Payer Map');
+    if (prep.logRows.length) await save('payerLog', F.FEE_PAYER_LOG_COLS, f.payerLog.concat(prep.logRows), 'Fee Payer Map Log');
+    if (prep.seeded) await save('codes', F.ESTIMATE_CODE_COLS, prep.codeRows, 'Estimate Codes');
+    f.prep = prep;
+    f.est = new Map(Object.values(prep.contexts).map((ctx) => [ctx.per, F.estimatePatient(ctx, prep.tables)]));
+    renderFeeStatus();
+  }
+  function renderFeeStatus() {
+    const box = $('feeStatus');
+    if (!box) return;
+    const f = state.fees;
+    if (!feesOn() || !f) { box.innerHTML = ''; return; }
+    const st = f.status || { text: 'No fee schedule uploaded yet.' };
+    const parts = [`<p class="${st.loaded ? 'ok' : 'hint'}">${esc(st.text)}${st.loaded ? '.' : ' Upload the fee schedule workbook (.xlsx).'}</p>`];
+    if (st.warn) parts.push(`<p class="warn">${esc(st.warn)}</p>`);
+    for (const i of st.issues || []) parts.push(`<p class="hint">${esc(i)}</p>`);
+    if (f.prep) {
+      const groups = new Map();
+      for (const e of f.est.values()) for (const fl of e.flags) {
+        const k = /^No fee tab|matches more than one fee tab|is not in the uploaded/.test(fl) ? 'need a fee tab (Fee Locations)'
+          : /^Map payer|^Fee payer/.test(fl) ? 'need a payer mapped to a fee column (Fee Payer Map)'
+            : /^No default codes|^Enter codes/.test(fl) ? 'need estimate codes (Estimate Codes)'
+              : /^Telehealth visit/.test(fl) ? 'telehealth with no home clinic (Provider Home Clinic)' : 'other';
+        groups.set(k, (groups.get(k) || 0) + 1);
+      }
+      const n = f.prep.counts;
+      parts.push(`<p>${n.ready} of ${n.patients} verified patient${n.patients === 1 ? '' : 's'} have an estimate for the next visit${n.flagged ? `; ${n.flagged} flagged` : ''}. Estimates are not a guarantee.</p>`);
+      if (groups.size) parts.push(`<ul class="pc-items">${[...groups].map(([k, v]) => `<li>${v} ${esc(k)}</li>`).join('')}</ul>`);
+    }
+    for (const w of f.warn || []) parts.push(`<p class="warn">${esc(w)}</p>`);
+    box.innerHTML = parts.join('');
+    box.hidden = false;
+  }
+  /** Parse an uploaded fee schedule (pure-JS reader) and replace the saved one completely. Returns a summary line. */
+  async function saveFeeSchedule(name, bytes) {
+    if (!feesOn()) throw new Error('Fee estimates are Off. Set Config "Fee estimates" to On, then refresh (⟳).');
+    const parsed = F.parseFeeSchedule(await XL.readWorkbook(bytes));
+    const skipped = parsed.skipped.map((s) => `${s.name} (${s.reason})`).join(', ');
+    if (!parsed.counts.tabs) throw new Error(`No fee tabs found in ${name}${skipped ? `: ${skipped}` : ''}. The saved fee schedule was not changed.`);
+    const meta = F.feeMetaRows(name, new Date().toISOString(), parsed);
+    await X.writeFee('schedule', F.FEE_COLS, parsed.rows);
+    try {
+      await X.writeFee('meta', F.FEE_META_COLS, meta);
+    } catch (e) {
+      // Two saves: the rates are already replaced. Say so plainly; the info's row count no longer matches the rows, so
+      // the status line warns and its old tab summary is not used until the next upload.
+      if (state.fees) state.fees.loaded = false;
+      throw new Error(`${name}: the fee schedule rates were replaced, but its info (file name, upload date, tab summary) was not saved: ${e.message}. Upload the fee schedule again.`);
+    }
+    // The new schedule replaces the old one in memory too (no re-read of a large sheet); nothing of the old one is kept.
+    if (state.fees && state.fees.loaded) { state.fees.schedule = parsed.rows; state.fees.meta = meta; }
+    await refreshFees();
+    await afterFeeChange();
+    const issues = F.parseWarnings(parsed.tabs);
+    return `${name}: ${parsed.counts.tabs} tab${parsed.counts.tabs === 1 ? '' : 's'}, ${parsed.counts.codes} codes saved${skipped ? `; skipped ${skipped}` : ''}.${issues.length ? ` ${issues.join('. ')}.` : ''}`;
+  }
+  /** After fee data changed: Benefits sheet columns, Clinic cards and the full-screen window follow. */
+  async function afterFeeChange() {
+    if (state.results) await X.writeBenefits(benefitCols(), benefitRows(C.benefitsView(state.results)), C.BENEFIT_PCT_COLS).catch((e) => { console.error(e); note('feeStatus', `Benefits sheet not updated: ${e.message}`, 'warn'); });
+    renderClinicList();
+    if (dlg) await sendToDialog({ type: 'fee-update', fees: feePayload() });
+  }
+  async function uploadFee(files) {
+    const file = files[0];
+    if (!file) return;
+    if (!/\.xls[xm]$/i.test(file.name)) throw new Error(`${file.name} is not an .xlsx file. The fee schedule must be the Excel workbook.`);
+    dropBusy('dropFee', `Reading ${file.name}…`);
+    try { note('feeStatus', await saveFeeSchedule(file.name, new Uint8Array(await file.arrayBuffer())), 'ok'); } finally { dropBusy('dropFee'); }
+  }
+  /** What the full-screen window needs for estimates: contexts, the rate tables they use, status. Never the whole schedule. */
+  function feePayload() {
+    if (!feesOn() || !state.fees) return null;
+    const f = state.fees;
+    return { on: true, status: f.status || null, contexts: f.prep ? f.prep.contexts : {}, tables: f.prep ? f.prep.tables : { rates: {}, gross: {}, desc: {} }, toggles: F.TOGGLES };
+  }
+  /** "Remember these toggles for this fee payer" from the full-screen estimate panel. */
+  async function saveFeeDefaults(feePayer, toggles) {
+    if (!feesOn() || !feePayer) return;
+    const f = await loadFeeData();
+    const rows = F.rememberDefaults(f.defaults, feePayer, toggles || {}, fmtStamp(new Date()));
+    await X.writeFee('defaults', F.ESTIMATE_DEFAULT_COLS, rows);
+    f.defaults = rows;
+    await refreshFees();
+    await afterFeeChange();
+  }
+  function feeCardHtml(per) {
+    if (!feesOn() || !state.fees || !state.fees.est) return '';
+    const e = state.fees.est.get(String(per));
+    if (!e) return '';
+    const amt = (x, lvl) => (x && x.patient != null ? `${lvl} ${esc(F.usd(x.patient))}` : `${lvl} —`);
+    if (!e.md && !e.np) return `<dt>Estimate</dt><dd class="hint">${esc(e.flags[0] || 'No estimate')}</dd>`;
+    if ((e.md || e.np).noBenefits) return `<dt>Estimate</dt><dd class="hint">No deductible, coinsurance or copay from Sohar; allowed ${e.md && !e.md.none ? `MD ${esc(F.usd(e.md.allowed))}` : ''}${e.np && !e.np.none ? ` NP ${esc(F.usd(e.np.allowed))}` : ''}</dd>`;
+    const partial = [...new Set([F.partialNote(e.md), F.partialNote(e.np)].filter(Boolean))];
+    const missing = F.benefitsMissing(e.md) || F.benefitsMissing(e.np);
+    return `<dt>Estimate</dt><dd>${amt(e.md, 'MD')} · ${amt(e.np, 'NP')}<br><span class="hint">Next visit, not a guarantee${partial.length ? `; ${esc(partial.join('; '))}` : ''}${missing ? '; some benefits missing' : ''}</span></dd>`;
   }
 
   async function currentDiscoveryVerify() {
@@ -1210,12 +1400,15 @@
   const isWeb = () => !state.demo && Office.context.platform === Office.PlatformType.OfficeOnline;
 
   async function payload(focus) {
-    return {
-      // x (patient extras) stays in the pane; the window gets the Pills column instead.
-      type: 'data', focus: focus || '', web: isWeb(), results: ((await currentResults()) || []).map(({ x, resultKey, chooseGuess, ...r }) => r), tasks: await currentTasks(), ir: await currentIr(),
+    const base = {
+      // x (patient extras) stays in the pane; the window gets the Pills column instead. oon (out-of-network benefits)
+      // stays too: fee estimates send what they need in fees.contexts.
+      type: 'data', focus: focus || '', web: isWeb(), results: ((await currentResults()) || []).map(({ x, resultKey, chooseGuess, oon, ...r }) => r), tasks: await currentTasks(), ir: await currentIr(),
       exports: state.exports || null, discoveryVerify: await currentDiscoveryVerify(), verifyFailed: await currentVerifyFailed(), scope: state.cfg ? state.cfg.scope : 'upcoming',
       asOf: state.resultsAsOf ? state.resultsAsOf.toISOString() : null,
     };
+    if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
+    return base;
   }
   async function sendToDialog(obj) {
     if (!dlg) return;
@@ -1224,7 +1417,7 @@
 
   async function openFull(focus) {
     const url = new URL(`dashboard.html?v=${VERSION}`, location.href).href;
-    if (state.demo) { showFloat(url + (focus ? `#${focus}` : '')); return; } // browser preview: the same float, drawn in the page
+    if (state.demo) { showFloat(url + (feesOn() ? '&fees=1' : '') + (focus ? `#${focus}` : '')); return; } // browser preview: the same float, drawn in the page
     if (!Office.context.requirements.isSetSupported('DialogApi', '1.2')) throw new Error('This version of Excel cannot open the full-screen window (needs DialogApi 1.2). Use the Sohar Results and NextGen Tasks sheets.');
     if (dlg) { await sendToDialog(await payload(focus)); return; }
     state.pendingFocus = focus || '';
@@ -1265,7 +1458,25 @@
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
+    } else if (m.type === 'fee-upload' && feesOn()) {
+      // Fee schedule picked on the full-screen Benefits tab: it arrives as base64 and is read here (pure JS, no Excel sheets).
+      try {
+        const text = await saveFeeSchedule(m.name, base64Bytes(m.base64));
+        note('feeStatus', text, 'ok');
+        await sendToDialog({ ...(await payload('benefits')), notice: { ok: true, text } });
+      } catch (e) {
+        await sendToDialog({ type: 'notice', ok: false, text: e.message });
+        throw e;
+      }
+    } else if (m.type === 'fee-defaults' && feesOn()) {
+      await saveFeeDefaults(m.feePayer, m.toggles);
     }
+  }
+  function base64Bytes(b64) {
+    const bin = atob(String(b64 || ''));
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
   }
 
   // Saves straight to Downloads. Excel on the web may block downloads inside the add-in frame, so there the note
@@ -1521,7 +1732,16 @@
       past('290008', 'Verification', 'Blue Shield CA Blue Card', '94036', '', 'Blue Shield of California', 'agree', -23),
     ];
     let mapLog = [], soharRefs = [], reverifyRequests = [];
+    // Fee estimates demo: ?fees=1 turns them on with a made-up fee schedule (fees.js DEMO_WORKBOOK), in memory.
+    const feesDemo = /[?&]fees=1\b/.test(location.search) && !!F;
+    const feeStore = {};
+    if (feesDemo) {
+      const s = F.demoSchedule();
+      feeStore.schedule = s.rows;
+      feeStore.meta = F.feeMetaRows('Demo fee schedule (made-up rates).xlsx', new Date().toISOString(), s);
+    }
     return {
+      async readFee(kind) { return feeStore[kind] || []; }, async writeFee(kind, c, r) { feeStore[kind] = r; return r.length; },
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
       async writeImportRows(r) { rows = r; },
@@ -1537,7 +1757,7 @@
       // Sohar ref memory and Re-verify anyway requests, in memory.
       async readSoharRefs() { return soharRefs; }, async writeSoharRefs(c, r) { soharRefs = r; },
       async readReverifyRequests() { return reverifyRequests; }, async writeReverifyRequests(c, r) { reverifyRequests = r; },
-      async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', learning: C.learningConfig({}) }; },
+      async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', learning: C.learningConfig({}), fees: F ? F.feeConfig({ 'Fee estimates': feesDemo ? 'On' : 'Off' }) : { on: false } }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },
       async upsertPayerMap(e, o) { return this.upsertPayerMapMany([e], o); },

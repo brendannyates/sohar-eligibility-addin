@@ -828,6 +828,22 @@
     };
   }
 
+  /**
+   * Out-of-network benefits from a Sohar verification record (normalized keys oonCopay, oonCoinsurance, oonTotalDeductible,
+   * oonRemainingDeductible, oonOutOfPocket, oonOutOfPocketRemaining) and whether Sohar says the plan is out of network
+   * (networkType OON / out of network, networkStatus out of network, or inNetwork false). Used only by fee estimates (v0.11).
+   */
+  function oonBenefitFields(rec) {
+    const g = (k) => (rec && k in rec && !isBlank(rec[k]) ? str(rec[k]) : '');
+    const net = `${g('networktype')} ${g('networkstatus')}`;
+    return {
+      'Copay': g('ooncopay'), 'Coinsurance': fmtPct(g('ooncoinsurance')),
+      'Deductible': g('oontotaldeductible'), 'Deductible Remaining': g('oonremainingdeductible'),
+      'OOP Max': g('oonoutofpocket'), 'OOP Remaining': g('oonoutofpocketremaining'),
+      outOfNetwork: /\b(oon|out[\s-]*of[\s-]*network|non[\s-]*par(ticipating)?)\b/i.test(net) || /^(false|no|n)$/i.test(g('innetwork') || g('isinnetwork')),
+    };
+  }
+
   /** One-line benefit note for prep: "OOP max met", "Deductible approaching", "No deductible". */
   function benefitFlag(b) {
     const parts = [];
@@ -1003,6 +1019,7 @@
       if (f.key) row.resultKey = f.key; // non-column: resultKey of the Sohar record, for the payer outcomes ledger
       if (f.chooseGuess) row.chooseGuess = true; // non-column: Choose in NextGen came from an Auto-Low / Review guess
       if (f.sentPayerId) row.sentPayerId = f.sentPayerId; // non-column: Sohar payerId is the one sent, not today's chart
+      if (f.oon) row.oon = f.oon; // non-column: out-of-network benefits (oonBenefitFields), for fee estimates only
       row['Benefit Flag'] = benefitFlag(row);
       results.push(row);
       if (p) seen[kind].add(p['Per Nbr']);
@@ -1039,6 +1056,7 @@
           if (!p) { p = pickOne(byMember.get(idKey(r.memberid)), last); if (p) match = 'Member ID'; }
           if (!p && last) { p = pickOne(byName.get(nameKey(first, last)), last); if (p) match = 'Name only. Confirm.'; }
           benefits = benefitFields(r, bopts);
+          f0.oon = oonBenefitFields(r); // non-column: out-of-network benefits, read only by fee estimates (v0.11)
           let action = verificationAction(r.status);
           const end = parseDate(r.coverageenddate);
           const next = p && (upcoming.get(p['Per Nbr']) || [])[0];
@@ -2465,6 +2483,6 @@
     SOHAR_REF_COLS, refsOf, refIndex, appendRefs, noIdentifierReviewRows,
     REVERIFY_DEFAULTS, REVERIFY_CONFIG_ROWS, reverifyConfig, reverifyDue, policyResults, reverifyCheck,
     REVERIFY_REQUEST_COLS, pruneReverifyRequests, addReverifyRequest, applyReverifySkips, soharDay,
-    resultKind, readResultRows, mergeSoharResults, benefitFields, accumulatorStatus, benefitFlag, benefitsExport, buildTasks, taskMessage, keepDone, chunkMessage, messageAssembler, workQueue, lasfir, adminMessage,
+    resultKind, readResultRows, mergeSoharResults, benefitFields, oonBenefitFields, accumulatorStatus, benefitFlag, benefitsExport, buildTasks, taskMessage, keepDone, chunkMessage, messageAssembler, workQueue, lasfir, adminMessage,
   };
 });

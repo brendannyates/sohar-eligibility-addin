@@ -355,3 +355,13 @@ textarea.copybox { width: 100%; font: 12px/1.45 ui-monospace, Consolas, monospac
 .dash-main, .dash-main > * { min-width: 0; }
 .needclass { margin: 8px 0; padding: 8px 10px; border: 1px solid var(--warn); border-left-width: 4px; border-radius: 4px; background: color-mix(in srgb, var(--warn) 7%, var(--field)); }
 .needclass .needrows .payer:first-child { border-top: none; }
+/* Fee estimates (v0.11, a test; only shown when Config "Fee estimates" is On) */
+.dgroup.est { grid-column: 1 / -1; border-top: 1px solid var(--line, #ddd); padding-top: 8px; }
+.estcodes { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; margin: 6px 0; font-size: 12.5px; }
+.estcode input[data-ecode] { width: 6.5em; }
+.estcode input[data-eunits] { width: 4em; }
+.esttoggles { margin: 4px 0; }
+.estcols { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px 16px; }
+.estcol h4 { margin: 4px 0; font-size: 13px; }
+.estlines { margin: 0; padding-left: 16px; font-size: 12px; }
+.estlines li { margin: 1px 0; }

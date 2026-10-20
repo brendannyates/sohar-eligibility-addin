@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar eligibility, full screen</title>
-  <link rel="stylesheet" href="style.css?v=0.10.0">
+  <link rel="stylesheet" href="style.css?v=0.11.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
@@ -64,11 +64,19 @@
         <span id="benShown" class="hint"></span>
       </div>
       <p class="hint">One row per verified patient, closest to their in-network OOP max first. Same rows as the Benefits sheet. Patients still waiting on the verification of what discovery found are not here yet.</p>
+      <!-- Fee estimates (v0.11, a test): shown only when Config "Fee estimates" is On. -->
+      <div id="feeBar" class="callout" hidden>
+        <p id="feeState"></p>
+        <input type="file" id="fileFee" accept=".xlsx,.xlsm" hidden>
+        <button class="small" id="btnFee">Upload fee schedule</button>
+        <span class="hint">Click a patient for the estimate panel. Estimates are for the next visit only and are not a guarantee.</span>
+      </div>
       <div class="tablewrap">
         <table id="benTbl" class="grid">
           <thead><tr>
             <th>Patient</th><th>Per Nbr</th><th>Next appt</th><th>Location</th><th>Service</th><th>Plan</th><th>Copay</th><th>Coins</th>
             <th>OOP met</th><th>OOP left</th><th>Deductible met</th><th>Deductible left</th><th>Flag</th>
+            <th class="feecol" hidden>Est MD</th><th class="feecol" hidden>Est NP</th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -188,8 +196,9 @@
     <section id="detail" class="detail" hidden aria-live="polite"></section>
   </main>
 
-  <script src="core.js?v=0.10.0"></script>
-  <script src="rules.js?v=0.10.0"></script>
-  <script src="dashboard.js?v=0.10.0"></script>
+  <script src="core.js?v=0.11.0"></script>
+  <script src="rules.js?v=0.11.0"></script>
+  <script src="fees.js?v=0.11.0"></script>
+  <script src="dashboard.js?v=0.11.0"></script>
 </body>
 </html>
