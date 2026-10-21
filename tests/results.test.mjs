@@ -84,13 +84,15 @@ test('verification output matches on id and carries in-network tier-one benefits
   const res = merged();
   assert.equal(res.error, undefined);
   assert.deepEqual(res.unknownFiles, ['junk.csv']);
-  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
+  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon', 'key'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
   assert.ok(res.results.find((r) => r['Per Nbr'] === '100').x.appointments.length, 'non-column x carries the patient extras');
   const by = (per, sent) => res.results.find((r) => r['Per Nbr'] === per && r['Sent As'] === sent);
 
   const a = by('100', 'Verification');
-  assert.equal(a.Match, 'Per Nbr');
+  assert.equal(a.Match, 'Per Nbr (old id)', 'a Sohar id from before v0.12 is the Per Nbr');
   assert.equal(a.MRN, '900');
+  assert.equal(a.key, '900', 'the patient key is the MRN');
+  assert.equal(a['Searched As'], 'Patient');
   assert.equal(a['Next Appt'], '10/20/2026', 'soonest upcoming appointment');
   assert.equal(a['Next Time'], '12:00 PM');
   assert.equal(a['Upcoming Appts'], 2);
@@ -177,10 +179,10 @@ test('adminMessage: action list and benefits list, LASFIR not full names', () =>
   const res = merged();
   const msg = C.adminMessage(res.results, { asOf: res.asOf });
   assert.match(msg, /SAN RAFAEL|San Rafael \(\d+\)/);
-  assert.match(msg, /OKACHI · Per 101 · Coverage found/);
+  assert.match(msg, /OKACHI · Per 101 · Coverage found/, 'no MRN: the Per Nbr stands in');
   assert.doesNotMatch(msg, /Okafor|Chidi|Rivera/);
   const ben = C.adminMessage(res.results, { asOf: res.asOf, mode: 'benefits' });
-  assert.match(ben, /10\/20 12:00 PM · RIVANA · Per 100 · Deductible met; OOP max approaching \(ded remaining 0, OOP remaining 800\)/);
+  assert.match(ben, /10\/20 12:00 PM · RIVANA · MRN 900 · Deductible met; OOP max approaching \(ded remaining 0, OOP remaining 800\)/);
   assert.match(ben, /MENAFI · Per 104 · OOP max met/);
   assert.doesNotMatch(ben, /LINSVE|BYRNIA/, 'not-met and ineligible patients are left out');
   assert.equal(C.lasfir("O'Neil", 'Al'), 'ONEAL');
@@ -205,9 +207,12 @@ test('buildTasks lists what to add or update in NextGen, soonest visit first', (
 
 test('keepDone carries Done marks across rebuilds by Task Key', () => {
   const tasks = C.buildTasks(merged().results);
-  const prev = [{ 'Task Key': '100|Update benefits in NextGen', Done: 'Yes' }, { 'Task Key': 'gone|x', Done: 'Yes' }];
+  assert.ok(tasks.some((t) => t['Task Key'] === '900|Update benefits in NextGen'), 'Task Key is the MRN + task');
+  // A row saved before v0.12 (Per Nbr Task Key) keeps its Done mark through its MRN column.
+  const prev = [{ 'Task Key': '100|Update benefits in NextGen', 'Per Nbr': '100', MRN: '900', Task: 'Update benefits in NextGen', Done: 'Yes' }, { 'Task Key': 'gone|x', Done: 'Yes' }];
   const kept = C.keepDone(tasks, prev);
-  assert.equal(kept.find((t) => t['Task Key'] === '100|Update benefits in NextGen').Done, 'Yes');
+  assert.equal(kept.find((t) => t['Task Key'] === '900|Update benefits in NextGen').Done, 'Yes');
+  assert.equal(C.keepDone(tasks, [{ 'Task Key': '900|Update benefits in NextGen', Done: 'Yes' }]).filter((t) => t.Done).length, 1);
   assert.equal(kept.filter((t) => t.Done).length, 1);
 });
 
@@ -223,7 +228,7 @@ test('chunkMessage and messageAssembler round-trip a large payload in pieces', (
 });
 
 test('taskMessage lists open tasks only, LASFIR not names', () => {
-  const tasks = C.keepDone(C.buildTasks(merged().results), [{ 'Task Key': '100|Update benefits in NextGen', Done: 'Yes' }]);
+  const tasks = C.keepDone(C.buildTasks(merged().results), [{ 'Task Key': '900|Update benefits in NextGen', Done: 'Yes' }]);
   const msg = C.taskMessage(tasks);
   assert.match(msg, /OKACHI · Per 101 · Add insurance in NextGen: Choose Cigna\./);
   assert.doesNotMatch(msg, /RIVANA|Okafor|Chidi/, 'done task and full names left out');
@@ -244,15 +249,15 @@ function rawFiles() {
 test('discovery coverage found becomes a verification import with the discovered payer', () => {
   const res = C.mergeSoharResults(MERGE_ROWS(), rawFiles(), CFG);
   const byId = Object.fromEntries(res.discoveryVerification.map((r) => [r.id, r]));
-  assert.deepEqual(Object.keys(byId).sort(), ['101', '103', '104']);
-  assert.equal(byId['101'].payerId, '62308');
-  assert.equal(byId['101'].firstName, 'Chidi');
-  assert.equal(byId['101'].dateOfBirth, '01/01/1990');
-  assert.equal(byId['101'].memberId, 'CG101', 'member ID from the discovery output');
-  assert.equal(byId['103'].memberId, 'UH103');
-  assert.equal(byId['101'].placeOfServiceCode, '11');
-  assert.equal(byId['103'].placeOfServiceCode, '10');
-  assert.equal(byId['104'].memberId, 'C77');
+  assert.deepEqual(Object.keys(byId).sort(), ['PER-101', 'PER-103', 'PER-104'], 'ids are patient keys (no MRN in this report: PER-<Per Nbr>)');
+  assert.equal(byId['PER-101'].payerId, '62308');
+  assert.equal(byId['PER-101'].firstName, 'Chidi');
+  assert.equal(byId['PER-101'].dateOfBirth, '01/01/1990');
+  assert.equal(byId['PER-101'].memberId, 'CG101', 'member ID from the discovery output');
+  assert.equal(byId['PER-103'].memberId, 'UH103');
+  assert.equal(byId['PER-101'].placeOfServiceCode, '11');
+  assert.equal(byId['PER-103'].placeOfServiceCode, '10');
+  assert.equal(byId['PER-104'].memberId, 'C77');
   const csv = C.toCSV(C.VERIFICATION_COLS, res.discoveryVerification);
   assert.equal(csv.split('\r\n')[0], C.VERIFICATION_COLS.join(','));
   const d101 = res.results.find((r) => r['Per Nbr'] === '101' && r['Sent As'] === 'Discovery');
@@ -285,7 +290,7 @@ test('a later verification upload is added to saved results and closes the disco
   assert.match(v.Action, /^Eligible on Cigna, the plan discovery found\. Add it to NextGen/);
   assert.equal(v['Work Queue'], 'Action needed');
   assert.equal(v['Deductible Status'], 'Approaching');
-  assert.deepEqual(res.discoveryVerification.map((r) => r.id).sort(), ['103', '104'], '101 no longer needs sending');
+  assert.deepEqual(res.discoveryVerification.map((r) => r.id).sort(), ['PER-103', 'PER-104'], '101 no longer needs sending');
 
   assert.ok(C.benefitsExport(res.results).some((r) => r['Per Nbr'] === '101' && r.Plan === 'SYNTH OPEN ACCESS'));
   const tasks = C.buildTasks(res.results).filter((t) => t['Per Nbr'] === '101');
@@ -302,10 +307,10 @@ test('failed verifications go to a discovery import; eligible, pending and alrea
     ver({ requestId: 'q-7', id: '777', resolved: '2026-10-14T01:00:00.000Z', payerName: 'Aetna', status: 'error.member.id' })];
   const res = C.mergeSoharResults(MERGE_ROWS(), [{ name: 'verification output.csv', rows: v }], CFG);
   const byId = Object.fromEntries(res.verificationDiscovery.map((r) => [r.id, r]));
-  assert.deepEqual(Object.keys(byId).sort(), ['102', '105'], 'eligible 100, pending 104 and unmatched 777 stay out');
-  assert.equal(byId['102'].payerId, '', 'ineligible: no payer hint, the patient may have changed plans');
-  assert.equal(byId['105'].payerId, '62308', 'error: the payer is kept as a hint');
-  assert.equal(byId['102'].lastName, 'Lindqvist');
+  assert.deepEqual(Object.keys(byId).sort(), ['PER-102', 'PER-105'], 'eligible 100, pending 104 and unmatched 777 stay out');
+  assert.equal(byId['PER-102'].payerId, '', 'ineligible: no payer hint, the patient may have changed plans');
+  assert.equal(byId['PER-105'].payerId, '62308', 'error: the payer is kept as a hint');
+  assert.equal(byId['PER-102'].lastName, 'Lindqvist');
   assert.equal(C.toCSV(C.DISCOVERY_COLS, res.verificationDiscovery).split('\r\n')[0], C.DISCOVERY_COLS.join(','));
   const r102 = res.results.find((r) => r['Per Nbr'] === '102');
   assert.equal(r102['Discovery Follow-up'], 'Sent to discovery');
@@ -317,8 +322,8 @@ test('failed verifications go to a discovery import; eligible, pending and alrea
   // failed verification does not count as the follow-up, so the plan goes out for a fresh verification.
   const d = [DISC_HDR, disc({ requestId: 'r-9', id: '105', resolved: '2026-10-15T02:00:00.000Z', state: 'CA', memberId: 'C88-01', responsePayerId: '62308', responsePayerName: 'Cigna' })];
   const res2 = C.mergeSoharResults(MERGE_ROWS(), [{ name: 'verification output.csv', rows: v }, { name: 'discovery output.csv', rows: d }], CFG);
-  assert.deepEqual(res2.verificationDiscovery.map((r) => r.id), ['102']);
-  const dv = res2.discoveryVerification.find((r) => r.id === '105');
+  assert.deepEqual(res2.verificationDiscovery.map((r) => r.id), ['PER-102']);
+  const dv = res2.discoveryVerification.find((r) => r.id === 'PER-105');
   assert.ok(dv, '105 is on the discovery verification import');
   assert.equal(dv.memberId, 'C88-01');
 });
@@ -346,14 +351,14 @@ test('a discovery older than the failure does not block the follow-up', () => {
   const v = [VER_HDR, ver({ requestId: 'a', id: '104', resolved: '2026-10-14T01:00:00.000Z', memberId: 'C77', payerName: 'Cigna', status: 'complete.ineligible' })];
   const d = [DISC_HDR, disc({ requestId: 'r', id: '104', resolved: '2026-06-01T01:00:00.000Z', state: 'CA' })];
   const res = C.mergeSoharResults(MERGE_ROWS(), [{ name: 'v.csv', rows: v }, { name: 'd.csv', rows: d }], CFG);
-  assert.deepEqual(res.verificationDiscovery.map((r) => r.id), ['104']);
+  assert.deepEqual(res.verificationDiscovery.map((r) => r.id), ['PER-104']);
 });
 
 test('a member ID Sohar rejected is not reused on the verification from discovery', () => {
   const v = [VER_HDR, ver({ requestId: 'a', id: '105', resolved: '2026-10-14T01:00:00.000Z', memberId: 'C88', payerName: 'Cigna', status: 'error.member.id' })];
   const d = [DISC_HDR, disc({ requestId: 'r', id: '105', resolved: '2026-10-15T01:00:00.000Z', state: 'CA', responsePayerId: '62308', responsePayerName: 'Cigna' })];
   const res = C.mergeSoharResults(MERGE_ROWS(), [{ name: 'v.csv', rows: v }, { name: 'd.csv', rows: d }], CFG);
-  assert.equal(res.discoveryVerification.find((r) => r.id === '105').memberId, '', 'blank, so the pane asks for the right ID');
+  assert.equal(res.discoveryVerification.find((r) => r.id === 'PER-105').memberId, '', 'blank, so the pane asks for the right ID');
 });
 
 test('two policies with the same payer are both saved', () => {

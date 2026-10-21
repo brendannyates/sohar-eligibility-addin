@@ -56,6 +56,13 @@
     tblFeeLocations: { sheet: 'Fee Locations' }, tblProviderHome: { sheet: 'Provider Home Clinic' },
     tblFeePayerMap: { sheet: 'Fee Payer Map' }, tblFeePayerMapLog: { sheet: 'Fee Payer Map Log' },
     tblEstimateCodes: { sheet: 'Estimate Codes' }, tblEstimateDefaults: { sheet: 'Estimate Defaults' },
+    // v0.12. Guarantor resubmission requests and payer test rows carry MRNs: hidden. The payer mapping discovery rows are
+    // visible (the file's rows, like Discovery Verify). Metrics, their history and the guarantor themes have no identifiers.
+    tblGuarantorRequests: { sheet: 'Guarantor Requests', hidden: true }, tblPayerTests: { sheet: 'Payer Tests', hidden: true },
+    tblPayerMapping: { sheet: 'Payer Mapping' }, tblPayerMetrics: { sheet: 'Payer Metrics' }, tblPayerMetricHistory: { sheet: 'Payer Metrics History' },
+    tblGuarantorThemes: { sheet: 'Guarantor Themes' },
+    // Inside a clinic file: the clinic's own "Re-verify anyway" ticks, brought back to the admin workbook.
+    tblClinicRequests: { sheet: 'Clinic Requests' },
   };
   // Fee estimate tables by short name (app.js uses readFee / writeFee with these).
   const FEE_TABLES = { schedule: 'tblFeeSchedule', meta: 'tblFeeMeta', locations: 'tblFeeLocations', homes: 'tblProviderHome',
@@ -161,6 +168,9 @@
       reverifyDays: (() => { const n = parseInt(String(cfg['Re-verify days'] ?? ''), 10); return isNaN(n) || n < 0 ? 7 : n; })(),
       // Re-verify skip window: Skip recent verifications (On), Re-verify days (7), Re-verify in new month (Off). See core.reverifyConfig.
       reverify: root.SoharCore.reverifyConfig(cfg),
+      // v0.12: payer mapping discovery (On) and payer tests (Off), see core.payerTestConfig; and when Sohar ids became MRNs.
+      payerTests: root.SoharCore.payerTestConfig(cfg),
+      mrnSince: cfg['MRN ids since'] == null ? '' : cfg['MRN ids since'],
       clinicLocation: String(cfg['Clinic location'] ?? '').trim(),
       // Payer learning: optional rows (Learning, Learn: ...), defaults when missing. See core.learningConfig.
       learning: root.SoharCore.learningConfig(cfg),
@@ -300,6 +310,10 @@
       const body = t.getDataBodyRange(); body.load('rowCount');
       await ctx.sync();
       if (hdr.columnCount !== cols.length) throw new Error(`${tableName} has ${hdr.columnCount} columns; this version of the add-in expects ${cols.length}. Use the matching template.`);
+      // Same columns, older names (v0.12: Review "Per Nbr" is "MRN"): rename the header cells in place.
+      hdr.load('values');
+      await ctx.sync();
+      if (hdr.values[0].some((h, j) => String(h).trim() !== cols[j])) { hdr.values = [cols]; await ctx.sync(); }
       ctx.application.suspendApiCalculationUntilNextSync();
       // Empty the body down to one blank row. Excel refuses to delete a table's last row (InsertDeleteConflict),
       // so the first row is cleared and only rows 2..n are deleted.
@@ -501,6 +515,20 @@
   async function readReverifyRequests() { return readOwned('tblReverifyRequests'); }
   const writeReverifyRequests = (cols, rows) => writeAddinTable('Re-verify Requests', 'tblReverifyRequests', cols, rows, false); // hidden: OWNED
 
+  // v0.12: guarantor resubmission requests, payer tests (hidden), the payer mapping discovery rows, metrics and themes.
+  const readGuarantorRequests = () => readOwned('tblGuarantorRequests');
+  const writeGuarantorRequests = (cols, rows) => writeAddinTable('Guarantor Requests', 'tblGuarantorRequests', cols, rows, false); // hidden: OWNED
+  const readPayerTests = () => readOwned('tblPayerTests');
+  const writePayerTests = (cols, rows) => writeAddinTable('Payer Tests', 'tblPayerTests', cols, rows, false); // hidden: OWNED
+  const writePayerMapping = (cols, rows) => writeAddinTable('Payer Mapping', 'tblPayerMapping', cols, rows, false);
+  const readPayerMapping = () => readOwned('tblPayerMapping');
+  const writePayerMetrics = (cols, rows) => writeAddinTable('Payer Metrics', 'tblPayerMetrics', cols, rows, false);
+  const readPayerMetricHistory = () => readOwned('tblPayerMetricHistory');
+  const writePayerMetricHistory = (cols, rows) => writeAddinTable('Payer Metrics History', 'tblPayerMetricHistory', cols, rows, false);
+  const writeGuarantorThemes = (cols, rows) => writeAddinTable('Guarantor Themes', 'tblGuarantorThemes', cols, rows, false);
+  const readClinicRequests = () => readOwned('tblClinicRequests');
+  const writeClinicRequests = (cols, rows) => writeAddinTable('Clinic Requests', 'tblClinicRequests', cols, rows, false);
+
   // Fee estimates (v0.11): read / write by short name (FEE_TABLES). Missing table = nothing saved yet (readOwned).
   function feeTable(kind) {
     const t = FEE_TABLES[kind];
@@ -526,7 +554,8 @@
     const meta = (await readTable('tblClinicMeta'))[0] || {};
     const rows = await readTable('tblClinic').catch(() => []);
     const review = await readTable('tblClinicReview').catch(() => []);
-    return { meta, rows, review };
+    const requests = await readOwned('tblClinicRequests').catch(() => []);
+    return { meta, rows, review, requests };
   }
 
   /** Mark one NextGen task done (or not) by Task Key. */
@@ -745,6 +774,8 @@
     readPayerEvidence, writePayerEvidence, tableExists, readClinicFile, ensureConfigRows,
     readPayerOutcomes, writePayerOutcomes, readPayerMapLog, writePayerMapLog, appendPayerMapLog, writePayerLearning,
     readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests, FEE_TABLES, readFee, writeFee,
+    readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, writePayerMetrics,
+    readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

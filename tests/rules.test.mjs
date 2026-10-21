@@ -8,12 +8,12 @@ const TODAY = new Date(2026, 9, 15); // Thu 10/15/2026 local
 const CFG = { today: TODAY, sfhpProviders: [], reverifyDays: 7 };
 
 function pat(o = {}, x = {}) {
-  return Object.assign({ 'Per Nbr': '1001', MRN: 'M1', 'Last Name': 'Testerson', 'First Name': 'Alexa', DOB: '01/02/1980', State: 'CA', 'In Scope': 'Yes', 'Primary Payer': 'Blue Shield CA', 'Secondary Payer': '' }, o, {
+  return Object.assign({ 'Per Nbr': '1001', MRN: `M${(o && o['Per Nbr']) || '1001'}`, 'Last Name': 'Testerson', 'First Name': 'Alexa', DOB: '01/02/1980', State: 'CA', 'In Scope': 'Yes', 'Primary Payer': 'Blue Shield CA', 'Secondary Payer': '' }, o, {
     x: Object.assign({ finClass: 'Blue Shield', finClassLstEnc: 'Blue Shield', appointments: [], verifyRows: [] }, x),
   });
 }
 const appt = (o) => Object.assign({ date: '10/20/2026', time: '09:00', event: 'Med Management Telepsych', loc: 'San Rafael', rendering: 'Doe, Jamie MD', status: '', authCd: '', authCdLstEnc: '' }, o);
-const fresh = (o = {}) => Object.assign({ 'Per Nbr': '1001', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-13T17:00:00Z', 'Sohar Payer': 'Blue Shield of California', Plan: 'PPO' }, o);
+const fresh = (o = {}) => Object.assign({ 'Per Nbr': '1001', MRN: `M${o['Per Nbr'] || '1001'}`, 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-13T17:00:00Z', 'Sohar Payer': 'Blue Shield of California', Plan: 'PPO' }, o);
 const codes = (fl) => fl.map((f) => f.code);
 
 test('PILLS: shape and required codes', () => {
@@ -299,11 +299,13 @@ function sample() {
 test('allFlags + reviewRows', () => {
   const { patients, results } = sample();
   const m = R.allFlags(patients, results, CFG);
-  assert.ok(codes(m.get('1')).includes('KAISER_MM_NOAUTH'));
-  assert.ok(codes(m.get('1')).includes('REVERIFY'));
-  assert.deepEqual(m.get('2'), []);
+  assert.ok(codes(m.get('M1')).includes('KAISER_MM_NOAUTH'), 'flags are keyed by the patient key (MRN)');
+  assert.ok(codes(m.get('M1')).includes('REVERIFY'));
+  assert.deepEqual(m.get('M2'), []);
   const rv = R.reviewRows(m, patients);
-  assert.deepEqual(Object.keys(rv[0]), ['Severity', 'Issue', 'Per Nbr', 'Detail', 'Fix']);
+  assert.deepEqual(Object.keys(rv[0]), ['Severity', 'Issue', 'MRN', 'Detail', 'Fix']);
+  assert.deepEqual(Object.keys(rv[0]), createRequire(import.meta.url)('../core.js').REVIEW_COLS);
+  assert.equal(rv[0].MRN, 'M1');
   assert.equal(rv[0].Severity, 'High');
   assert.ok(!rv.some((r) => r.Issue === 'Kaiser/VA MM'));
   assert.ok(rv.some((r) => r.Issue === 'Re-verify' && r.Fix.includes(R.REVERIFY_URL)));
@@ -340,22 +342,22 @@ test('clinicReviewRows', () => {
   const rows = R.clinicReviewRows('San Rafael', patients, results, m, TODAY);
   assert.ok(rows.length >= 3);
   assert.deepEqual(Object.keys(rows[0]), R.CLINIC_REVIEW_COLS);
-  assert.ok(rows.every((r) => r['Per Nbr'] === '1'));
+  assert.ok(rows.every((r) => r.MRN === 'M1'));
   assert.ok(rows.some((r) => r.Issue === 'KAISER_MM_NOAUTH' && r['Appt Date'] === '10/21/2026'));
 });
 
-test('clinicEmail: LASFIR + Per Nbr only, grouped by date', () => {
+test('clinicEmail: LASFIR + MRN only, grouped by date', () => {
   const { patients, results } = sample();
   const m = R.allFlags(patients, results, CFG);
   const rows = R.clinicRows('San Rafael', patients, results, m, TODAY);
   const txt = R.clinicEmail('San Rafael', rows, { runDate: TODAY });
   assert.match(txt, /Sohar pre-check: San Rafael/);
-  assert.match(txt, /ALPANN \(1\)/);
-  assert.match(txt, /BRABEN \(2\)/);
+  assert.match(txt, /ALPANN \(MRN M1\)/);
+  assert.match(txt, /BRABEN \(MRN M2\)/);
   assert.match(txt, /Deductible approaching \(\$100 left\)/);
   assert.match(txt, /OOP max met/);
   assert.ok(txt.indexOf('10/16/2026') < txt.indexOf('10/21/2026'));
-  for (const bad of ['Alpha', 'Anna', 'Bravo', 'M1', '01/02/1980']) assert.ok(!txt.includes(bad), bad);
+  for (const bad of ['Alpha', 'Anna', 'Bravo', '01/02/1980']) assert.ok(!txt.includes(bad), bad);
   assert.ok(!/Kaiser\/VA MM[;,\n]|Kaiser\/VA MM$/.test(txt.replace(/Kaiser\/VA MM no auth/g, '')));
   const none = R.clinicEmail('Castro Street', [], { runDate: TODAY });
   assert.match(none, /Nothing to flag/);
@@ -365,13 +367,15 @@ test('payerEvidence: upsert keeps First Seen and earlier Sohar fields; summary p
   const p1 = pat({ 'Per Nbr': '7', 'Primary Payer': 'Odd Local Plan', 'Member ID': 'xq9-12345', Confidence: 'Auto-Low', State: 'CA' },
     { finClass: 'Contracted Commercial', finClassLstEnc: 'Aetna', guarZip: '94901-1234', location: 'San Rafael',
       verifyRows: [{ nextgenPayer: 'Odd Local Plan', memberId: 'xq9-12345', payerId: 'P1', source: 'guarantor' }, { nextgenPayer: 'Aetna', memberId: 'W77', payerId: '60054', source: 'lstEnc' }] });
-  const res = [{ 'Per Nbr': '7', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'NextGen Payer': 'Odd Local Plan', 'Sohar Payer': 'Local Admin Co', Plan: 'HMO', 'Sohar Date': '2026-10-14' }];
+  const res = [{ 'Per Nbr': '7', MRN: 'M7', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'NextGen Payer': 'Odd Local Plan', 'Sohar Payer': 'Local Admin Co', Plan: 'HMO', 'Sohar Date': '2026-10-14' }];
   const prev = [{ Key: '7|odd local plan|XQ9', 'Per Nbr': '7', 'NextGen Payer': 'Odd Local Plan', 'First Seen': '2026-09-01', 'Last Seen': '2026-09-01', 'Sohar Payer': 'Old Name' },
     { Key: '8|other|ABC', 'Per Nbr': '8', 'NextGen Payer': 'Other', 'Member ID Prefix': 'ABC', 'Location': 'San Rafael', 'First Seen': '2026-08-01', 'Last Seen': '2026-08-01', 'Sohar Payer': 'Local Admin Co' }];
-  const rows = R.payerEvidence([p1], res, prev, TODAY);
+  // prev was saved before v0.12 (Per Nbr keys): re-keyed to the MRN with the report's Per Nbr -> MRN pairs.
+  const rows = R.payerEvidence([p1], res, prev, TODAY, new Map([['7', 'M7'], ['8', 'M8']]));
   assert.equal(rows.length, 3);
+  assert.ok(rows.some((r) => r.Key === 'M8|other|ABC' && r.MRN === 'M8'), 'a patient not in this run is re-keyed too');
   assert.deepEqual(Object.keys(rows[0]), R.PAYER_EVIDENCE_COLS);
-  const odd = rows.find((r) => r.Key === '7|odd local plan|XQ9');
+  const odd = rows.find((r) => r.Key === 'M7|odd local plan|XQ9');
   assert.equal(odd['First Seen'], '2026-09-01');
   assert.equal(odd['Last Seen'], '2026-10-15');
   assert.equal(odd['Sohar Payer'], 'Local Admin Co');
@@ -388,7 +392,7 @@ test('payerEvidence: upsert keeps First Seen and earlier Sohar fields; summary p
   assert.equal(again.find((r) => r.Key === odd.Key)['Sohar Payer'], 'Local Admin Co');
   assert.equal(again.find((r) => r.Key === odd.Key)['First Seen'], '2026-09-01');
 
-  const sum = R.evidenceSummary([...rows, Object.assign({}, odd, { Key: '9|odd local plan|XQ9', 'Per Nbr': '9', 'Sohar Payer': 'Local Admin Co' })]);
+  const sum = R.evidenceSummary([...rows, Object.assign({}, odd, { Key: 'M9|odd local plan|XQ9', MRN: 'M9', 'Sohar Payer': 'Local Admin Co' })]);
   assert.deepEqual(sum[0], { nextgenPayer: 'Odd Local Plan', prefix: 'XQ9', location: 'San Rafael', count: 2, soharPayers: ['Local Admin Co'] });
   assert.equal(sum.length, 3);
 });
@@ -398,7 +402,7 @@ test('payerEvidence: falls back to Primary Payer + Member ID, skips Self Pay', (
   const s = pat({ 'Per Nbr': '6', 'Primary Payer': 'Self Pay' }, {});
   const rows = R.payerEvidence([p, s], [], [], TODAY);
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].Key, '5|cigna|U12');
+  assert.equal(rows[0].Key, 'M5|cigna|U12');
 });
 
 test('lasfir local copy', () => {
@@ -456,7 +460,7 @@ test('collapseFlags: repeated per-appointment flags become one line; review rows
   assert.equal(c.length, 2, 'one line per provider');
   assert.equal(c[0].detail, 'UMR does not allow an NP rendering provider for TMS: 2 visits with Lark, Jordan PMHNP (10/16, 10/17)');
   assert.match(c[1].detail, /on 10\/19\/2026 with Moss, Kai NP$/, 'a single visit keeps its own wording');
-  const m = new Map([['1001', fl]]);
+  const m = new Map([['M1001', fl]]);
   assert.equal(R.reviewRows(m, [p]).filter((r) => r.Issue === 'NP-TMS').length, 3);
   const row = R.clinicRows('All', [p], [fresh()], m, TODAY)[0];
   assert.equal(row['Review Items'].split(' | ').filter((t) => /NP rendering/.test(t)).length, 2);

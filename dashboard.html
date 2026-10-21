@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar eligibility, full screen</title>
-  <link rel="stylesheet" href="style.css?v=0.11.0">
+  <link rel="stylesheet" href="style.css?v=0.12.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
@@ -23,6 +23,8 @@
     <button role="tab" data-tab="benefits">Benefits &amp; OOP</button>
     <button role="tab" data-tab="worklist">Worklist</button>
     <button role="tab" data-tab="tasks">NextGen tasks <span id="taskCount" class="badge"></span></button>
+    <button role="tab" data-tab="clinic">Clinic lists</button>
+    <button role="tab" data-tab="learning">Payer learning</button>
     <button role="tab" data-tab="messages">Messages</button>
     <button role="tab" data-tab="upload">Upload &amp; save</button>
   </nav>
@@ -42,7 +44,7 @@
       <label>Flag
         <select id="fPill"><option value="">Any</option></select>
       </label>
-      <label class="grow">Search <input id="fText" type="search" placeholder="Name, Per Nbr, MRN, payer, plan"></label>
+      <label class="grow">Search <input id="fText" type="search" placeholder="Name, MRN, payer, plan"></label>
     </section>
 
     <!-- Prep by appointment -->
@@ -74,7 +76,7 @@
       <div class="tablewrap">
         <table id="benTbl" class="grid">
           <thead><tr>
-            <th>Patient</th><th>Per Nbr</th><th>Next appt</th><th>Location</th><th>Service</th><th>Plan</th><th>Copay</th><th>Coins</th>
+            <th>Patient</th><th>MRN</th><th>Next appt</th><th>Location</th><th>Service</th><th>Plan</th><th>Copay</th><th>Coins</th>
             <th>OOP met</th><th>OOP left</th><th>Deductible met</th><th>Deductible left</th><th>Flag</th>
             <th class="feecol" hidden>Est MD</th><th class="feecol" hidden>Est NP</th>
           </tr></thead>
@@ -117,7 +119,7 @@
       <div class="tablewrap">
         <table id="tbl">
           <thead><tr>
-            <th>Next appt</th><th>Location</th><th>Patient</th><th>Per Nbr</th><th>Flags</th><th>Result</th><th>Sohar status</th><th>Queue</th>
+            <th>Next appt</th><th>Location</th><th>Patient</th><th>MRN</th><th>Flags</th><th>Result</th><th>Sohar status</th><th>Queue</th>
             <th>Action</th><th>Choose in NextGen</th><th>Benefits</th><th>Copay</th><th>Coins</th>
             <th>Deductible left</th><th>OOP left</th><th>Plan</th><th>Link</th>
           </tr></thead>
@@ -140,10 +142,66 @@
       <p class="hint">Ticking Done writes "Yes" to the NextGen Tasks sheet. Done marks stay when results are uploaded again.</p>
       <div class="tablewrap">
         <table id="tasksTbl">
-          <thead><tr><th>Done</th><th>Due by</th><th>Location</th><th>Patient</th><th>Per Nbr</th><th>Result</th><th>Task</th><th>Details</th><th>Choose in NextGen</th><th>Link</th></tr></thead>
+          <thead><tr><th>Done</th><th>Due by</th><th>Location</th><th>Patient</th><th>MRN</th><th>Result</th><th>Task</th><th>Details</th><th>Choose in NextGen</th><th>Link</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
+    </section>
+
+    <!-- Clinic lists: what each clinic sees, exportable -->
+    <section class="panel" data-panel="clinic" hidden>
+      <div class="filters">
+        <label>Clinic
+          <select id="cLoc"><option value="">All locations</option></select>
+        </label>
+        <label>Show
+          <select id="cShow">
+            <option value="">Everyone with a visit</option>
+            <option value="flagged">Flagged</option>
+            <option value="skipped">Skipped (verified recently)</option>
+            <option value="asked">Re-verify anyway asked</option>
+            <option value="guar">Found via guarantor</option>
+          </select>
+        </label>
+        <span id="cShown" class="hint"></span>
+      </div>
+      <div class="actions">
+        <button class="primary alt" data-csave="list">Save clinic list (CSV)</button>
+        <button class="primary alt" data-csave="flags">Save clinic flags (CSV)</button>
+        <button class="primary alt" data-csave="skipped">Save skipped list (CSV)</button>
+        <button class="primary" id="btnCFile">Save clinic file (.xlsx)</button>
+      </div>
+      <p class="hint">The lists follow the filters above. Clinic files contain PHI: share them only through MHS OneDrive or Teams. Clinics tick <b>Re-verify anyway</b> in their file or on the Clinic tab; bring their files back in the pane (Clinic files and emails).</p>
+      <div class="tablewrap">
+        <table id="cTbl">
+          <thead><tr><th>Next appt</th><th>Location</th><th>Patient</th><th>MRN</th><th>Visit</th><th>Payer</th><th>Sohar</th><th>Flags</th><th>Skip window</th><th>Benefits</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Payer learning -->
+    <section class="panel" data-panel="learning" hidden>
+      <section class="tiles" aria-label="Payer learning">
+        <div class="tile unm"><span class="n" id="lUnm">0</span><span class="l">appts, payer unmapped</span></div>
+        <div class="tile act"><span class="n" id="lFail">0</span><span class="l">appts, verification failed</span></div>
+        <div class="tile pen"><span class="n" id="lTest">—</span><span class="l">payer tests eligible</span></div>
+        <div class="tile clr"><span class="n" id="lRec">0</span><span class="l">payers recurring</span></div>
+      </section>
+      <p class="hint">A discovery that finds a different payer counts against a mapping only when Sohar returns the same member ID; other coverage (another policy, e.g. Cigna for a Blue Card patient) is shown but never moves the Payer Map. Suggestions are never applied automatically: confirm them in the pane (step 1).</p>
+      <h2>Payer metrics</h2>
+      <div class="actions"><button class="primary alt" data-lsave="metrics">Save payer metrics (CSV)</button></div>
+      <div class="tablewrap"><table id="lMetrics" class="grid"><thead></thead><tbody></tbody></table></div>
+      <h2>Payer tests</h2>
+      <p class="hint" id="lTestNote"></p>
+      <div class="tablewrap"><table id="lTests" class="grid"><thead><tr><th>NextGen payer</th><th>Sohar payer tried</th><th>Sent</th><th>Back</th><th>Eligible</th></tr></thead><tbody></tbody></table></div>
+      <h2>Payer mapping discovery</h2>
+      <p class="hint" id="lMapNote"></p>
+      <h2>Guarantor searches</h2>
+      <div class="actions"><button class="primary alt" data-lsave="themes">Save guarantor themes (CSV)</button></div>
+      <div class="tablewrap"><table id="lThemes" class="grid"><thead></thead><tbody></tbody></table></div>
+      <h2>Payer Learning sheet</h2>
+      <div class="tablewrap"><table id="lRows" class="grid"><thead></thead><tbody></tbody></table></div>
     </section>
 
     <!-- Messages -->
@@ -159,7 +217,7 @@
         </label>
         <button class="primary" id="btnCopy">Copy message</button>
       </div>
-      <label class="msgbox">Uses the filters above. LASFIR + Per Nbr only; send inside Outlook or Teams only.
+      <label class="msgbox">Uses the filters above. LASFIR + MRN only; send inside Outlook or Teams only.
         <textarea id="msg" rows="16" readonly></textarea>
       </label>
     </section>
@@ -173,6 +231,10 @@
           <input type="file" id="fileUp" accept=".csv,.xlsx,.xlsm" multiple hidden>
           <div id="drop" class="drop" tabindex="0" role="button">Drop files here, or <u>choose files</u></div>
           <p id="upState" class="hint"></p>
+          <div id="guarCall" class="callout" hidden>
+            <p id="guarText"></p>
+            <button class="primary" id="btnGuar">Yes, add them to the next discovery file</button>
+          </div>
         </div>
         <div>
           <h2>Save files</h2>
@@ -182,6 +244,8 @@
             <button class="primary alt" data-save="discovery">Sohar Ready Import - Discovery</button>
             <button class="primary alt" data-save="discoveryVerify">Sohar Ready Import - Verification (from Discovery)</button>
             <button class="primary alt" data-save="verifyFailed">Sohar Ready Import - Discovery (from Verification)</button>
+            <button class="primary alt" data-save="mapping">Sohar Ready Import - Discovery (Payer Mapping)</button>
+            <button class="primary alt" data-save="payerTests">Sohar Ready Import - Verification (Payer Tests)</button>
             <button class="primary" data-save="tracker">Tracker file (TMS + ESK)</button>
             <button class="primary alt" data-save="benefits">Benefits and OOP progress</button>
             <button class="primary alt" data-save="tasks">NextGen tasks (open)</button>
@@ -196,9 +260,9 @@
     <section id="detail" class="detail" hidden aria-live="polite"></section>
   </main>
 
-  <script src="core.js?v=0.11.0"></script>
-  <script src="rules.js?v=0.11.0"></script>
-  <script src="fees.js?v=0.11.0"></script>
-  <script src="dashboard.js?v=0.11.0"></script>
+  <script src="core.js?v=0.12.0"></script>
+  <script src="rules.js?v=0.12.0"></script>
+  <script src="fees.js?v=0.12.0"></script>
+  <script src="dashboard.js?v=0.12.0"></script>
 </body>
 </html>

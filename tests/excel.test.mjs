@@ -18,15 +18,15 @@ const tasks = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries
 const expected = (cols, rows) => rows.map((r) => Object.fromEntries(cols.map((c) => [c, r[c] == null ? '' : r[c]])));
 // Payer learning tables (v0.10). All text.
 const outcomes = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(C.PAYER_OUTCOME_COLS.map((c) =>
-  [c, c === 'Per Nbr' ? `00${i}` : c === 'Sent payerId' ? '01111' : c === 'Key' ? `${tag}|${i}` : `${tag} ${c} ${i}`])));
+  [c, c === 'MRN' ? `00${i}` : c === 'Sent payerId' ? '01111' : c === 'Key' ? `${tag}|${i}` : `${tag} ${c} ${i}`])));
 const mapLog = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(C.PAYER_MAP_LOG_COLS.map((c) =>
   [c, c === 'New payerId' ? '01111' : c === 'Score' ? '0.81' : `${tag} ${c} ${i}`])));
 const learning = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(C.PAYER_LEARNING_COLS.map((c) =>
   [c, c === 'Sohar payerId' ? '01111' : c === 'Evidence score' ? '83' : `${tag} ${c} ${i}`])));
 // Sohar ref memory and Re-verify anyway requests. All text (Per Nbr keeps leading zeros).
-const refs = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'Sohar Ref': `${tag}-q-${i}`, 'Per Nbr': `00${i}`, Kind: i % 2 ? 'discovery' : 'verification',
+const refs = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'Sohar Ref': `${tag}-q-${i}`, 'MRN': `00${i}`, Kind: i % 2 ? 'discovery' : 'verification',
   'Result Key': `v|00${i}|synthetic payer|0${i}`, 'First Matched': '10/20/2026 9:00 AM' }));
-const requests = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'Per Nbr': `0${i}`, Requested: `2026-10-20T1${i % 10}:00:00.000Z` }));
+const requests = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'MRN': `0${i}`, Requested: `2026-10-20T1${i % 10}:00:00.000Z`, By: 'Clinic tab' }));
 
 // ---------- happy path ----------
 
@@ -173,7 +173,7 @@ test('Payer Outcomes (hidden), Payer Map Log and Payer Learning round-trip as te
   assert.equal(m.sheetVisibility('Payer Outcomes'), 'Hidden');
   assert.equal(m.autofits('Payer Outcomes'), 0, 'no autofit on the hidden ledger');
   assert.deepEqual(await X.readPayerOutcomes(), expected(C.PAYER_OUTCOME_COLS, outcomes(4, 'a')));
-  assert.equal((await X.readPayerOutcomes())[0]['Per Nbr'], '000', 'leading zeros kept');
+  assert.equal((await X.readPayerOutcomes())[0].MRN, '000', 'leading zeros kept');
   // Append-only through core.appendOutcomes: the old rows plus the new ones.
   const more = C.appendOutcomes(await X.readPayerOutcomes(), [...outcomes(2, 'a'), ...outcomes(3, 'b')]);
   assert.equal(more.added, 3);
@@ -207,7 +207,7 @@ test('Sohar Refs and Re-verify Requests (hidden) round-trip as text; refs surviv
   await X.writeSoharRefs(C.SOHAR_REF_COLS, refs(3, 'a'));
   assert.equal(m.sheetVisibility('Sohar Refs'), 'Hidden');
   assert.deepEqual(await X.readSoharRefs(), expected(C.SOHAR_REF_COLS, refs(3, 'a')));
-  assert.equal((await X.readSoharRefs())[0]['Per Nbr'], '000', 'leading zeros kept');
+  assert.equal((await X.readSoharRefs())[0].MRN, '000', 'leading zeros kept');
   // Append-only through core.appendRefs.
   const more = C.appendRefs(await X.readSoharRefs(), [...refs(1, 'a'), ...refs(2, 'b')], 'now');
   assert.equal(more.added, 2);
@@ -216,10 +216,10 @@ test('Sohar Refs and Re-verify Requests (hidden) round-trip as text; refs surviv
   await X.writeUploads(C.UPLOAD_COLS, []);
   assert.equal((await X.readSoharRefs()).length, 5, '"Clear saved Sohar results" keeps the ref memory');
 
-  await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, C.addReverifyRequest([], '0042', '2026-10-20T16:00:00.000Z'));
+  await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, C.addReverifyRequest([], '0042', '2026-10-20T16:00:00.000Z', 'Clinic tab'));
   assert.equal(m.sheetVisibility('Re-verify Requests'), 'Hidden');
-  assert.deepEqual(await X.readReverifyRequests(), [{ 'Per Nbr': '0042', Requested: '2026-10-20T16:00:00.000Z' }]);
-  const pr = C.pruneReverifyRequests(await X.readReverifyRequests(), [{ 'Per Nbr': '0042', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-21' }]);
+  assert.deepEqual(await X.readReverifyRequests(), [{ 'MRN': '0042', Requested: '2026-10-20T16:00:00.000Z', By: 'Clinic tab' }]);
+  const pr = C.pruneReverifyRequests(await X.readReverifyRequests(), [{ 'MRN': '0042', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-21' }]);
   await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, pr.rows);
   assert.deepEqual(await X.readReverifyRequests(), [], 'dropped once a newer verification exists');
   assert.equal(m.activeSheet(), 'Import', 'neither activates');
@@ -685,4 +685,29 @@ test('two Excel windows saving the same table at once: always one complete versi
     try { await X.writeUploads(C.UPLOAD_COLS, uploads(2, 'next')); } catch (e) { bad.push(`delay ${delay}: next save threw ${e.message}`); }
   }
   assert.deepEqual(bad, []);
+});
+
+test('replaceTable renames an older template header in place (v0.12: Review "Per Nbr" is "MRN")', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  m.seedTable('Review', 'tblReview', ['Severity', 'Issue', 'Per Nbr', 'Detail', 'Fix'], [{ Severity: 'Low', Issue: 'x', 'Per Nbr': '1', Detail: '', Fix: '' }]);
+  await X.replaceTable('tblReview', C.REVIEW_COLS, [{ Severity: 'High', Issue: 'MRN missing', MRN: 'PER-7', Detail: 'd', Fix: 'f' }]);
+  assert.deepEqual(await X.readTable('tblReview'), [{ Severity: 'High', Issue: 'MRN missing', MRN: 'PER-7', Detail: 'd', Fix: 'f' }]);
+  await assert.rejects(X.replaceTable('tblReview', ['Severity', 'Issue'], []), /expects 2/, 'a different column count still stops');
+});
+
+test('v0.12 hidden tables: Guarantor Requests and Payer Tests round-trip hidden; Payer Mapping and metrics are visible', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  await X.writeGuarantorRequests(C.GUARANTOR_REQUEST_COLS, [{ MRN: '0042', Requested: 't', Reason: C.GUARANTOR_REASONS.none, By: 'Admin' }]);
+  assert.equal(m.sheetVisibility('Guarantor Requests'), 'Hidden');
+  assert.deepEqual(await X.readGuarantorRequests(), [{ MRN: '0042', Requested: 't', Reason: C.GUARANTOR_REASONS.none, By: 'Admin' }]);
+  await X.writePayerTests(C.PAYER_TEST_COLS, [Object.fromEntries(C.PAYER_TEST_COLS.map((c) => [c, c === 'MRN' ? '007' : 'x']))]);
+  assert.equal(m.sheetVisibility('Payer Tests'), 'Hidden');
+  assert.equal((await X.readPayerTests())[0].MRN, '007', 'leading zeros kept');
+  await X.writePayerMapping(C.MAPPING_DISCOVERY_COLS, [{ firstName: 'A', lastName: 'B', dateOfBirth: '01/01/1990', state: 'CA', zipCode: '01234', payerId: '', id: '007-M', memberId: '0099' }]);
+  assert.equal(m.sheetVisibility('Payer Mapping'), 'Visible');
+  assert.equal((await X.readPayerMapping())[0].zipCode, '01234');
+  await X.writePayerMetrics(C.PAYER_METRIC_COLS, []);
+  await X.writePayerMetricHistory(C.PAYER_METRIC_HISTORY_COLS, [{ Date: '2026-10-20', 'NextGen Payer': 'P', 'Unmapped appts': '3' }]);
+  assert.equal((await X.readPayerMetricHistory())[0]['Unmapped appts'], '3');
+  assert.equal(m.activeSheet(), 'Import', 'none of them activates');
 });

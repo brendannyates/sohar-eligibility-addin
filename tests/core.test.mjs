@@ -86,14 +86,20 @@ test('buildPatients dedupes per patient, routes, and derives POS/state/scope', (
   assert.equal(by['104'].Route, 'verification');
   assert.equal(by['104']['Member ID Mismatch'], 'Yes');
   assert.ok(res.review.some((r) => r.Issue === 'Unmapped payer' && r.Severity === 'High'));
-  assert.ok(res.review.some((r) => r.Issue === 'Member ID mismatch' && r['Per Nbr'] === '104'));
+  assert.ok(res.review.some((r) => r.Issue === 'Member ID mismatch' && r.MRN === 'PER-104'), 'review rows name the patient key: PER-<Per Nbr> without an MRN');
+  assert.ok(res.review.some((r) => r.Issue === 'MRN missing' && r.MRN === 'PER-104'));
+  assert.ok(!res.review.some((r) => r.Issue === 'MRN missing' && r.MRN === '900'));
 
   const ex = C.buildExports(res.patients, CFG);
   assert.equal(ex.verification.length, 2);
-  assert.equal(ex.discovery.length, 2);
+  // 103 (unmapped payer, member ID on file) goes on the payer mapping discovery with its member ID instead.
+  assert.equal(ex.discovery.length, 1);
+  assert.deepEqual(ex.mapping.map((r) => [r.id, r.memberId]), [['PER-103-M', 'PH1']]);
+  assert.deepEqual(Object.keys(ex.mapping[0]), C.MAPPING_DISCOVERY_COLS);
+  assert.equal(C.buildExports(res.patients, { ...CFG, mappingDiscovery: false }).discovery.length, 2, 'Payer mapping discovery Off: back on the discovery file');
   assert.deepEqual(Object.keys(ex.verification[0]), C.VERIFICATION_COLS);
   assert.deepEqual(Object.keys(ex.discovery[0]), C.DISCOVERY_COLS);
-  assert.equal(ex.verification.find((r) => r.id === '100').memberId, 'XEA123');
+  assert.equal(ex.verification.find((r) => r.id === '900').memberId, 'XEA123');
   assert.equal(ex.verification[0].specialtyCode, 'PSY');
 });
 

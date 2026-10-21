@@ -20,6 +20,8 @@
     { code: 'SECONDARY', label: 'Secondary may cover', severity: 'info', color: 'blue' },
     { code: 'VIP', label: 'VIP', severity: 'info', color: 'blue' },
     { code: 'DUAL', label: 'Two insurances sent', severity: 'info', color: 'blue' },
+    // v0.12: Sohar found coverage when it searched with the guarantor as the person (discovery id <MRN>-G).
+    { code: 'GUARANTOR', label: 'Via guarantor', severity: 'medium', color: 'blue' },
     { code: 'KAISER_MM', label: 'Kaiser/VA MM', severity: 'info', color: 'grey' },
   ];
   const PILL = {};
@@ -144,11 +146,13 @@
     const batch = nd ? vers.filter((r) => { const d = parseDate(r['Sohar Date']); return !d || nd - d <= 3 * 86400000; }) : vers;
     return latest(batch.filter(isEligible)) || newest || latest(rs);
   }
-  function resultsFor(results, per) {
+  // Patient key (core.keyOf): the MRN, else PER-<Per Nbr>. Flags, results and clinic rows group on it.
+  const keyOf = (r) => C.keyOf(r);
+  function resultsFor(results, key) {
     if (!results) return [];
-    if (results instanceof Map) return results.get(per) || [];
-    if (Array.isArray(results)) return results.filter((r) => r && str(r['Per Nbr']) === per);
-    return results[per] || [];
+    if (results instanceof Map) return results.get(key) || [];
+    if (Array.isArray(results)) return results.filter((r) => r && keyOf(r) === key);
+    return results[key] || [];
   }
 
   // ---------- flags ----------
@@ -158,7 +162,7 @@
   }
 
   /**
-   * Flags for one patient. results = Sohar result rows for this Per Nbr.
+   * Flags for one patient. results = Sohar result rows for this patient (same key).
    * cfg = { today: Date, sfhpProviders: string[], reverifyDays: 7 }.
    */
   function patientFlags(patient, results, cfg) {
@@ -288,17 +292,21 @@
       }
     }
 
+    // Guarantor search found coverage: the policy is the guarantor's (the patient a dependent on it).
+    const viaG = latest(rows.filter((r) => r['Searched As'] === 'Guarantor' && r['Sohar Status'] === 'Coverage found'));
+    if (viaG) out.push(mk('GUARANTOR', `Coverage found through the guarantor: ${str(viaG['Sohar Payer']) || 'a payer'}${str(viaG['Sohar Date']) ? ` (${fmtDate(parseDate(viaG['Sohar Date']))})` : ''}. Add the guarantor's policy in NextGen with the patient as a dependent, then verify.`));
+
     return out.sort((a, b) => PILL[a.code].order - PILL[b.code].order || str(a.appt && a.appt.date).localeCompare(str(b.appt && b.appt.date)));
   }
 
-  /** Map(Per Nbr -> flags[]). results: array of rows (any Per Nbr), Map, or {perNbr: rows}. */
+  /** Map(patient key -> flags[]). results: array of rows (any patient), Map, or {key: rows}. */
   function allFlags(patients, results, cfg) {
-    const byPer = groupResults(results);
+    const byKey = groupResults(results);
     const m = new Map();
     for (const p of patients || []) {
-      const per = str(p && p['Per Nbr']);
-      if (!per) continue;
-      m.set(per, (m.get(per) || []).concat(patientFlags(p, byPer.get(per) || [], cfg)));
+      const k = keyOf(p);
+      if (!k) continue;
+      m.set(k, (m.get(k) || []).concat(patientFlags(p, byKey.get(k) || [], cfg)));
     }
     return m;
   }
@@ -307,10 +315,10 @@
     const m = new Map();
     if (Array.isArray(results)) {
       for (const r of results) {
-        const per = str(r && r['Per Nbr']);
-        if (!per) continue;
-        if (!m.has(per)) m.set(per, []);
-        m.get(per).push(r);
+        const k = keyOf(r);
+        if (!k) continue;
+        if (!m.has(k)) m.set(k, []);
+        m.get(k).push(r);
       }
     } else if (results && typeof results === 'object') {
       for (const k of Object.keys(results)) m.set(k, results[k]);
@@ -331,19 +339,20 @@
     VIP: 'MHS-sponsored treatment. Verify any other insurance; otherwise discovery only.',
     DUAL: 'Choose the insurance Sohar returned eligible in NextGen.',
     KAISER_MM: 'Confirm the authorization covers this visit.',
+    GUARANTOR: 'Add the guarantor\'s policy in NextGen with the patient as a dependent, then send the patient for verification.',
   };
   const REVIEW_SEV = { high: 'High', medium: 'Medium', info: 'Low' };
 
   /** Review rows for every flag except the KAISER_MM drill-down marker. */
   function reviewRows(flagsMap, patients) {
     const order = new Map();
-    (patients || []).forEach((p, i) => { const per = str(p && p['Per Nbr']); if (per && !order.has(per)) order.set(per, i); });
+    (patients || []).forEach((p, i) => { const k = keyOf(p); if (k && !order.has(k)) order.set(k, i); });
     const out = [];
     const entries = flagsMap instanceof Map ? [...flagsMap.entries()] : Object.entries(flagsMap || {});
     for (const [per, flags] of entries) {
       for (const f of flags || []) {
         if (f.code === 'KAISER_MM') continue;
-        out.push({ Severity: REVIEW_SEV[f.severity] || 'Low', Issue: f.label, 'Per Nbr': per, Detail: f.detail || '', Fix: FIX[f.code] || '', _o: order.has(per) ? order.get(per) : 1e9 });
+        out.push({ Severity: REVIEW_SEV[f.severity] || 'Low', Issue: f.label, MRN: per, Detail: f.detail || '', Fix: FIX[f.code] || '', _o: order.has(per) ? order.get(per) : 1e9 });
       }
     }
     const rank = { High: 0, Medium: 1, Low: 2 };
@@ -391,9 +400,13 @@
   const CLINIC_COLS = ['Next Appt', 'Next Time', 'Next Event', 'Next Provider', 'Location', 'Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB',
     'Primary Payer', 'Choose in NextGen', 'Secondary Payer', 'Sohar Status', 'Sohar Payer', 'Plan', 'Verified Date', 'Days Since Verified',
     'Re-verify', 'Re-verify Link', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status',
-    'OOP Max', 'OOP Remaining', 'OOP Status', 'Benefit Flag', 'Pills', 'Review Items', 'Notes', 'Upcoming Appts', 'Sohar Link', 'Run Date'];
-  const CLINIC_REVIEW_COLS = ['Appt Date', 'Severity', 'Pill', 'Issue', 'Per Nbr', 'Last Name', 'First Name', 'Event', 'Rendering', 'Location',
+    'OOP Max', 'OOP Remaining', 'OOP Status', 'Benefit Flag', 'Pills', 'Review Items', 'Notes', 'Upcoming Appts', 'Sohar Link', 'Run Date',
+    // v0.12: the re-verify skip window (left off the verification file until Next Check) and the clinic's "Re-verify anyway".
+    'Verification Skipped', 'Next Check', 'Re-verify Anyway', 'Found Via Guarantor'];
+  const CLINIC_REVIEW_COLS = ['Appt Date', 'Severity', 'Pill', 'Issue', 'MRN', 'Last Name', 'First Name', 'Event', 'Rendering', 'Location',
     'Detail', 'Fix', 'Link', 'Run Date'];
+  // Clinic file: the clinic's own "Re-verify anyway" ticks, brought back to the admin workbook (core.mergeClinicRequests).
+  const CLINIC_REQUEST_COLS = ['MRN', 'Last Name', 'First Name', 'Next Appt', 'Re-verify Anyway', 'Requested'];
   const BENEFIT_KEYS = ['Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status', 'Benefit Flag'];
 
   /** Next visit for the clinic view: upcoming appointment, else the result row / patient fields. */
@@ -420,7 +433,7 @@
     const set = [];
     for (const p of patients || []) {
       if (!p || !inScope(p)) continue;
-      const per = str(p['Per Nbr']);
+      const per = keyOf(p);
       const rows = (byPer.get(per) || []).filter(Boolean);
       const nv = nextVisit(p, rows, runDay);
       if (!nv) continue;
@@ -437,7 +450,8 @@
     const runDay = dayOf(runDate);
     const fm = flagsMap instanceof Map ? flagsMap : new Map(Object.entries(flagsMap || {}));
     return clinicSet(location, patients, results, runDate).map(({ p, per, rows, nv }) => {
-      const best = bestResult(rows) || {};
+      const best = bestResult(rows.filter((r) => r['Searched As'] !== 'Guarantor')) || bestResult(rows) || {};
+      const x = xOf(p), skip = x.reverifySkip || x.reverifySkipped || null;
       const ver = rows.filter(isVerification).map((r) => parseDate(r['Sohar Date'])).filter(Boolean).sort((a, b) => b - a)[0] || null;
       const flags = fm.get(per) || [];
       const rv = flags.find((f) => f.code === 'REVERIFY');
@@ -445,7 +459,7 @@
       for (const f of flags) if (!pills.includes(f.label)) pills.push(f.label);
       const row = {
         'Next Appt': nv.date, 'Next Time': nv.time, 'Next Event': nv.event, 'Next Provider': nv.provider, 'Location': nv.loc,
-        'Per Nbr': per, 'MRN': str(p.MRN), 'Last Name': str(p['Last Name']), 'First Name': str(p['First Name']), 'DOB': str(p.DOB),
+        'Per Nbr': str(p['Per Nbr']), 'MRN': str(p.MRN), 'Last Name': str(p['Last Name']), 'First Name': str(p['First Name']), 'DOB': str(p.DOB),
         'Primary Payer': str(p['Primary Payer']), 'Choose in NextGen': str(best['Choose in NextGen']),
         'Secondary Payer': str(p['Secondary Payer']) || str(xOf(p).secPayer),
         'Sohar Status': str(best['Sohar Status']), 'Sohar Payer': str(best['Sohar Payer']), 'Plan': str(best.Plan),
@@ -455,10 +469,14 @@
         'Review Items': collapseFlags(flags.filter((f) => f.severity !== 'info')).map((f) => f.detail).join(' | '),
         'Notes': flags.filter((f) => f.severity === 'info' && f.code !== 'KAISER_MM').map((f) => f.detail).concat(str(best.Action) ? [str(best.Action)] : []).join(' | '),
         'Upcoming Appts': nv.count, 'Sohar Link': str(best['Sohar Link']), 'Run Date': run,
+        'Verification Skipped': skip ? `Verified eligible ${str(skip.verified)}` : '', 'Next Check': skip ? str(skip.due) : '',
+        'Re-verify Anyway': x.reverifyRequested ? 'Yes' : '',
+        'Found Via Guarantor': flags.some((f) => f.code === 'GUARANTOR') ? 'Yes' : '',
       };
       for (const k of BENEFIT_KEYS) row[k] = str(best[k]);
       const out = {};
       for (const k of CLINIC_COLS) out[k] = row[k] == null ? '' : row[k];
+      Object.defineProperty(out, 'key', { value: per, enumerable: false }); // non-column patient key (MRN)
       return out;
     });
   }
@@ -473,7 +491,7 @@
         const a = f.appt || {};
         out.push({
           'Appt Date': a.date || nv.date, 'Severity': REVIEW_SEV[f.severity] || 'Low', 'Pill': f.label, 'Issue': f.code,
-          'Per Nbr': per, 'Last Name': str(p['Last Name']), 'First Name': str(p['First Name']),
+          'MRN': per, 'Last Name': str(p['Last Name']), 'First Name': str(p['First Name']),
           'Event': a.event || nv.event, 'Rendering': a.rendering || nv.provider, 'Location': nv.loc,
           'Detail': f.detail || '', 'Fix': FIX[f.code] || '', 'Link': f.link || '', 'Run Date': run,
         });
@@ -483,7 +501,7 @@
   }
 
   /**
-   * Plain-text clinic summary. LASFIR + Per Nbr only (no names, DOB, MRN). Grouped by visit date.
+   * Plain-text clinic summary. LASFIR + MRN only (no names or DOB; Per Nbr when there is no MRN). Grouped by visit date.
    * rows = clinicRows output. opts: { runDate: Date, includeClear: false }.
    */
   function clinicEmail(location, rows, opts) {
@@ -502,7 +520,7 @@
       if (!items.length && !o.includeClear) continue;
       const date = str(r['Next Appt']) || 'No date';
       if (!groups.has(date)) groups.set(date, []);
-      const who = `${lasfir(r['Last Name'], r['First Name'])} (${str(r['Per Nbr'])})`;
+      const who = `${lasfir(r['Last Name'], r['First Name'])} (${C.idLabel(r)})`;
       groups.get(date).push(`- ${str(r['Next Time']) ? `${str(r['Next Time'])} ` : ''}${who}: ${items.length ? items.join('; ') : 'No action'}`);
       listed++;
     }
@@ -516,21 +534,36 @@
   }
 
   // ---------- Payer evidence (R10) ----------
-  const PAYER_EVIDENCE_COLS = ['Key', 'Per Nbr', 'NextGen Payer', 'Fin Class', 'Member ID Prefix', 'Location', 'Guar Zip3', 'State',
+  const PAYER_EVIDENCE_COLS = ['Key', 'MRN', 'NextGen Payer', 'Fin Class', 'Member ID Prefix', 'Location', 'Guar Zip3', 'State',
     'Confidence', 'Sohar Payer', 'Sohar Plan', 'Sohar Status', 'First Seen', 'Last Seen'];
   const prefix3 = (id) => str(id).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3);
   const evidenceKey = (per, payer, pre) => `${str(per)}|${low(payer)}|${pre}`;
 
-  /** Upsert one row per patient-insurance observation. Keeps First Seen and earlier Sohar fields when the new ones are blank. */
-  function payerEvidence(patients, results, previousRows, today) {
+  /**
+   * Upsert one row per patient-insurance observation. Keeps First Seen and earlier Sohar fields when the new ones are blank.
+   * perToKey (optional, core.perKeyMap): rows saved before v0.12 (Per Nbr) are re-keyed to the patient's MRN.
+   */
+  function payerEvidence(patients, results, previousRows, today, perToKey) {
     const stamp = localDate(today);
     const byPer = groupResults(results);
     const map = new Map();
-    for (const r of previousRows || []) if (r && str(r.Key)) map.set(str(r.Key), Object.assign({}, r));
+    for (const r0 of previousRows || []) {
+      if (!r0 || !str(r0.Key)) continue;
+      const r = Object.assign({}, r0);
+      if (!str(r.MRN) && str(r['Per Nbr'])) {
+        // The old Key is "<Per Nbr>|payer|prefix": only its first part changes.
+        const per = str(r['Per Nbr']);
+        r.MRN = C.migrateKey(C.perKey(per), perToKey);
+        r.Key = str(r.Key).startsWith(`${per}|`) ? `${r.MRN}${str(r.Key).slice(per.length)}` : evidenceKey(r.MRN, r['NextGen Payer'], str(r['Member ID Prefix']));
+        delete r['Per Nbr'];
+      }
+      const k = str(r.Key);
+      if (!map.has(k) || str(map.get(k)['Last Seen']) < str(r['Last Seen'])) map.set(k, r);
+    }
     for (const p of patients || []) {
       if (!p) continue;
       const x = xOf(p);
-      const per = str(p['Per Nbr']);
+      const per = keyOf(p);
       if (!per) continue;
       const obs = (Array.isArray(x.verifyRows) && x.verifyRows.length ? x.verifyRows.filter(Boolean) : [{ nextgenPayer: p['Primary Payer'], memberId: p['Member ID'] }])
         .filter((v) => str(v.nextgenPayer) && !isSelfPay(v.nextgenPayer));
@@ -546,7 +579,7 @@
         const prev = map.get(key) || {};
         const keep = (k, val) => (str(val) ? str(val) : str(prev[k]));
         map.set(key, {
-          'Key': key, 'Per Nbr': per, 'NextGen Payer': payer,
+          'Key': key, 'MRN': per, 'NextGen Payer': payer,
           'Fin Class': keep('Fin Class', lstEnc ? x.finClassLstEnc : x.finClass), 'Member ID Prefix': pre,
           'Location': keep('Location', x.location || (firstAppt && firstAppt.loc)),
           'Guar Zip3': keep('Guar Zip3', str(x.guarZip || p.Zip).replace(/\D/g, '').slice(0, 3)),
@@ -582,7 +615,7 @@
   }
 
   return {
-    REVERIFY_URL, PILLS, CLINIC_COLS, CLINIC_REVIEW_COLS, PAYER_EVIDENCE_COLS,
+    REVERIFY_URL, PILLS, CLINIC_COLS, CLINIC_REVIEW_COLS, CLINIC_REQUEST_COLS, PAYER_EVIDENCE_COLS,
     isMediCal, isKaiser, isVA, isSFHP, isQMB, isCarelon, isUMR, isNP, isTMSEvent, isMedMgmtEvent, isVIP, isMedicare,
     patientFlags, allFlags, reviewRows, clinicRows, clinicReviewRows, clinicEmail, payerEvidence, evidenceSummary,
     bestResult, lasfir, collapseFlags,

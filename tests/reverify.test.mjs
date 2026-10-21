@@ -154,18 +154,21 @@ test('applyReverifySkips: recent eligible same policy leaves the verification fi
   assert.equal(by['205'].x.reverifySkip, undefined, 'verified 7 days ago: due');
   assert.equal(by['206'].Route, 'discovery', 'discovery routing unchanged');
   const ex = C.buildExports(out.patients, CFG);
-  assert.deepEqual(ex.verification.map((r) => r.id).sort(), ['202', '203', '205']);
+  assert.deepEqual(ex.verification.map((r) => r.id).sort(), ['M202', 'M203', 'M205'], 'Sohar ids are MRNs');
+  assert.deepEqual(out.skipped.map((x) => [x.key, x.mrn]).sort(), [['M200', 'M200'], ['M201', 'M201']]);
   assert.deepEqual(Object.keys(ex.verification[0]), C.VERIFICATION_COLS);
-  assert.deepEqual(ex.discovery.map((r) => r.id), ['206']);
+  assert.deepEqual(ex.discovery.map((r) => r.id), ['M206']);
   assert.equal(C.buildExports(built.patients, CFG).verification.length, 5, 'the input patients are not changed');
   assert.equal(built.patients.find((x) => x['Per Nbr'] === '200')['Route Reason'], 'mapped payer + member ID');
 });
 
 test('applyReverifySkips: Skip Off, a Re-verify anyway request, out of scope, and a new-month visit inside the window', () => {
   assert.equal(skipBuild({ skip: false }).out.skipped.length, 0);
-  const asked = skipBuild({ requests: new Map([['200', '2026-10-19T12:00:00Z']]) });
+  const asked = skipBuild({ requests: new Map([['M200', '2026-10-19T12:00:00Z']]) });
   assert.deepEqual(asked.out.skipped.map((s) => s.per), ['201']);
-  assert.ok(C.buildExports(asked.out.patients, CFG).verification.some((r) => r.id === '200'));
+  assert.ok(C.buildExports(asked.out.patients, CFG).verification.some((r) => r.id === 'M200'));
+  assert.deepEqual(asked.out.requested.map((x) => [x.key, x.requested]), [['M200', '2026-10-19T12:00:00Z']], 'sent anyway on request: listed apart');
+  assert.equal(asked.by['200'].x.reverifyRequested, true);
   // 201 (verified 10/18, next visit 11/02): skipped through 10/24, due 10/25.
   assert.ok(skipBuild({ today: new Date(2026, 9, 24, 9) }).by['201'].x.reverifySkip);
   assert.equal(skipBuild({ today: new Date(2026, 9, 25, 9) }).by['201'].x.reverifySkip, undefined);
@@ -192,21 +195,31 @@ test('applyReverifySkips: two insurances, only the recently verified one is left
 
 test('Re-verify Requests: kept until a newer verification exists; one per patient', () => {
   const results = [
-    { 'Per Nbr': '200', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-18T19:00:00Z', Match: 'Per Nbr' },
-    { 'Per Nbr': '201', 'Sent As': 'Verification', 'Sohar Status': 'pending', 'Sohar Date': '2026-10-21T01:00:00Z', Match: 'Per Nbr' },
-    { 'Per Nbr': '202', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-22', Match: 'Name only. Confirm.' },
+    { MRN: 'M200', 'Per Nbr': '200', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-18T19:00:00Z', Match: 'MRN' },
+    { MRN: 'M201', 'Per Nbr': '201', 'Sent As': 'Verification', 'Sohar Status': 'pending', 'Sohar Date': '2026-10-21T01:00:00Z', Match: 'MRN' },
+    { MRN: 'M202', 'Per Nbr': '202', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-10-22', Match: 'Name only. Confirm.' },
   ];
   const req = [
-    { 'Per Nbr': '200', Requested: '2026-10-19T12:00:00.000Z' }, { 'Per Nbr': '201', Requested: '2026-10-20T12:00:00.000Z' },
-    { 'Per Nbr': '202', Requested: '2026-10-20T12:00:00.000Z' }, { 'Per Nbr': '203', Requested: 'not a date' }, { 'Per Nbr': '200', Requested: '2026-10-01' },
+    { MRN: 'M200', Requested: '2026-10-19T12:00:00.000Z', By: 'Clinic tab' }, { MRN: 'M201', Requested: '2026-10-20T12:00:00.000Z' },
+    { MRN: 'M202', Requested: '2026-10-20T12:00:00.000Z' }, { MRN: 'M203', Requested: 'not a date' }, { MRN: 'M200', Requested: '2026-10-01' },
   ];
   const pr = C.pruneReverifyRequests(req, results);
-  assert.deepEqual(pr.rows.map((r) => r['Per Nbr']), ['200', '202', '203'], '201 has a newer (pending) verification; 202 only a name match');
+  assert.deepEqual(pr.rows.map((r) => r.MRN), ['M200', 'M202', 'M203'], '201 has a newer (pending) verification; 202 only a name match');
   assert.equal(pr.dropped, 2);
-  assert.equal(pr.active.get('200'), '2026-10-19T12:00:00.000Z');
-  const added = C.addReverifyRequest(pr.rows, '202', '2026-10-21T08:00:00.000Z');
-  assert.deepEqual(added.map((r) => [r['Per Nbr'], r.Requested]), [['200', '2026-10-19T12:00:00.000Z'], ['203', 'not a date'], ['202', '2026-10-21T08:00:00.000Z']]);
+  assert.equal(pr.active.get('M200'), '2026-10-19T12:00:00.000Z');
+  assert.equal(pr.rows[0].By, 'Clinic tab');
+  const added = C.addReverifyRequest(pr.rows, 'M202', '2026-10-21T08:00:00.000Z', 'Admin');
+  assert.deepEqual(added.map((r) => [r.MRN, r.Requested, r.By]), [['M200', '2026-10-19T12:00:00.000Z', 'Clinic tab'], ['M203', 'not a date', ''], ['M202', '2026-10-21T08:00:00.000Z', 'Admin']]);
   assert.deepEqual(Object.keys(added[0]), C.REVERIFY_REQUEST_COLS);
+  assert.deepEqual(C.addReverifyRequest([], ['A', 'B'], 't', 'Admin: all skipped').map((r) => r.MRN), ['A', 'B']);
+  assert.deepEqual(C.removeReverifyRequest(added, ['M203', 'M200']).map((r) => r.MRN), ['M202']);
+  // Saved before v0.12: a Per Nbr row is read as PER-<Per Nbr>, and converted to the MRN with the report's pairs.
+  const old = C.pruneReverifyRequests([{ 'Per Nbr': '201', Requested: '2026-10-22T00:00:00Z' }], results, new Map([['201', 'M201']]));
+  assert.deepEqual(old.rows.map((r) => r.MRN), ['M201']);
+  assert.deepEqual(C.pruneReverifyRequests([{ 'Per Nbr': '201', Requested: '2026-10-22T00:00:00Z' }], results).rows.map((r) => r.MRN), ['PER-201']);
+  // A clinic file brought back: ticks add, unticks remove.
+  const m = C.mergeClinicRequests(added, [{ MRN: 'M205', 'Re-verify Anyway': 'On', Requested: 't9' }, { MRN: 'M203', 'Re-verify Anyway': 'Off' }, { MRN: 'M202', 'Re-verify Anyway': 'On' }], 'Clinic file San Rafael');
+  assert.deepEqual([m.added, m.removed, m.rows.map((r) => [r.MRN, r.By])], [1, 1, [['M200', 'Clinic tab'], ['M202', 'Admin'], ['M205', 'Clinic file San Rafael']]]);
 });
 
 // ---------- B. Sohar ref memory ----------
@@ -217,8 +230,8 @@ test('refs: learned from a Per Nbr match (requestId and the id in the Sohar link
   const res = C.mergeSoharResults(IMPORT(), [FIRST()], CFG);
   const key = res.results.find((r) => r['Per Nbr'] === '200').resultKey;
   assert.deepEqual(res.refs, [
-    { 'Sohar Ref': 'q-200', 'Per Nbr': '200', Kind: 'verification', 'Result Key': key },
-    { 'Sohar Ref': 'v-200', 'Per Nbr': '200', Kind: 'verification', 'Result Key': key },
+    { 'Sohar Ref': 'q-200', MRN: 'M200', Kind: 'verification', 'Result Key': key },
+    { 'Sohar Ref': 'v-200', MRN: 'M200', Kind: 'verification', 'Result Key': key },
   ]);
   assert.deepEqual(C.refsOf('verification', { requestid: 'a', url: URL('b'), verificationid: 'c' }), ['a', 'b', 'c']);
   assert.deepEqual(C.refsOf('verification', { requestid: 'a', url: 'https://example.test/other/b', verificationid: 'a' }), ['a']);
@@ -268,7 +281,7 @@ test('refs: never learned from a name match; a ref for someone not in the report
   assert.equal(res.results.find((r) => r['Sohar Ref'] === 'q-n').Match, 'Name only. Confirm.');
   assert.deepEqual(res.refs, []);
   const byMember = vfile({ requestId: 'q-m', resolved: '2026-10-18', memberId: 'C201', payerName: 'Cigna', status: 'complete.eligible' });
-  assert.deepEqual(C.mergeSoharResults(IMPORT(), [byMember], CFG).refs.map((r) => [r['Sohar Ref'], r['Per Nbr']]), [['q-m', '201']], 'a Member ID match teaches');
+  assert.deepEqual(C.mergeSoharResults(IMPORT(), [byMember], CFG).refs.map((r) => [r['Sohar Ref'], r.MRN]), [['q-m', 'M201']], 'a Member ID match teaches');
   const refs = [{ 'Sohar Ref': 'q-x', 'Per Nbr': '999', Kind: 'verification', 'Result Key': 'v|999|cigna|C999', 'First Matched': 't' }];
   const gone = C.mergeSoharResults(IMPORT(), [vfile({ requestId: 'q-x', resolved: '2026-10-18', payerName: 'Cigna', status: 'complete.eligible' })], { ...CFG, refs });
   const r = gone.results.find((x) => x['Sohar Ref'] === 'q-x');
@@ -288,16 +301,18 @@ test('refs: discovery re-export with a blank id keeps its key', () => {
 });
 
 test('appendRefs: append-only, first row for a ref wins, First Matched stamped', () => {
+  // The previous row was saved before v0.12 (Per Nbr): kept, as a PER- key, converted when the report pairs it with an MRN.
   const prev = [{ 'Sohar Ref': 'q-1', 'Per Nbr': '100', Kind: 'verification', 'Result Key': 'k1', 'First Matched': 'old' }];
   const out = C.appendRefs(prev, [
-    { 'Sohar Ref': 'q-1', 'Per Nbr': '999', Kind: 'verification', 'Result Key': 'kX' },
-    { 'Sohar Ref': 'q-1', 'Per Nbr': '101', Kind: 'discovery', 'Result Key': 'd|101' },
-    { 'Sohar Ref': 'q-2', 'Per Nbr': '', Kind: 'verification', 'Result Key': 'k2' },
+    { 'Sohar Ref': 'q-1', MRN: '999', Kind: 'verification', 'Result Key': 'kX' },
+    { 'Sohar Ref': 'q-1', MRN: 'M101', Kind: 'discovery', 'Result Key': 'd|101' },
+    { 'Sohar Ref': 'q-2', MRN: '', Kind: 'verification', 'Result Key': 'k2' },
   ], 'now');
   assert.equal(out.added, 1);
-  assert.deepEqual(out.rows, [prev[0], { 'Sohar Ref': 'q-1', 'Per Nbr': '101', Kind: 'discovery', 'Result Key': 'd|101', 'First Matched': 'now' }]);
+  assert.deepEqual(out.rows, [{ 'Sohar Ref': 'q-1', MRN: 'PER-100', Kind: 'verification', 'Result Key': 'k1', 'First Matched': 'old' }, { 'Sohar Ref': 'q-1', MRN: 'M101', Kind: 'discovery', 'Result Key': 'd|101', 'First Matched': 'now' }]);
   assert.deepEqual(Object.keys(out.rows[1]), C.SOHAR_REF_COLS);
-  assert.equal(C.refIndex(out.rows).get('verification|q-1').per, '100');
+  assert.equal(C.refIndex(out.rows).get('verification|q-1').per, 'PER-100');
+  assert.equal(C.appendRefs(prev, [], 'now', new Map([['100', 'M100']])).rows[0].MRN, 'M100');
 });
 
 // ---------- C. no identifiers ----------
@@ -370,8 +385,8 @@ test('skip window: a changed payerId with the same member ID is never skipped (t
   assert.equal(up.res.results.find((r) => r['Per Nbr'] === '300').sentPayerId, 'MCD01');
   assert.deepEqual(skipped(chart('Medi-Cal'), up.saved, cfg).pers, ['300'], 'same policy: skipped');
   // The chart now says Partnership HP with the same CIN (Sohar payer name blank on the Payer Map, or the same name).
-  assert.deepEqual(skipped(chart('Partnership HP'), up.saved, cfg), { pers: [], ver: ['300|PHP01'] });
-  assert.deepEqual(skipped(chart('Partnership HP'), up.saved, sameName), { pers: [], ver: ['300|PHP01'] }, 'two payerIds sharing a display name');
+  assert.deepEqual(skipped(chart('Partnership HP'), up.saved, cfg), { pers: [], ver: ['M300|PHP01'] });
+  assert.deepEqual(skipped(chart('Partnership HP'), up.saved, sameName), { pers: [], ver: ['M300|PHP01'] }, 'two payerIds sharing a display name');
   const shown = C.mergeSoharResults(chart('Partnership HP'), C.accumulateResults(up.saved, [], '', []).files, cfg).results.find((r) => r['Per Nbr'] === '300');
   assert.equal(shown['Sohar payerId'], 'MCD01', 'the Results sheet shows the payerId sent');
   assert.equal(C.payerOutcomes([shown], C.buildPatients(chart('Partnership HP'), cfg).patients, 't')[0]['Sent payerId'], 'MCD01');
@@ -404,7 +419,7 @@ test('refs learned in the same pass: a blank re-export is neither "No identifier
     assert.equal(cr.res.refsPending, 0);
     assert.deepEqual(C.noIdentifierReviewRows(cr.res.results), []);
     const r = cr.res.results.filter((x) => x['Sohar Ref'] === 'q-200');
-    assert.deepEqual(r.map((x) => [x.Match, x['Per Nbr']]), [['Per Nbr', '200']]);
+    assert.deepEqual(r.map((x) => [x.Match, x['Per Nbr']]), [['Per Nbr (old id)', '200']]);
     assert.deepEqual(cr.refs.map((x) => x['Sohar Ref']), ['q-200', 'v-200'], 'the refs are still saved');
     assert.equal(C.payerOutcomes(cr.res.results, cr.res.patients, 't').length, 1);
   };
@@ -428,5 +443,5 @@ test('payer outcomes ledger: a name-only verification adds no agree or payer-err
   assert.equal(res.results.find((r) => r['Sohar Ref'] === 'q-n').Match, 'Name only. Confirm.');
   assert.deepEqual(C.payerOutcomes(res.results, res.patients, 't'), []);
   const ok = C.mergeSoharResults(IMPORT(), [vfile({ ...rec, id: '201' })], CFG);
-  assert.deepEqual(C.payerOutcomes(ok.results, ok.patients, 't').map((o) => [o['Per Nbr'], o['Sent payerId'], o.Signal]), [['201', '62308', 'payer error']], 'a Per Nbr match still counts');
+  assert.deepEqual(C.payerOutcomes(ok.results, ok.patients, 't').map((o) => [o.MRN, o['Sent payerId'], o.Signal]), [['M201', '62308', 'payer error']], 'an id match still counts');
 });

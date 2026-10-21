@@ -141,7 +141,7 @@ test('R2: buildPatients auto-maps new names, routes High/Medium to verification,
   assert.equal(by['31']['Secondary Sohar payerId'], '60054');
   assert.equal(by['32'].Route, 'discovery');
   assert.equal(by['32']['Sohar payerId'], '', 'a low-confidence guess is not sent as the discovery hint');
-  assert.ok(res.review.some((r) => r['Per Nbr'] === '32' && r.Issue === 'Payer needs manual classification'));
+  assert.ok(res.review.some((r) => r.MRN === 'M32' && r.Issue === 'Payer needs manual classification'));
   assert.equal(by['33'].Confidence, 'Review', 'manual confidence on an existing row wins');
   assert.equal(by['33'].Route, 'discovery');
   assert.equal(by['34'].Route, 'discovery', 'Self Pay unchanged');
@@ -216,14 +216,16 @@ test('R3: low-confidence chart payer + different last encounter sends both insur
   ]);
   assert.equal(by['53'].Route, 'discovery');
   assert.equal(by['54'].Route, 'discovery');
-  assert.ok(res.review.some((r) => r['Per Nbr'] === '52' && r.Issue === 'Two insurances sent to verification'));
+  assert.ok(res.review.some((r) => r.MRN === 'M52' && r.Issue === 'Two insurances sent to verification'));
 
   const ex = C.buildExports(res.patients, CFG);
-  const v52 = ex.verification.filter((r) => r.id === '52');
+  const v52 = ex.verification.filter((r) => r.id === 'M52');
   assert.equal(v52.length, 2, 'one verification row per insurance, same id');
   assert.deepEqual(v52.map((r) => [r.payerId, r.memberId]), [['94135', 'KM52'], ['94036', 'BSL52']]);
   for (const r of ex.verification) assert.deepEqual(Object.keys(r), C.VERIFICATION_COLS);
-  assert.ok(ex.discovery.some((r) => r.id === '53'));
+  // 53 and 54 (Auto-Low, member ID on file) go on the payer mapping discovery with their member IDs: one discovery each.
+  assert.deepEqual(ex.mapping.map((r) => [r.id, r.memberId]).sort(), [['M53-M', 'KM53'], ['M54-M', 'KM54']]);
+  assert.ok(!ex.discovery.some((r) => /^M5[34]/.test(r.id)));
 });
 
 test('R4: VIP verifies other insurance when there is one, else discovery only', () => {
@@ -294,14 +296,14 @@ test('mergeSoharResults keeps both verification rows and marks the better one', 
 
   const r55 = res.results.filter((r) => r['Per Nbr'] === '55');
   for (const r of r55) assert.match(r.Action, /Two insurances were checked; neither came back eligible\. This patient is on the discovery import \(from verification\)\.$/);
-  assert.deepEqual(res.verificationDiscovery.map((r) => r.id), ['55'], 'both insurances failed: one discovery row');
-  assert.ok(!res.verificationDiscovery.some((r) => r.id === '52'), 'one eligible insurance keeps 52 out');
+  assert.deepEqual(res.verificationDiscovery.map((r) => r.id), ['M55'], 'both insurances failed: one discovery row');
+  assert.ok(!res.verificationDiscovery.some((r) => r.id === 'M52'), 'one eligible insurance keeps 52 out');
 
   const tr = C.trackerExport(res.results, '');
   assert.equal(tr.rows.find((r) => r['Per Nbr'] === '52')['Sohar Ref'], 'q-2', 'tracker export uses the eligible insurance');
   const tasks = C.buildTasks(res.results).filter((t) => t['Per Nbr'] === '52').map((t) => t.Task).sort();
   assert.deepEqual(tasks, ['Update benefits in NextGen', 'Update insurance in NextGen'], 'no task for the superseded row');
-  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
+  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon', 'key'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
 });
 
 test('two insurances: an old eligible result on another policy does not override a fresh ineligible one', () => {

@@ -365,3 +365,13 @@ textarea.copybox { width: 100%; font: 12px/1.45 ui-monospace, Consolas, monospac
 .estcol h4 { margin: 4px 0; font-size: 13px; }
 .estlines { margin: 0; padding-left: 16px; font-size: 12px; }
 .estlines li { margin: 1px 0; }
+
+/* v0.12: step 2 extra files, collapsed skip list, clinic "Re-verify anyway", guarantor prompt, payer learning */
+.extrafile { margin-top: 8px; }
+.extrafile .hint { margin: 4px 0 0; }
+.callout details.skiplist + details.skiplist { margin-top: 8px; }
+.callout details.skiplist > summary { cursor: pointer; }
+.pc-skip { margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--line, #ddd); font-size: 12px; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; }
+.pc-skip label.inline { font-weight: 600; }
+#learnBox .counts { margin-bottom: 8px; }
+#dropClinicBack { margin-top: 8px; }

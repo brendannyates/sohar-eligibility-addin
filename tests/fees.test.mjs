@@ -496,7 +496,7 @@ test('Off means v0.10 behavior in the pane: Benefits columns, payload, Config ro
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   assert.match(app, /const feesOn = \(\) => !!\(F && state\.cfg && state\.cfg\.fees && state\.cfg\.fees\.on\);/);
   assert.match(app, /const benefitCols = \(\) => C\.BENEFIT_SHEET_COLS\.concat\('Pills', \.\.\.\(feesOn\(\) \? \['Est MD', 'Est NP'\] : \[\]\)\);/);
-  assert.match(app, /Pills: pillsFor\(r\['Per Nbr'\]\), \.\.\.\(feesOn\(\) \? estCols\(r\['Per Nbr'\]\) : \{\}\)/);
+  assert.match(app, /Pills: pillsFor\(C\.keyOf\(r\)\), \.\.\.\(feesOn\(\) \? estCols\(r\['Per Nbr'\]\) : \{\}\)/);
   assert.match(app, /if \(feesOn\(\)\) base\.fees = feePayload\(\);/);
   assert.match(app, /if \(feesOn\(\)\) await refreshFees\(results\)/);
   assert.match(app, /feesOn\(\) \? F\.FEE_CONFIG_ROWS : F\.FEE_CONFIG_ROWS\.slice\(0, 1\)/);

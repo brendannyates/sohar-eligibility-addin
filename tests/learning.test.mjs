@@ -39,9 +39,11 @@ const disc = (o) => DISC_HDR.map((k) => (o[k] == null ? '' : String(o[k])));
 // One ledger row. Kind V or D.
 let seq = 0;
 const out = (o) => ({
-  Key: `k${++seq}`, 'Per Nbr': o.per, Kind: o.kind === 'D' ? 'Discovery' : 'Verification', 'NextGen Payer': o.name, 'Fin Class': o.fc || '',
+  Key: `k${++seq}`, 'MRN': o.per, Kind: o.kind === 'D' ? 'Discovery' : 'Verification', 'NextGen Payer': o.name, 'Fin Class': o.fc || '',
   Source: o.src || (o.kind === 'D' ? 'discovery' : 'chart'), 'Sent payerId': o.sent || '', 'Sent Confidence': '', 'Sohar Status': o.status || '',
   'Returned payerId': o.ret || '', 'Returned Payer': o.retName || '', Signal: o.sig, 'Sohar Date': o.date || '2026-10-01T10:00:00Z', Recorded: 'test',
+  // Discovery evidence of another payer needs Sohar to return the member ID NextGen has (v0.12); these helpers say it did.
+  'Member Match': o.mm != null ? o.mm : o.kind === 'D' && /other payer|found/.test(o.sig) ? 'Yes' : '',
 });
 const L = C.LEARN_DEFAULTS;
 
@@ -109,12 +111,12 @@ test('buildPatients: Review and unrecognized labels get the High manual-classifi
     base('4', { 'Payer Name (Cht Guar)': 'Learned Plan', 'Pol Nbr (Cht Guar)': 'L4' }),
     ['Total Appointments (4)']];
   const res = C.buildPatients(rows, { ...CFG, payerMap: map, soharPayers: undefined });
-  const issues = (per) => res.review.filter((r) => r['Per Nbr'] === per).map((r) => r.Issue);
+  const issues = (per) => res.review.filter((r) => r.MRN === `M${per}`).map((r) => r.Issue);
   assert.ok(issues('1').includes('Payer needs manual classification'));
-  assert.match(res.review.find((r) => r['Per Nbr'] === '1' && r.Issue === 'Payer needs manual classification').Detail, /\(confidence: Review\)/);
+  assert.match(res.review.find((r) => r.MRN === 'M1' && r.Issue === 'Payer needs manual classification').Detail, /\(confidence: Review\)/);
   assert.ok(issues('2').includes('Payer needs manual classification'));
   assert.equal(res.patients.find((p) => p['Per Nbr'] === '1').Route, 'discovery', 'routing unchanged');
-  const un = res.review.find((r) => r['Per Nbr'] === '3' && r.Issue === 'Unmapped payer');
+  const un = res.review.find((r) => r.MRN === 'M3' && r.Issue === 'Unmapped payer');
   assert.match(un.Fix, /^Map it in step 1/);
   const p4 = res.patients.find((p) => p['Per Nbr'] === '4');
   assert.equal(p4.Route, 'verification');
@@ -173,7 +175,7 @@ function ledgerMerge(extraVer, extraDisc) {
   ];
   const d = [DISC_HDR,
     disc({ requestId: 'r-1', id: '70', resolved: '2026-10-14', responsePayerId: '94135', responsePayerName: 'Kaiser Foundation Health Plan of Northern California' }),
-    disc({ requestId: 'r-2', id: '71', resolved: '2026-10-14', responsePayerId: '62308', responsePayerName: 'Cigna' }),
+    disc({ requestId: 'r-2', id: '71', resolved: '2026-10-14', memberId: 'KM71', responsePayerId: '62308', responsePayerName: 'Cigna' }),
     disc({ requestId: 'r-3', id: '72', resolved: '2026-10-14', responsePayerId: 'WH1', responsePayerName: 'Western Health Advantage' }),
     disc({ requestId: 'r-4', id: '73', resolved: '2026-10-14' }),
     ...(extraDisc || []),
@@ -186,7 +188,7 @@ test('payerOutcomes: one row per Sohar outcome with the right signal, source and
   assert.equal(res.error, undefined);
   const rows = C.payerOutcomes(res.results, res.patients, '10/20/2026 9:00 AM');
   for (const r of rows) assert.deepEqual(Object.keys(r), C.PAYER_OUTCOME_COLS);
-  const by = (per, kind, extra) => rows.filter((r) => r['Per Nbr'] === per && r.Kind === kind && (!extra || extra(r)));
+  const by = (per, kind, extra) => rows.filter((r) => r.MRN === `M${per}` && r.Kind === kind && (!extra || extra(r)));
   const [chart52] = by('52', 'Verification', (r) => r.Source === 'chart');
   assert.deepEqual([chart52['NextGen Payer'], chart52['Sent payerId'], chart52['Sent Confidence'], chart52.Signal, chart52['Fin Class']],
     ['Kaiser Medicare Northern CA', '94135', 'Auto-Low', 'ineligible', 'Medicare Advantage']);
@@ -199,7 +201,8 @@ test('payerOutcomes: one row per Sohar outcome with the right signal, source and
   const d70 = by('70', 'Discovery')[0], d71 = by('71', 'Discovery')[0], d72 = by('72', 'Discovery')[0], d73 = by('73', 'Discovery')[0];
   assert.deepEqual([d70['Sent payerId'], d70['Returned payerId'], d70.Signal], ['94135', '94135', 'agree'], 'Auto-Low: compared with the guess');
   assert.deepEqual([d71['Returned payerId'], d71.Signal], ['62308', 'other payer']);
-  assert.deepEqual([d72['NextGen Payer'], d72['Sent payerId'], d72.Signal], ['', '', 'found']);
+  assert.deepEqual([d71['Member Match'], d72['Member Match']], ['Yes', 'No']);
+  assert.deepEqual([d72['NextGen Payer'], d72['Sent payerId'], d72.Signal], ['', '', 'other coverage'], 'no member ID on file: not mapping evidence');
   assert.equal(d73.Signal, 'neutral');
   assert.ok(rows.every((r) => r.Recorded === '10/20/2026 9:00 AM'));
   assert.ok(!rows.some((r) => r['Sohar Status'] === 'Not in Sohar file'));
@@ -304,7 +307,7 @@ test('learnPayers: distinct patients, latest outcome per patient, score, and the
   const bn = got.get('Brand New Name');
   assert.deepEqual([bn.mapped, bn.discovery, bn.suggestion.payerId], [false, 3, 'N1'], 'nothing-found results do not count as discovery checked');
   assert.ok(!got.has('VIP') && !got.has('Self Pay'));
-  assert.equal(C.learningEvidence(ny), 'Sohar: 3 agreed, 1 other payer, score 67');
+  assert.equal(C.learningEvidence(ny), 'Sohar: 3 agreed, 1 other payer for the same member ID, score 67');
   assert.equal(C.learningEvidence(de), 'Sohar: 1 agreed, 2 payer errors, score 40');
   assert.equal(C.learningEvidence({ n: 0 }), '');
   assert.equal(C.learningEvidence({ n: 2, agree: 0, conflicts: 0, discovery: 0 }), 'Sohar: 2 patients checked, nothing that confirms or contradicts the payer yet');
@@ -359,7 +362,7 @@ test('planLearning: promote and demote automatic labels, re-score Auto-Low upwar
   assert.deepEqual(off.finClasses, []);
   assert.equal(off.counts.flagged, 1);
   const review = C.learningReviewRows(off.rollup);
-  assert.deepEqual(review.map((r) => [r.Severity, r.Issue, r['Per Nbr']]), [['High', 'Sohar disagrees with Payer Map', '']]);
+  assert.deepEqual(review.map((r) => [r.Severity, r.Issue, r.MRN]), [['High', 'Sohar disagrees with Payer Map', '']]);
   assert.match(review[0].Detail, /^Human Plan -> Four \(P4, Confirmed\): 2 patients with a Sohar payer error/);
 });
 
@@ -368,12 +371,44 @@ test('payerLearningRows: one row per payer, no patient identifiers', () => {
   const map = [{ nextgenPayerName: 'Suggest Me', payerId: 'P5', payerName: 'Five', confidence: 'Auto-Low' }, { nextgenPayerName: 'Quiet', payerId: 'P6', payerName: 'Six', confidence: 'Exact' }];
   const sheet = C.payerLearningRows(C.learnPayers(rows, map, L));
   assert.deepEqual(sheet.map((r) => Object.keys(r)), [C.PAYER_LEARNING_COLS, C.PAYER_LEARNING_COLS]);
-  assert.ok(!C.PAYER_LEARNING_COLS.includes('Per Nbr'));
+  assert.ok(!C.PAYER_LEARNING_COLS.includes('Per Nbr') && !C.PAYER_LEARNING_COLS.includes('MRN'));
   const s = sheet[0];
   assert.deepEqual([s['NextGen Payer'], s['Evidence score'], s['Discovery checked'], s['Discovery other payer'], s['Most common other payer'], s.Suggestion],
-    ['Suggest Me', '20', '3', '3', 'Q Five (Q5): 3 of 3', 'Use Q Five (Q5): 3 of 3 discovery patients']);
+    ['Suggest Me', '20', '3', '3', 'Q Five (Q5): 3 of 3', 'Use Q Five (Q5): 3 of 3 discovery patients (same member ID)']);
   assert.match(s['Last outcome'], /^10\/01\/2026 Discovery: other payer$/);
   assert.deepEqual([sheet[1]['NextGen Payer'], sheet[1]['Evidence score'], sheet[1]['Last outcome']], ['Quiet', '', '']);
+});
+
+test('other coverage: a discovery finding a different payer without the same member ID is never evidence (v0.12)', () => {
+  // Three Blue Card patients whose discovery found Cigna under other member IDs: no demote, no suggestion, counted apart.
+  const map = [{ nextgenPayerName: 'Blue Shield CA Blue Card', payerId: '94036', payerName: 'Blue Shield of California', confidence: 'Auto-High' }];
+  const rows = ['1', '2', '3'].map((per) => out({ per, kind: 'D', name: 'Blue Shield CA Blue Card', sent: '94036', ret: '62308', retName: 'Cigna', sig: 'other coverage', mm: 'No' }));
+  const r = C.learnPayers(rows, map, L)[0];
+  assert.deepEqual([r.discovery, r.otherPayer, r.conflicts, r.unrelated, r.decision, r.suggestion], [0, 0, 0, 3, '', null]);
+  assert.match(C.learningEvidence(r), /3 found other coverage, not evidence/);
+  assert.equal(C.payerLearningRows([r])[0]['Discovery other coverage (not evidence)'], '3');
+  // Rows saved before v0.12 have no Member Match: their "other payer" and "found" no longer count either.
+  const old = ['1', '2', '3'].map((per) => { const o = out({ per, kind: 'D', name: 'Blue Shield CA Blue Card', sent: '94036', ret: '62308', retName: 'Cigna', sig: 'other payer' }); delete o['Member Match']; delete o.MRN; o['Per Nbr'] = per; return o; });
+  const r2 = C.learnPayers(old, map, L)[0];
+  assert.deepEqual([r2.conflicts, r2.unrelated, r2.decision, r2.n], [0, 3, '', 3], 'a legacy Per Nbr row still counts as a patient (PER- key)');
+  // With the same member ID it is evidence: two of three is a demote.
+  const same = ['1', '2'].map((per) => out({ per, kind: 'D', name: 'Blue Shield CA Blue Card', sent: '94036', ret: '62308', retName: 'Cigna', sig: 'other payer' }))
+    .concat(out({ per: '3', kind: 'D', name: 'Blue Shield CA Blue Card', sent: '94036', ret: '94036', sig: 'agree' }));
+  assert.equal(C.learnPayers(same, map, L)[0].decision, 'demote');
+});
+
+test('payerOutcomes: guarantor searches are neutral; the payer mapping discovery counts a found payer when Sohar echoes no member ID', () => {
+  const rows = [...TITLE, HDR, base('80', { 'Payer Name (Cht Guar)': 'Odd New Plan', 'Pol Nbr (Cht Guar)': 'ON80' }), ['Total Appointments (1)']];
+  const cfg = { ...CFG, payerMap: [...MAP, ...C.buildPatients(rows, CFG).autoMapped] };
+  const d = [DISC_HDR,
+    disc({ requestId: 'm-1', id: 'M80-M', resolved: '2026-10-14', responsePayerId: '60054', responsePayerName: 'Aetna' }),
+    disc({ requestId: 'g-1', id: 'M80-G', resolved: '2026-10-15', responsePayerId: '62308', responsePayerName: 'Cigna' })];
+  const res = C.mergeSoharResults(rows, [{ name: 'd.csv', rows: d }], cfg);
+  assert.deepEqual(res.results.map((r) => [r['Searched As'], r.Match]), [['Payer mapping', 'MRN'], ['Guarantor', 'MRN']]);
+  const o = C.payerOutcomes(res.results, res.patients, 'now');
+  const m = o.find((x) => x.Source === 'payer mapping'), g = o.find((x) => x.Source === 'guarantor');
+  assert.deepEqual([m['Member Match'], m.Signal === 'other coverage'], ['Yes', false]);
+  assert.deepEqual([g.Signal, g['Member Match']], ['neutral', '']);
 });
 
 // ---------- the change log ----------
@@ -484,7 +519,7 @@ test('duplicate Payer Map names: no learning, no suggestion, a Medium review row
   assert.equal(plan.counts.promoted, 0);
   const r = plan.rollup.find((x) => x.key === 'aetna ppo');
   assert.deepEqual([r.duplicate, r.duplicates, r.decision, r.suggestion], [true, 2, '', null]);
-  assert.deepEqual(C.learningReviewRows(plan.rollup).map((x) => [x.Severity, x.Issue, x['Per Nbr']]), [['Medium', 'Payer Map name listed twice', '']]);
+  assert.deepEqual(C.learningReviewRows(plan.rollup).map((x) => [x.Severity, x.Issue, x.MRN]), [['Medium', 'Payer Map name listed twice', '']]);
   assert.equal(C.planLearning(rows, [map[0]], SOHAR, L).counts.promoted, 1, 'one row: learned as usual');
 });
 

@@ -13,14 +13,15 @@
     'In Scope', 'Next Appt', 'Next Event', 'POS', 'Primary Payer', 'Sohar payerId', 'Confidence', 'Member ID', 'Member ID (Lst Enc)',
     'Member ID Mismatch', 'Secondary Payer', 'Secondary Sohar payerId', 'Appt Count', 'First Appt', 'Last Appt',
     'Subscriber First', 'Subscriber Last', 'Subscriber DOB', 'Flags'];
-  const REVIEW_COLS = ['Severity', 'Issue', 'Per Nbr', 'Detail', 'Fix'];
+  // v0.12: the patient column is the MRN (the add-in renames an older template's "Per Nbr" header in place).
+  const REVIEW_COLS = ['Severity', 'Issue', 'MRN', 'Detail', 'Fix'];
   // Sohar Results sheet. The add-in creates this table itself, so it is not part of the template contract.
   const RESULTS_COLS = ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'Next Provider', 'Upcoming Appts', 'Upcoming Detail',
     'Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Choose in NextGen', 'Benefit Flag',
     'Plan', 'Network', 'Coverage Level', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance',
     'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status',
     'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Coverage Differs', 'Match',
-    'Sohar Ref', 'Sohar Link', 'Sohar Date', 'Discovery Follow-up'];
+    'Sohar Ref', 'Sohar Link', 'Sohar Date', 'Discovery Follow-up', 'Searched As'];
   // Saved Sohar result records (hidden sheet), so a later upload adds to earlier ones instead of replacing them.
   const UPLOAD_COLS = ['Kind', 'Key', 'File', 'Uploaded', 'Record'];
   // NextGen Tasks sheet (created by the add-in). Done survives rebuilds via Task Key.
@@ -50,6 +51,7 @@
     zip: ['Zip', 'Pat Zip', 'Zip Code', 'Postal Code', 'Patient Zip', 'Home Zip', 'Guar Zip'],
     state: ['Pat State', 'Patient State', 'Home State', 'State'],
     guarName: ['Guar Name', 'Guarantor Name', 'Guarantor'],
+    guarDob: ['Guar Birth Dt', 'Guar DOB', 'Guar Dob', 'Guarantor DOB', 'Guarantor Birth Date', 'Guarantor Birth Dt', 'Guar Birth Date'],
     rendering: ['Rendering', 'Rendering Provider', 'Provider'],
     resName: ['Res Name', 'Resource Name', 'Resource'],
     finClass: ['Fin Class (Cht Guar)', 'Fin Class', 'Financial Class'],
@@ -71,6 +73,48 @@
   function str(v) {
     return isBlank(v) ? '' : String(v).trim();
   }
+
+  // ---------- patient key (v0.12) ----------
+  // The patient key is the MRN (Md Rc). It is the Sohar id and what every saved table keys on. A patient with no MRN,
+  // or one whose MRN another Per Nbr also has, uses "PER-<Per Nbr>" (flagged on Review). Rows carry the key as a
+  // non-column `key` (or x.key); else the MRN column; else the Per Nbr column as a PER- key (rows saved before v0.12).
+  const PER_PREFIX = 'PER-';
+  const perKey = (per) => (str(per) ? `${PER_PREFIX}${str(per)}` : '');
+  function keyOf(r) {
+    if (!r) return '';
+    const k = str(r.key) || str(r.x && r.x.key);
+    if (k) return k;
+    return str(r.MRN) || perKey(r['Per Nbr']);
+  }
+  /** A saved table's patient column: MRN (v0.12) or, on rows saved earlier, Per Nbr read as a PER- key. */
+  const savedKey = (r) => (r ? str(r.MRN) || perKey(r['Per Nbr']) : '');
+  /**
+   * Convert a saved PER- key to the patient's key today (perToKey: Map(Per Nbr -> key) from buildPatients). Anything
+   * else comes back as it is, so converting twice changes nothing.
+   */
+  function migrateKey(k, perToKey) {
+    const s = str(k);
+    if (!s.startsWith(PER_PREFIX) || !perToKey) return s;
+    return str(perToKey.get(s.slice(PER_PREFIX.length))) || s;
+  }
+  /** Per Nbr -> key for every patient buildPatients returned. */
+  function perKeyMap(patients) {
+    const m = new Map();
+    for (const p of patients || []) if (str(p['Per Nbr'])) m.set(str(p['Per Nbr']), keyOf(p));
+    return m;
+  }
+  // Sohar ids with a tag: "<key>-G" guarantor discovery, "<key>-M" payer mapping discovery (member ID sent),
+  // "<key>-T1".."-T9" payer test verifications. The tag says what the row was; the key ties it to the patient.
+  const ID_TAGS = { G: 'Guarantor', M: 'Payer mapping', T: 'Payer test' };
+  function splitId(id) {
+    const s = str(id);
+    const m = /^(.+)-(G|M|T\d)$/.exec(s);
+    if (!m) return { base: s, tag: '', test: 0 };
+    return { base: m[1], tag: m[2][0], test: m[2][0] === 'T' ? +m[2].slice(1) : 0 };
+  }
+  const searchedAs = (tag) => ID_TAGS[tag] || 'Patient';
+  /** "MRN 900" (or "Per 100" for a patient with no usable MRN) for messages and the pane. */
+  function idLabel(r) { const k = keyOf(r); return !k ? '' : k.startsWith(PER_PREFIX) ? `Per ${k.slice(PER_PREFIX.length)}` : `MRN ${k}`; }
 
   /**
    * Find the header row in a pasted report. Returns {headerRow, colMap, headers, missing, optionalMissing,
@@ -485,6 +529,7 @@
         authCd: str(get(row, 'authCd')), authCdLst: str(get(row, 'authCdLstEnc')),
         name: str(get(row, 'patName')), dob: parseDate(get(row, 'dob')), zip: str(get(row, 'zip')),
         state: str(get(row, 'state')), patSts: str(get(row, 'patSts')), mrn: str(get(row, 'mrn')), guar: str(get(row, 'guarName')),
+        guarDob: parseDate(get(row, 'guarDob')),
       };
       if (!byPatient.has(per)) byPatient.set(per, []);
       byPatient.get(per).push(rec);
@@ -524,7 +569,8 @@
 
     const patients = [];
     const review = [];
-    const addReview = (sev, issue, per, detail, fix) => review.push({ Severity: sev, Issue: issue, 'Per Nbr': per, Detail: detail, Fix: fix });
+    // Review rows name the patient by key (MRN), filled in once every patient's key is known (below).
+    const addReview = (sev, issue, per, detail, fix) => review.push({ Severity: sev, Issue: issue, MRN: '', _per: per, Detail: detail, Fix: fix });
 
     for (const { per, recs, latest, pick, payerName, secName, finClass, finClassLst } of pts) {
       const future = recs.filter((x) => x.dt >= asOf && !NOT_KEPT_FUTURE.has(x.status.toLowerCase()))
@@ -596,7 +642,8 @@
         if (autoLow) soharId = '';
         if (le) {
           if (lk.payerId && memberId) verifyRows.push({ payerId: lk.payerId, payerName: lk.payerName || '', memberId, source: 'guarantor', nextgenPayer: payerName, confidence: lk.confidence || '' });
-          verifyRows.push(le);
+          // One verification per insurance: the last encounter naming the same payer and member ID is the same policy.
+          if (!verifyRows.some((v) => v.payerId === le.payerId && idKey(v.memberId) === idKey(le.memberId))) verifyRows.push(le);
           route = 'verification';
           reason = verifyRows.length > 1 ? `two insurances: chart ${payerName} (${lk.confidence}) and last encounter ${finClassLst}` : `chart payer ${lk.confidence}: ${payerName}; verifying last-encounter insurance (${finClassLst})`;
           if (verifyRows.length > 1) flags.push('Two insurances sent');
@@ -623,10 +670,14 @@
       if (distinctPayers.size > 1) { flags.push('Payer changed across rows'); addReview('Low', 'Payer varies across appointments', per, [...distinctPayers].join(' | '), 'Latest appointment payer was used.'); }
       if (secName && secLk.status === 'unmapped') addReview('Low', 'Secondary payer unmapped', per, secName, 'Optional: map it so the Secondary Sohar payerId fills in.');
 
+      // Guarantor: a Guar Name on the chart that is not the patient, with Guar Birth Dt when the report has that column.
+      const guarRaw = latest.guar || pick('guar');
+      const gName = parseName(guarRaw);
+      const gDob = recs.map((x) => x.guarDob).find(Boolean) || null;
+      const guarantor = guarRaw && gName.lastName && nameKey(gName.firstName, gName.lastName) !== nameKey(nm.firstName, nm.lastName)
+        ? { name: str(guarRaw), firstName: gName.firstName, lastName: gName.lastName, dob: fmtDate(gDob) } : null;
       let subF = '', subL = '', subD = '';
-      if (cfg.useGuarantorAsSubscriber && latest.guar && str(latest.guar).toLowerCase() !== str(pick('name')).toLowerCase()) {
-        const g = parseName(latest.guar); subF = g.firstName; subL = g.lastName;
-      }
+      if (cfg.useGuarantorAsSubscriber && guarantor) { subF = guarantor.firstName; subL = guarantor.lastName; subD = guarantor.dob; }
 
       const inScope = cfg.scope === 'all' || !!next;
       patients.push({
@@ -644,25 +695,58 @@
           guarZip: zip, location: next ? next.loc : latest.loc, rendering: next ? next.rendering : '',
           vip, payerConfidence: lk.confidence || '', payerGuess: lk.payerId ? { payerId: lk.payerId, payerName: lk.payerName || '' } : null,
           appointments: future.map((a) => ({ date: fmtDate(a.dt), time: fmtTime(a.tmRaw), event: a.event, loc: a.loc, rendering: a.rendering, status: a.status, authCd: a.authCd, authCdLstEnc: a.authCdLst })),
-          verifyRows,
+          verifyRows, guarantor, apptCount: future.length,
         },
       });
     }
+    // Patient key: the MRN; PER-<Per Nbr> when the MRN is blank or another Per Nbr has the same MRN (both flagged).
+    const mrnPers = new Map();
+    for (const p of patients) { const m = idKey(p.MRN); if (m) mrnPers.set(m, (mrnPers.get(m) || 0) + 1); }
+    const perToKey = new Map();
+    for (const p of patients) {
+      const m = str(p.MRN), shared = m && mrnPers.get(idKey(m)) > 1;
+      p.x.key = m && !shared ? m : perKey(p['Per Nbr']);
+      perToKey.set(p['Per Nbr'], p.x.key);
+      if (shared) addReview('High', 'MRN shared by two patients', p['Per Nbr'], `MRN ${m} is on more than one Per Nbr in the report`, `Fix the MRN in NextGen. Until then Sohar gets ${p.x.key} for this patient.`);
+      else if (!m && p['In Scope'] === 'Yes') addReview('Medium', 'MRN missing', p['Per Nbr'], `No MRN (Md Rc) in the report for Per Nbr ${p['Per Nbr']}`, `Sohar gets ${p.x.key} as the id. Add Md Rc to the NextGen report.`);
+    }
+    for (const r of review) { r.MRN = str(r._per) ? perToKey.get(r._per) || perKey(r._per) : ''; delete r._per; }
     patients.sort((a, b) => (a.Route > b.Route ? -1 : a.Route < b.Route ? 1 : 0) || ((b['In Scope'] === 'Yes') - (a['In Scope'] === 'Yes')) || a['Per Nbr'].localeCompare(b['Per Nbr']));
 
     const unmapped = {};
     for (const p of patients) {
       if (p.Route === 'discovery' && p['Route Reason'].startsWith('payer not in Payer Map')) unmapped[p['Primary Payer']] = (unmapped[p['Primary Payer']] || 0) + 1;
     }
-    return { detection: det, dataRows, patients, review, unmappedPayers: unmapped, autoMapped, finClassIndex: finIdx, asOf };
+    return { detection: det, dataRows, patients, review, unmappedPayers: unmapped, autoMapped, finClassIndex: finIdx, asOf, perToKey };
+  }
+
+  // Payer mapping discovery (v0.12): the Sohar discovery template plus the member ID at the end, so Sohar can find the
+  // payer of the policy NextGen has. Not a Sohar template: Sohar accepting the extra column is unconfirmed.
+  const MAPPING_DISCOVERY_COLS = [...DISCOVERY_COLS, 'memberId'];
+
+  /**
+   * A discovery patient whose NextGen payer has no confident Sohar payer (unmapped, Auto-Low, Review or an unknown
+   * label) but whose chart has a member ID: the payer mapping discovery sends that member ID instead of a plain discovery.
+   */
+  function isMappingCandidate(p) {
+    if (!p || p.Route !== 'discovery' || p['In Scope'] !== 'Yes') return false;
+    const payer = str(p['Primary Payer']);
+    if (!payer || !str(p['Member ID']) || isSelfPay(payer) || isVip(payer) || (p.x && p.x.vip)) return false;
+    return needsClassification(p.Confidence, p['Sohar payerId']);
   }
 
   /**
-   * Sohar import rows. One verification row per verifyRows entry (same id = Per Nbr); discovery one per patient.
-   * verifyRows entries marked reverifySkip (applyReverifySkips: verified eligible recently) are left out.
+   * Sohar import rows (in-scope patients). id is the patient key (MRN).
+   *  verification: one row per insurance (verifyRows entry); rows marked reverifySkip (verified eligible recently) left out.
+   *  discovery: one row per discovery patient, plus one guarantor row (id <key>-G: the guarantor's name and DOB, the
+   *    patient's state and ZIP) for each patient in cfg.guarantorRequests (Set/Map of keys) whose guarantor DOB is known.
+   *  mapping: discovery patients isMappingCandidate picks, with their member ID (id <key>-M), when cfg.mappingDiscovery
+   *    is not false. They are on this file instead of the discovery file: still one discovery each.
+   *  guarantorNoDob: requested guarantor rows left out because the report has no guarantor DOB.
    */
   function buildExports(patients, cfg) {
-    const specialty = (cfg && cfg.specialty) || 'PSY';
+    const c = cfg || {};
+    const specialty = c.specialty || 'PSY';
     const inScope = patients.filter((p) => p['In Scope'] === 'Yes');
     const verification = [];
     for (const p of inScope.filter((x) => x.Route === 'verification')) {
@@ -671,16 +755,31 @@
         if (v.reverifySkip) continue;
         verification.push({
           firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, memberId: v.memberId,
-          payerId: v.payerId, placeOfServiceCode: p.POS, specialtyCode: specialty, id: p['Per Nbr'],
+          payerId: v.payerId, placeOfServiceCode: p.POS, specialtyCode: specialty, id: keyOf(p),
           subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'],
         });
       }
     }
-    const discovery = inScope.filter((p) => p.Route === 'discovery').map((p) => ({
-      firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, zipCode: p.Zip,
-      payerId: p['Sohar payerId'], id: p['Per Nbr'],
-    }));
-    return { verification, discovery };
+    const disc = (p, id) => ({ firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, zipCode: p.Zip, payerId: p['Sohar payerId'], id });
+    const asked = c.guarantorRequests instanceof Map || c.guarantorRequests instanceof Set ? c.guarantorRequests : new Set(c.guarantorRequests || []);
+    const reasonOf = (k) => (asked instanceof Map ? str((asked.get(k) || {}).Reason || asked.get(k)) : '');
+    const discovery = [], mapping = [], guarantorNoDob = [];
+    const gRows = [];
+    for (const p of inScope) {
+      const g = p.x && p.x.guarantor;
+      if (!g || !asked.has(keyOf(p))) continue;
+      if (!g.dob) { guarantorNoDob.push(p); continue; }
+      gRows.push({ p, row: { firstName: g.firstName, lastName: g.lastName, dateOfBirth: g.dob, state: p.State, zipCode: p.Zip, payerId: p['Sohar payerId'], id: `${keyOf(p)}-G` } });
+    }
+    // A guarantor resubmission after the patient's own discovery found nothing replaces the patient row (no repeat).
+    const replaced = new Set(gRows.filter(({ p }) => reasonOf(keyOf(p)) === GUARANTOR_REASONS.none).map(({ p }) => keyOf(p)));
+    for (const p of inScope.filter((x) => x.Route === 'discovery')) {
+      if (replaced.has(keyOf(p))) continue;
+      if (c.mappingDiscovery !== false && isMappingCandidate(p)) mapping.push({ ...disc(p, `${keyOf(p)}-M`), memberId: p['Member ID'] });
+      else discovery.push(disc(p, keyOf(p)));
+    }
+    for (const { row } of gRows) discovery.push(row);
+    return { verification, discovery, mapping, guarantorNoDob };
   }
 
   function csvCell(v) {
@@ -884,7 +983,7 @@
   }
 
   /**
-   * Plain-text note for admins, grouped by location then appointment. LASFIR + Per Nbr only (minimum necessary).
+   * Plain-text note for admins, grouped by location then appointment. LASFIR + MRN only (minimum necessary).
    * opts.mode: 'action' (default: rows needing action) or 'benefits' (deductible/OOP met or approaching).
    */
   function adminMessage(rows, opts) {
@@ -911,7 +1010,7 @@
       for (const r of list) {
         const when = r['Next Appt'] ? `${String(r['Next Appt']).slice(0, 5)}${r['Next Time'] ? ' ' + r['Next Time'] : ''}` : 'no appt';
         const tag = lasfir(r['Last Name'], r['First Name']);
-        const id = r['Per Nbr'] ? `${tag} · Per ${r['Per Nbr']}` : `${tag ? tag + ' · ' : ''}Sohar ref ${r['Sohar Ref'] || '?'}`;
+        const id = keyOf(r) ? `${tag} · ${idLabel(r)}` : `${tag ? tag + ' · ' : ''}Sohar ref ${r['Sohar Ref'] || '?'}`;
         if (benefits) {
           const amt = [r['Deductible Status'] && r['Deductible Status'] !== 'None' ? `ded remaining ${r['Deductible Remaining'] || '?'}` : '', r['OOP Remaining'] !== '' && r['OOP Remaining'] != null ? `OOP remaining ${r['OOP Remaining']}` : ''].filter(Boolean).join(', ');
           lines.push(`- ${when} · ${id} · ${r['Benefit Flag']}${amt ? ` (${amt})` : ''}`);
@@ -943,6 +1042,13 @@
     if (s.startsWith('error')) return 'Sohar error. Review the request and re-verify.';
     if (s === 'pending' || !s) return 'Pending at Sohar. Recheck later.';
     return 'Review.';
+  }
+
+  /** Verification subscriber columns: the guarantor's when the policy was found through the guarantor, else the patient row's. */
+  function subscriberFor(p, viaGuarantor) {
+    const g = p && p.x && p.x.guarantor;
+    if (viaGuarantor && g) return { subscriberFirstName: g.firstName, subscriberLastName: g.lastName, subscriberDateOfBirth: g.dob };
+    return { subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'] };
   }
 
   /**
@@ -984,8 +1090,12 @@
 
     const byPer = new Map(), byMember = new Map(), byName = new Map(), byNameDob = new Map();
     const push = (m, k, p) => { if (!k) return; if (!m.has(k)) m.set(k, []); if (!m.get(k).includes(p)) m.get(k).push(p); };
+    // byKey: patient key (MRN, else PER-<Per Nbr>), and PER-<Per Nbr> for everyone (saved rows from before v0.12).
+    const byKey = new Map();
     for (const p of built.patients) {
       byPer.set(p['Per Nbr'], p);
+      byKey.set(idKey(keyOf(p)), p);
+      if (!byKey.has(idKey(perKey(p['Per Nbr'])))) byKey.set(idKey(perKey(p['Per Nbr'])), p);
       push(byMember, idKey(p['Member ID']), p);
       push(byMember, idKey(p['Member ID (Lst Enc)']), p);
       if (p['Last Name']) push(byName, nameKey(p['First Name'], p['Last Name']), p);
@@ -1001,6 +1111,24 @@
     const unresolved = [];
     const freshKeys = cfg.freshKeys instanceof Set ? cfg.freshKeys : new Set(cfg.freshKeys || []);
     const stamps = new Map();
+    // Sohar ids: the MRN since Config "MRN ids since" (cfg.mrnSince), the Per Nbr before. A check Sohar created before
+    // that time is read as a Per Nbr; after it, as a patient key; with no time (or no setting), the key first.
+    const since = cfg.mrnSince != null && cfg.mrnSince !== '' ? soharTime(cfg.mrnSince) : NaN;
+    const idMatch = (r) => {
+      const { base, tag, test } = splitId(r.id);
+      if (!base) return { p: null, match: '', tag: '', test: 0 };
+      const t = soharTime(r.created || r.resolved);
+      const legacy = isNaN(since) || isNaN(t) ? null : t < since;
+      let p = null, match = '';
+      if (legacy !== true || tag) { p = byKey.get(idKey(base)) || null; if (p) match = 'MRN'; }
+      if (!p && legacy !== false && !tag) { p = byPer.get(base) || null; if (p) match = 'Per Nbr (old id)'; }
+      return { p, match, tag, test };
+    };
+    const byIdOrRef = (m) => m === 'MRN' || m === 'Per Nbr (old id)' || m === 'Sohar ref';
+    // Payer test verifications (ids <key>-T<n>): kept apart from the patient's results (cfg.payerTestRows: Payer Tests rows;
+    // cfg.payerTests is the Config settings).
+    const testIdx = new Map((Array.isArray(cfg.payerTestRows) ? cfg.payerTestRows : []).map((t) => [str(t['Test Id']), t]));
+    const payerTests = [];
 
     const emit = (p, kind, f) => {
       const ups = p ? upcoming.get(p['Per Nbr']) || [] : [];
@@ -1012,9 +1140,12 @@
         'Per Nbr': p ? p['Per Nbr'] : '', 'MRN': p ? p.MRN : '', 'Last Name': p ? p['Last Name'] : str(f.lastName), 'First Name': p ? p['First Name'] : str(f.firstName),
         'DOB': p ? p.DOB : f.dob || '', 'Sent As': kind === 'verification' ? 'Verification' : 'Discovery',
         'NextGen Payer': p ? p['Primary Payer'] : '', 'NextGen Member ID': p ? p['Member ID'] : '',
+        // Who Sohar searched: the patient, the guarantor (id <key>-G) or the payer mapping discovery (<key>-M).
+        'Searched As': f.tag ? searchedAs(f.tag) : 'Patient',
         ...(f.benefits || {}), ...f.cols,
       };
       for (const c of RESULTS_COLS) if (row[c] == null) row[c] = '';
+      row.key = p ? keyOf(p) : ''; // non-column: patient key (MRN), what tasks, flags and saved tables key on
       row.x = p ? p.x || null : null; // non-column: patient extras (appointments, fin class, verifyRows) for the rules
       if (f.key) row.resultKey = f.key; // non-column: resultKey of the Sohar record, for the payer outcomes ledger
       if (f.chooseGuess) row.chooseGuess = true; // non-column: Choose in NextGen came from an Auto-Low / Review guess
@@ -1046,13 +1177,22 @@
         // A blank id with a remembered ref: the Per Nbr (and resultKey) of the record that ref was first matched on.
         const hit = !str(r.id) ? refLookup(refIdx, kind, r) : null;
         if (!str(r.id) && !hit) unresolved.push(refsOf(kind, r).map((ref) => `${kind}|${ref}`));
-        const f0 = { key: resultKey(kind, r, refIdx) }; // non-column extras for this row (emit)
+        const idm = idMatch(r);
+        // A payer test answers "does this policy verify under this Sohar payer?": it goes to payerTests, not the
+        // patient's results (no task, no benefits, no re-verify history).
+        if (idm.tag === 'T') {
+          const t = testIdx.get(str(r.id));
+          payerTests.push({ 'Test Id': str(r.id), key: idm.p ? keyOf(idm.p) : splitId(r.id).base, test: t || null, matched: !!idm.p,
+            'Sohar Status': str(r.status) + (str(r.statusreason) ? ` (${str(r.statusreason)})` : ''), 'Sohar Payer': str(r.payername),
+            'Sohar Ref': str(r.verificationid || r.requestid), 'Sohar Link': str(r.url), 'Sohar Date': str(r.resolved || r.created), resultKey: resultKey(kind, r, refIdx) });
+          continue;
+        }
+        const f0 = { key: resultKey(kind, r, refIdx), tag: idm.tag }; // non-column extras for this row (emit)
         let benefits = {};
         if (kind === 'verification') {
-          // Newer exports echo our id (Per Nbr); older ones only carry member ID and name.
-          p = byPer.get(str(r.id)) || null;
-          if (p) match = 'Per Nbr';
-          if (!p && hit) { p = byPer.get(hit.per) || null; if (p) match = 'Sohar ref'; }
+          // Exports echo our id (the MRN; the Per Nbr before v0.12); older ones only carry member ID and name.
+          p = idm.p; match = idm.match;
+          if (!p && hit) { p = byKey.get(idKey(hit.per)) || null; if (p) match = 'Sohar ref'; }
           if (!p) { p = pickOne(byMember.get(idKey(r.memberid)), last); if (p) match = 'Member ID'; }
           if (!p && last) { p = pickOne(byName.get(nameKey(first, last)), last); if (p) match = 'Name only. Confirm.'; }
           benefits = benefitFields(r, bopts);
@@ -1078,14 +1218,13 @@
           // (_sentpayerid) when it is first uploaded; a record from this upload (cfg.freshKeys) gets one now (stamps).
           const sent = str(r.payerid || r._sentpayerid);
           if (sent) { cols['Sohar payerId'] = sent; f0.sentPayerId = sent; }
-          else if (vr && str(vr.payerId) && freshKeys.has(f0.key) && (match === 'Per Nbr' || match === 'Sohar ref' || match === 'Member ID')) {
+          else if (vr && str(vr.payerId) && freshKeys.has(f0.key) && (byIdOrRef(match) || match === 'Member ID')) {
             f0.sentPayerId = str(vr.payerId);
             stamps.set(f0.key, f0.sentPayerId);
           }
         } else {
-          p = byPer.get(str(r.id)) || null;
-          if (p) match = 'Per Nbr';
-          if (!p && hit) { p = byPer.get(hit.per) || null; if (p) match = 'Sohar ref'; }
+          p = idm.p; match = idm.match;
+          if (!p && hit) { p = byKey.get(idKey(hit.per)) || null; if (p) match = 'Sohar ref'; }
           if (!p && last) {
             p = pickOne(byNameDob.get(`${nameKey(first, last)}|${fmtDate(dob)}`), last);
             if (p) match = 'Name + DOB';
@@ -1121,6 +1260,12 @@
           else if (p && !p['Primary Payer']) action = `Coverage found. Add it to NextGen, then verify.${pickText}${getId}`;
           else if (differs) action = `Different coverage found. Confirm with the patient, update NextGen, then verify.${pickText}${getId}`;
           else action = `Coverage found matches NextGen. Verify.${confirmText}`;
+          // Guarantor search (<key>-G): the policy is the guarantor's; the patient is a dependent on it.
+          if (idm.tag === 'G') {
+            const g = p && p.x && p.x.guarantor;
+            action = found ? `Found through the guarantor${g ? ` (${g.lastName}, ${g.firstName})` : ''}: the patient is likely a dependent on this policy. ${action}`
+              : resolved ? 'Guarantor search found no coverage either. Confirm self-pay or ask the patient for a card.' : 'Guarantor search pending at Sohar. Recheck later.';
+          }
           if (guessed.length) f0.chooseGuess = true;
           Object.assign(cols, {
             'Sohar Status': status, 'Action': action, 'Sohar Payer': str(r.responsepayername), 'Sohar payerId': str(r.responsepayerid),
@@ -1135,14 +1280,14 @@
           cols.Action = `No patient identifiers in this Sohar row (no id, ${kind === 'verification' ? 'member ID or name' : 'name or DOB'}). Likely an export anomaly or a check run outside the batch: open the Sohar link to see who it is. ${cols.Action}`;
         } else if (!p) {
           match = 'No match'; counts.unmatched++;
-          cols.Action = `Not matched to a patient in the Import report.${hit ? ` Sohar ref remembered for Per Nbr ${hit.per}, who is not in this report.` : ''} ${cols.Action}`;
+          cols.Action = `Not matched to a patient in the Import report.${hit ? ` Sohar ref remembered for ${/^PER-/.test(hit.per) ? `Per Nbr ${hit.per.slice(4)}` : `MRN ${hit.per}`}, who is not in this report.` : ''} ${cols.Action}`;
         } else counts.matched++;
         cols.Match = match;
-        // Learn this record's refs only from a match on Per Nbr or Member ID (never a name match).
-        if (p && (match === 'Per Nbr' || match === 'Member ID')) {
+        // Learn this record's refs only from a match on the id (MRN, or an old Per Nbr id) or Member ID (never a name match).
+        if (p && (match === 'MRN' || match === 'Per Nbr (old id)' || match === 'Member ID')) {
           for (const ref of refsOf(kind, r)) {
             const k = `${kind}|${ref}`;
-            if (!refIdx.has(k) && !learned.has(k)) learned.set(k, { 'Sohar Ref': ref, 'Per Nbr': p['Per Nbr'], 'Kind': kind, 'Result Key': f0.key });
+            if (!refIdx.has(k) && !learned.has(k)) learned.set(k, { 'Sohar Ref': ref, 'MRN': keyOf(p), 'Kind': kind, 'Result Key': f0.key });
           }
         }
         if (benefits['Deductible'] || benefits['OOP Max'] || benefits['Copay']) counts.withBenefits++;
@@ -1162,7 +1307,7 @@
     // submission in Sohar, so every policy discovery finds goes back to Sohar as a verification.
     // A verification result is the follow-up when it is for the same patient and the same policy:
     // same member ID when both files have one, else the same Sohar payer.
-    const discoveryVerification = [];
+    const discoveryVerification = [], dvSeen = new Set();
     const specialty = cfg.specialty || 'PSY';
     const idRejected = (per, payerId) => results.some((r) => r['Sent As'] === 'Verification' && r['Per Nbr'] === per
       && r['Sohar payerId'] === payerId && /^error\.member\.id/i.test(str(r['Sohar Status'])));
@@ -1181,12 +1326,16 @@
       if (!v) {
         d['Discovery Follow-up'] = 'Ready to verify';
         d.Action = `${d.Action} Copay, deductible and OOP need a Sohar verification: this patient is on the discovery verification import.`;
+        // Patient and guarantor searches finding the same payer: one verification (the first found wins).
+        const dvKey = `${keyOf(p)}|${d['Sohar payerId']}`;
+        if (dvSeen.has(dvKey)) continue;
+        dvSeen.add(dvKey);
         discoveryVerification.push({
           firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State,
           // Member ID from discovery; NextGen's only when NextGen already has this payer and Sohar did not reject it.
           memberId: d['Sohar Member ID'] || (p['Sohar payerId'] === d['Sohar payerId'] && !idRejected(d['Per Nbr'], d['Sohar payerId']) ? p['Member ID'] : ''),
-          payerId: d['Sohar payerId'], placeOfServiceCode: p.POS, specialtyCode: specialty, id: p['Per Nbr'],
-          subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'],
+          payerId: d['Sohar payerId'], placeOfServiceCode: p.POS, specialtyCode: specialty, id: keyOf(p),
+          ...subscriberFor(p, d['Searched As'] === 'Guarantor'),
         });
         continue;
       }
@@ -1281,7 +1430,7 @@
       const hint = latest.find((r) => /^error/i.test(str(r['Sohar Status'])) && r['Sohar payerId']);
       verificationDiscovery.push({
         firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, zipCode: p.Zip,
-        payerId: hint ? hint['Sohar payerId'] : '', id: p['Per Nbr'],
+        payerId: hint ? hint['Sohar payerId'] : '', id: keyOf(p),
       });
       for (const r of latest) {
         r['Discovery Follow-up'] = 'Sent to discovery';
@@ -1303,17 +1452,17 @@
     // refsPending: blank-id records whose ref was only learned in this pass (same upload, or an original saved before the
     // Sohar Refs sheet existed). Run accumulateResults + mergeSoharResults again with refs + these refs before saving.
     const refsPending = unresolved.filter((ks) => ks.some((k) => learned.has(k))).length;
-    return { results, unknownFiles, counts, asOf, discoveryVerification, verificationDiscovery, patients: built.patients, refs: [...learned.values()], refsPending,
+    return { results, unknownFiles, counts, asOf, discoveryVerification, verificationDiscovery, patients: built.patients, perToKey: built.perToKey, payerTests, refs: [...learned.values()], refsPending,
       sentPayerIds: [...stamps].map(([key, payerId]) => ({ key, payerId })) };
   }
 
   // ---------- Sohar ref memory ----------
   // Sohar exports can arrive with id, memberId, names and DOB blank. Each Sohar check has refs (requestId, the id in its
-  // app.soharhealth.com/verifications/<id> link, verificationId on old exports). A ref is remembered with the Per Nbr and
-  // the resultKey of the record it came on, once that record matched by Per Nbr or Member ID (hidden Sohar Refs sheet,
+  // app.soharhealth.com/verifications/<id> link, verificationId on old exports). A ref is remembered with the patient key (MRN) and
+  // the resultKey of the record it came on, once that record matched by its id or Member ID (hidden Sohar Refs sheet,
   // append-only; "Clear saved Sohar results" keeps it). A later record with a blank id is then the same patient and the
   // same result.
-  const SOHAR_REF_COLS = ['Sohar Ref', 'Per Nbr', 'Kind', 'Result Key', 'First Matched'];
+  const SOHAR_REF_COLS = ['Sohar Ref', 'MRN', 'Kind', 'Result Key', 'First Matched'];
   const SOHAR_URL_ID = /\/verifications\/([^/?#\s]+)/i;
   /** The refs of a Sohar record (normalized keys): requestid, the verification id in its url, verificationid. */
   function refsOf(kind, r) {
@@ -1330,7 +1479,7 @@
     if (refIndexCache.has(list)) return refIndexCache.get(list);
     const idx = new Map();
     for (const r of list) {
-      const ref = str(r['Sohar Ref']), kind = str(r.Kind).toLowerCase(), per = str(r['Per Nbr']);
+      const ref = str(r['Sohar Ref']), kind = str(r.Kind).toLowerCase(), per = savedKey(r);
       const k = `${kind}|${ref}`;
       if (ref && kind && per && !idx.has(k)) idx.set(k, { per, key: str(r['Result Key']) });
     }
@@ -1345,14 +1494,15 @@
     return null;
   }
   /** Append-only: previous rows stay; fresh refs are added unless Kind + Sohar Ref is already there. */
-  function appendRefs(previous, fresh, when) {
+  // perToKey (optional, perKeyMap): saved PER- keys become the patient's MRN, so a row saved before v0.12 converts on the next save.
+  function appendRefs(previous, fresh, when, perToKey) {
     const seen = new Set(), rows = [];
     const norm = (r) => Object.fromEntries(SOHAR_REF_COLS.map((c) => [c, r[c] == null ? '' : str(r[c])]));
     const k = (r) => `${str(r.Kind).toLowerCase()}|${str(r['Sohar Ref'])}`;
-    for (const r of previous || []) { if (!str(r['Sohar Ref']) || seen.has(k(r))) continue; seen.add(k(r)); rows.push(norm(r)); }
+    for (const r of previous || []) { if (!str(r['Sohar Ref']) || seen.has(k(r))) continue; seen.add(k(r)); rows.push(norm({ ...r, MRN: migrateKey(savedKey(r), perToKey) })); }
     let added = 0;
     for (const r of fresh || []) {
-      if (!str(r['Sohar Ref']) || !str(r['Per Nbr']) || seen.has(k(r))) continue;
+      if (!str(r['Sohar Ref']) || !savedKey(r) || seen.has(k(r))) continue;
       seen.add(k(r)); rows.push(norm({ ...r, 'First Matched': str(r['First Matched']) || str(when) })); added++;
     }
     return { rows, added };
@@ -1459,10 +1609,18 @@
     return { acc, res, refs: learned, saved: stampSentPayerIds(acc.saved, res.sentPayerIds).saved };
   }
 
-  /** Keep member IDs an admin typed on the Discovery Verify sheet, matched on id (Per Nbr) + payerId. */
-  function keepMemberIds(rows, previous) {
+  /**
+   * Keep member IDs an admin typed on the Discovery Verify sheet, matched on id (patient key) + payerId. perToKey
+   * (optional): a row saved before v0.12 has the Per Nbr as its id; it is matched as that patient's key too.
+   */
+  function keepMemberIds(rows, previous, perToKey) {
     const typed = new Map();
-    for (const p of previous || []) if (str(p.memberId)) typed.set(`${str(p.id)}|${str(p.payerId)}`, str(p.memberId));
+    for (const p of previous || []) {
+      if (!str(p.memberId)) continue;
+      typed.set(`${str(p.id)}|${str(p.payerId)}`, str(p.memberId));
+      const old = perToKey && perToKey.get(str(p.id));
+      if (old && !typed.has(`${old}|${str(p.payerId)}`)) typed.set(`${old}|${str(p.payerId)}`, str(p.memberId));
+    }
     return rows.map((r) => (r.memberId ? r : { ...r, memberId: typed.get(`${r.id}|${r.payerId}`) || '' }));
   }
 
@@ -1475,10 +1633,12 @@
    * Every eligible verification with benefits gets an "Update benefits" task with the values to enter,
    * because the appointment report does not show what NextGen currently holds.
    */
+  const taskKey = (key, ref, task, searched) => `${str(key) || 'ref:' + str(ref)}|${str(task)}${searched === 'Guarantor' ? '|G' : ''}`;
   function buildTasks(results) {
     const tasks = [];
     const add = (r, task, details) => {
-      const key = `${r['Per Nbr'] || 'ref:' + r['Sohar Ref']}|${task}`;
+      // Task Key: patient key (MRN) + task; a guarantor search's task is its own (|G).
+      const key = taskKey(keyOf(r), r['Sohar Ref'], task, r['Searched As']);
       tasks.push({
         'Done': '', 'Due By': r['Next Appt'], 'Next Appt': r['Next Appt'], 'Next Time': r['Next Time'], 'Next Location': r['Next Location'],
         'Per Nbr': r['Per Nbr'], 'MRN': r.MRN, 'Last Name': r['Last Name'], 'First Name': r['First Name'], 'Result Type': r['Sent As'],
@@ -1528,7 +1688,7 @@
     return tasks;
   }
 
-  /** Open tasks as a note for admins, by location then visit. LASFIR + Per Nbr only. */
+  /** Open tasks as a note for admins, by location then visit. LASFIR + MRN only. */
   function taskMessage(tasks, opts) {
     const open = (tasks || []).filter((t) => !String(t.Done || '').trim());
     if (!open.length) return 'NextGen tasks: nothing open.\n';
@@ -1545,7 +1705,7 @@
       for (const t of list) {
         const when = t['Next Appt'] ? `${String(t['Next Appt']).slice(0, 5)}${t['Next Time'] ? ' ' + t['Next Time'] : ''}` : 'no appt';
         const tag = lasfir(t['Last Name'], t['First Name']);
-        const who = t['Per Nbr'] ? `${tag} · Per ${t['Per Nbr']}` : `Sohar ref ${t['Sohar Ref'] || '?'}`;
+        const who = keyOf(t) ? `${tag} · ${idLabel(t)}` : `Sohar ref ${t['Sohar Ref'] || '?'}`;
         lines.push(`- ${when} · ${who} · ${t.Task}: ${t.Details}`);
       }
       lines.push('');
@@ -1554,9 +1714,16 @@
   }
 
   /** Carry Done marks over from the previous task table, matched on Task Key. */
+  // A task row saved before v0.12 has a Per Nbr Task Key; its MRN column gives the key it has now.
   function keepDone(tasks, previous) {
     const done = new Map();
-    for (const p of previous || []) if (String(p['Done'] || '').trim()) done.set(String(p['Task Key']), String(p['Done']).trim());
+    for (const p of previous || []) {
+      const d = String(p['Done'] || '').trim();
+      if (!d) continue;
+      done.set(String(p['Task Key']), d);
+      const now = taskKey(keyOf(p), p['Sohar Ref'], p.Task, /\|G$/.test(String(p['Task Key'])) ? 'Guarantor' : '');
+      if (!done.has(now)) done.set(now, d);
+    }
     return tasks.map((t) => (done.has(t['Task Key']) ? { ...t, Done: done.get(t['Task Key']) } : t));
   }
 
@@ -1772,6 +1939,13 @@
     worklist: 'Sohar Results Worklist',
     tasks: 'NextGen Tasks',
     ir: 'IR Portal Cross-Reference',
+    mapping: 'Sohar Ready Import - Discovery (Payer Mapping)',
+    payerTests: 'Sohar Ready Import - Verification (Payer Tests)',
+    skipped: 'Sohar Skipped (verified recently)',
+    clinicList: 'Sohar Clinic List',
+    clinicFlags: 'Sohar Clinic Flags',
+    metrics: 'Sohar Payer Metrics',
+    themes: 'Sohar Guarantor Themes',
   };
   /** "Sohar Ready Import - Verification 2026-10-15.csv" */
   function fileName(kind, d) { return `${FILE_LABELS[kind] || kind} ${localDate(d)}.csv`; }
@@ -1853,9 +2027,9 @@
     { setting: 'Learning', value: 'On', what: 'On or Off. On: Sohar outcomes promote, demote and re-score the add-in\'s own payer matches (Auto-High, Auto-Medium, Auto-Low, Learned) and teach Fin Class payers. Off: outcomes are still recorded. Human labels are never changed.' },
     { setting: 'Learn: promote patients', value: 3, what: 'Patients Sohar must agree on, with no conflicts, before an Auto-Low or Auto-Medium payer becomes Learned (and before a last-encounter Fin Class is learned).' },
     { setting: 'Learn: demote payer errors', value: 2, what: 'Patients with a Sohar payer error that drop an Auto-High, Auto-Medium or Learned payer to Auto-Low.' },
-    { setting: 'Learn: demote discovery share', value: '50%', what: 'Share of discovery patients finding a different payer that drops an Auto-High, Auto-Medium or Learned payer to Auto-Low.' },
+    { setting: 'Learn: demote discovery share', value: '50%', what: 'Share of discovery patients finding a different payer for the same member ID that drops an Auto-High, Auto-Medium or Learned payer to Auto-Low. Other coverage found (a different member ID) never counts.' },
     { setting: 'Learn: demote min patients', value: 3, what: 'Discovery patients needed before the discovery share can demote a payer.' },
-    { setting: 'Learn: suggest patients', value: 3, what: 'Discovery patients returning the same other payer before the pane suggests it for an unmapped, Auto-Low or Review name.' },
+    { setting: 'Learn: suggest patients', value: 3, what: 'Discovery patients returning the same other payer for the same member ID before the pane suggests it for an unmapped, Auto-Low or Review name.' },
     { setting: 'Learn: suggest share', value: '80%', what: 'Share of discovery patients that must return that payer for a suggestion.' },
   ];
   /** Config {Setting: Value} -> learning settings. Counts are whole numbers >= 1; shares accept 50%, 0.5 or 50. */
@@ -1887,8 +2061,10 @@
   }
 
   // Hidden Payer Outcomes sheet: one row per Sohar outcome, append-only, keyed by the result + Sohar Date.
-  const PAYER_OUTCOME_COLS = ['Key', 'Per Nbr', 'Kind', 'NextGen Payer', 'Fin Class', 'Source', 'Sent payerId', 'Sent Confidence', 'Sohar Status',
-    'Returned payerId', 'Returned Payer', 'Signal', 'Sohar Date', 'Recorded'];
+  // v0.12: MRN (the patient key; rows saved earlier have Per Nbr) and Member Match (discovery: Sohar returned the member ID
+  // NextGen has, so the payer it found is that policy's payer; only then is a different payer evidence against the mapping).
+  const PAYER_OUTCOME_COLS = ['Key', 'MRN', 'Kind', 'NextGen Payer', 'Fin Class', 'Source', 'Sent payerId', 'Sent Confidence', 'Sohar Status',
+    'Returned payerId', 'Returned Payer', 'Signal', 'Sohar Date', 'Recorded', 'Member Match'];
 
   // An outage or slow payer says nothing about whether the mapping is right: such errors are neutral.
   const TRANSIENT_ERROR = /unavailable|time[\s-]?out|timed out|\bdown\b|retry|try again|not responding|no response|temporar|busy|maintenance|connection|throttl|rate limit/;
@@ -1919,7 +2095,11 @@
    * are skipped. Verification: NextGen Payer is the insurance sent (the proxy name for a last-encounter row), Sent payerId
    * the payerId sent; a verification of a payer discovery found is Source 'discovery' and neutral. Discovery: the found
    * payer is compared with the patient's Sohar payerId (else the Payer Map guess), which is recorded as Sent payerId:
-   * 'agree', 'other payer', 'found' (nothing to compare with) or 'neutral' (nothing found).
+   * 'agree' (same payer), 'other payer' (another payer for the same member ID: the mapping looks wrong), 'found' (nothing
+   * to compare with, same member ID), 'other coverage' (another payer and no member ID match: a different policy, not
+   * evidence; e.g. Cigna found for a Blue Card patient), 'neutral' (nothing found). Member Match is Yes when Sohar returned
+   * the member ID NextGen has, or, for the payer mapping discovery (member ID sent), returned none or the same one.
+   * A guarantor search is about the guarantor's policy: Source 'guarantor', neutral.
    */
   function payerOutcomes(results, patients, recordedAt) {
     const byPer = new Map((patients || []).map((p) => [str(p['Per Nbr']), p]));
@@ -1932,7 +2112,7 @@
       if (!p) continue;
       const x = p.x || {};
       const date = str(r['Sohar Date']);
-      const o = { 'Key': `${r.resultKey}|${date}`, 'Per Nbr': per, 'Sohar Status': str(r['Sohar Status']), 'Sohar Date': date, 'Recorded': str(recordedAt) };
+      const o = { 'Key': `${r.resultKey}|${date}`, 'MRN': keyOf(p), 'Sohar Status': str(r['Sohar Status']), 'Sohar Date': date, 'Recorded': str(recordedAt) };
       if (r['Sent As'] === 'Verification') {
         const fromDisc = r['Discovery Follow-up'] === 'From discovery';
         const vr = matchVerifyRow(p, { memberid: r['Sohar Member ID'], payername: r['Sohar Payer'] });
@@ -1955,11 +2135,15 @@
         const compare = sec ? str(p['Sohar payerId']) : (chartVr ? str(chartVr.payerId) : p.Route === 'verification' ? '' : str(p['Sohar payerId'])) || guess;
         const ret = str(r['Sohar payerId']);
         const found = r['Sohar Status'] === 'Coverage found' && !!ret;
+        const viaGuar = r['Searched As'] === 'Guarantor', mapping = r['Searched As'] === 'Payer mapping';
+        const back = idKey(r['Sohar Member ID']), mine = idKey(p['Member ID']);
+        const memberMatch = !sec && !viaGuar && found && !!mine && (back ? back === mine : mapping);
         Object.assign(o, {
           'Kind': 'Discovery', 'NextGen Payer': str(sec ? p['Secondary Payer'] : p['Primary Payer']), 'Fin Class': sec ? '' : str(x.finClass),
-          'Source': sec ? 'secondary' : 'discovery', 'Sent payerId': compare, 'Sent Confidence': sec ? '' : str(p.Confidence),
+          'Source': viaGuar ? 'guarantor' : sec ? 'secondary' : mapping ? 'payer mapping' : 'discovery', 'Sent payerId': compare, 'Sent Confidence': sec ? '' : str(p.Confidence),
           'Returned payerId': ret, 'Returned Payer': str(r['Sohar Payer']),
-          'Signal': !found ? 'neutral' : !compare ? 'found' : ret === compare ? 'agree' : 'other payer',
+          'Signal': !found || viaGuar ? 'neutral' : compare && ret === compare ? 'agree' : !memberMatch ? 'other coverage' : !compare ? 'found' : 'other payer',
+          'Member Match': found && !viaGuar ? (memberMatch ? 'Yes' : 'No') : '',
         });
       }
       out.push(Object.fromEntries(PAYER_OUTCOME_COLS.map((c) => [c, o[c] == null ? '' : o[c]])));
@@ -1967,10 +2151,13 @@
     return out;
   }
 
-  /** Append-only: previous rows stay as they are; fresh rows are added unless their Key is already there. */
-  function appendOutcomes(previous, fresh) {
+  /**
+   * Append-only: previous rows stay; fresh rows are added unless their Key is already there. A row saved before v0.12
+   * keeps its patient as MRN (its Per Nbr as a PER- key, converted with perToKey when given).
+   */
+  function appendOutcomes(previous, fresh, perToKey) {
     const seen = new Set(), rows = [];
-    const norm = (r) => Object.fromEntries(PAYER_OUTCOME_COLS.map((c) => [c, r[c] == null ? '' : r[c]]));
+    const norm = (r) => Object.fromEntries(PAYER_OUTCOME_COLS.map((c) => [c, c === 'MRN' ? migrateKey(savedKey(r), perToKey) : r[c] == null ? '' : r[c]]));
     for (const r of previous || []) { const k = str(r.Key); if (!k || seen.has(k)) continue; seen.add(k); rows.push(norm(r)); }
     let added = 0;
     for (const r of fresh || []) { const k = str(r.Key); if (!k || seen.has(k)) continue; seen.add(k); rows.push(norm(r)); added++; }
@@ -1990,7 +2177,7 @@
     return m ? Number(m[1]) : -1;
   }
 
-  const emptyGroup = (name) => ({ name, pers: new Set(), ver: new Map(), disc: new Map(), last: null });
+  const emptyGroup = (name) => ({ name, pers: new Set(), ver: new Map(), disc: new Map(), unrel: new Set(), last: null });
   /**
    * Ledger outcomes per NextGen payer name (lower case), keeping each patient's latest deciding outcome: per
    * (Sent payerId, patient) for verification (agree / payer error), per patient for discovery (a payer found).
@@ -1999,10 +2186,12 @@
   function groupOutcomes(outcomes) {
     const g = new Map();
     for (const o of outcomes || []) {
-      const name = str(o['NextGen Payer']), per = str(o['Per Nbr']);
+      const name = str(o['NextGen Payer']), per = savedKey(o);
       if (!name || !per || isVip(name) || isSelfPay(name)) continue;
-      const kind = str(o.Kind).toLowerCase(), sig = str(o.Signal);
-      if (kind === 'verification' && str(o.Source).toLowerCase() === 'last encounter') continue;
+      const kind = str(o.Kind).toLowerCase(), sig = str(o.Signal), src = str(o.Source).toLowerCase();
+      if (kind === 'verification' && src === 'last encounter') continue;
+      // A guarantor search is about the guarantor's policy, and a payer test is judged on its own (payerTestSummary).
+      if (src === 'guarantor' || src === 'payer test') continue;
       const k = name.toLowerCase();
       if (!g.has(k)) g.set(k, emptyGroup(name));
       const e = g.get(k);
@@ -2017,6 +2206,9 @@
         const m = e.ver.get(pid), prev = m.get(per);
         if (!prev || outcomeTime(o) >= outcomeTime(prev)) m.set(per, o);
       } else if (kind === 'discovery' && str(o['Returned payerId'])) {
+        // Evidence only when discovery found the mapped payer, or Sohar returned the member ID NextGen has (Member Match;
+        // rows saved before v0.12 have none). Other coverage (another policy) is counted apart and never moves the mapping.
+        if (sig !== 'agree' && str(o['Member Match']) !== 'Yes') { e.unrel.add(per); continue; }
         const prev = e.disc.get(per);
         if (!prev || outcomeTime(o) >= outcomeTime(prev)) e.disc.set(per, o);
       }
@@ -2041,8 +2233,10 @@
     const ranked = [...tally.values()].sort((a, b) => b.n - a.n || a.payerName.localeCompare(b.payerName) || a.payerId.localeCompare(b.payerId));
     const top = ranked[0] ? { ...ranked[0], share: ranked[0].n / disc.size } : null;
     const conflicts = perr.size + other.size;
+    // Patients whose discovery found other coverage (not the same member ID) and no evidence: shown, never counted.
+    const unrelated = e ? [...e.unrel].filter((per) => !e.disc.has(per)).length : 0;
     return {
-      agree: agree.size, payerErrors: perr.size, discovery: disc.size, otherPayer: other.size, conflicts, top,
+      agree: agree.size, payerErrors: perr.size, discovery: disc.size, otherPayer: other.size, conflicts, top, unrelated,
       score: Math.round((100 * (agree.size + 1)) / (agree.size + conflicts + 2)),
       demoteRule: !!P && (perr.size >= L.demotePayerErrors || (disc.size >= L.demoteMinPatients && other.size / disc.size >= L.demoteDiscoveryShare)),
     };
@@ -2098,7 +2292,7 @@
       const lt = e.last ? outcomeTime(e.last) : -Infinity;
       rows.push({
         key: k, nextgenPayer: name, mapped: !!h, payerId: P, payerName: h ? h.payerName : '', confidence: conf, notes: h ? h.notes : '',
-        agree: j.agree, payerErrors: j.payerErrors, discovery: j.discovery, otherPayer: j.otherPayer, conflicts: j.conflicts, score: j.score, n: e.pers.size, top,
+        agree: j.agree, payerErrors: j.payerErrors, discovery: j.discovery, otherPayer: j.otherPayer, unrelated: j.unrelated, conflicts: j.conflicts, score: j.score, n: e.pers.size, top,
         decision, note, suggestion, duplicate, duplicates: times.get(k) || 0,
         lastOutcome: e.last ? `${isFinite(lt) ? `${fmtDate(new Date(lt))} ` : ''}${str(e.last.Kind)}: ${str(e.last.Signal)}` : '',
       });
@@ -2118,7 +2312,7 @@
     const g = new Map();
     for (const o of outcomes || []) {
       if (str(o.Source).toLowerCase() !== 'last encounter' || str(o.Kind).toLowerCase() !== 'verification') continue;
-      const fc = str(o['Fin Class']), pid = str(o['Sent payerId']), per = str(o['Per Nbr']);
+      const fc = str(o['Fin Class']), pid = str(o['Sent payerId']), per = savedKey(o);
       if (!fc || !pid || !per || isVip(fc) || isSelfPay(fc) || (o.Signal !== 'agree' && o.Signal !== 'payer error')) continue; // latest deciding outcome
       if (!g.has(fk(fc))) g.set(fk(fc), { finClass: fc, ids: new Map() });
       const ids = g.get(fk(fc)).ids;
@@ -2197,41 +2391,46 @@
   /** "Sohar: 9 agreed, 1 other payer, score 83" for a rollup row with outcomes, else ''. */
   function learningEvidence(r) {
     if (!r || !r.n) return '';
-    if (!r.agree && !r.conflicts && !r.discovery) return `Sohar: ${plural(r.n, 'patient')} checked, nothing that confirms or contradicts the payer yet`;
+    if (!r.agree && !r.conflicts && !r.discovery) return `Sohar: ${plural(r.n, 'patient')} checked, nothing that confirms or contradicts the payer yet${r.unrelated ? ` (${r.unrelated} found other coverage, not evidence)` : ''}`;
     const parts = [`${r.agree} agreed`];
     if (r.payerErrors) parts.push(plural(r.payerErrors, 'payer error'));
-    if (r.otherPayer) parts.push(`${r.otherPayer} other payer${r.otherPayer === 1 ? '' : 's'}`);
+    if (r.otherPayer) parts.push(`${r.otherPayer} other payer${r.otherPayer === 1 ? '' : 's'} for the same member ID`);
     parts.push(`score ${r.score}`);
+    if (r.unrelated) parts.push(`${r.unrelated} found other coverage (not evidence)`);
     return `Sohar: ${parts.join(', ')}`;
   }
+  /** "3 of 4 discovery patients" or "2 of 2 payer tests", for a suggestion. */
+  const suggestionWhy = (s, r) => (s.source === 'test' ? `${s.n} of ${s.tried} payer test patient${s.tried === 1 ? '' : 's'} eligible` : `${s.n} of ${r.discovery} discovery patients (same member ID)`);
 
   // Payer Learning sheet: one row per NextGen payer in the ledger or the Payer Map. No patient identifiers.
   const PAYER_LEARNING_COLS = ['NextGen Payer', 'Sohar payerId', 'Sohar payerName', 'Confidence', 'Evidence score', 'Patients agreed', 'Payer errors',
-    'Discovery checked', 'Discovery other payer', 'Most common other payer', 'Suggestion', 'Last outcome'];
+    'Discovery checked', 'Discovery other payer', 'Most common other payer', 'Suggestion', 'Last outcome', 'Discovery other coverage (not evidence)', 'Payer tests'];
   function payerLearningRows(rollup) {
     return (rollup || []).map((r) => ({
       'NextGen Payer': r.nextgenPayer, 'Sohar payerId': r.payerId, 'Sohar payerName': r.payerName, 'Confidence': r.mapped ? r.confidence : 'Not in Payer Map',
       'Evidence score': r.n ? String(r.score) : '', 'Patients agreed': String(r.agree), 'Payer errors': String(r.payerErrors),
       'Discovery checked': String(r.discovery), 'Discovery other payer': String(r.otherPayer),
       'Most common other payer': r.top ? `${r.top.payerName || r.top.payerId} (${r.top.payerId}): ${r.top.n} of ${r.discovery}` : '',
-      'Suggestion': r.suggestion ? `Use ${r.suggestion.payerName || r.suggestion.payerId} (${r.suggestion.payerId}): ${r.suggestion.n} of ${r.discovery} discovery patients`
+      'Suggestion': r.suggestion ? `Use ${r.suggestion.payerName || r.suggestion.payerId} (${r.suggestion.payerId}): ${suggestionWhy(r.suggestion, r)}`
         : r.decision === 'flag' ? r.note : '',
       'Last outcome': r.lastOutcome,
+      'Discovery other coverage (not evidence)': String(r.unrelated || 0),
+      'Payer tests': r.tests ? r.tests.text : '',
     }));
   }
 
   /**
-   * Review rows about payers (Per Nbr blank): High for human-labeled payers Sohar disagrees with (FLAG), Medium for a
+   * Review rows about payers (MRN blank): High for human-labeled payers Sohar disagrees with (FLAG), Medium for a
    * name on the Payer Map more than once (learning skips it).
    */
   function learningReviewRows(rollup) {
     const flags = (rollup || []).filter((r) => r.decision === 'flag').map((r) => ({
-      Severity: 'High', Issue: 'Sohar disagrees with Payer Map', 'Per Nbr': '',
+      Severity: 'High', Issue: 'Sohar disagrees with Payer Map', MRN: '',
       Detail: `${r.nextgenPayer} -> ${r.payerName || r.payerId} (${r.payerId}, ${r.confidence}): ${r.note.replace(/^Sohar disagrees with Payer Map: /, '')}`,
       Fix: 'Check the mapping in the pane (Admin, step 1) or on the Payer Map sheet; "Looks right" there marks it reviewed. The add-in never changes a human label.',
     }));
     const dups = (rollup || []).filter((r) => r.duplicate).map((r) => ({
-      Severity: 'Medium', Issue: 'Payer Map name listed twice', 'Per Nbr': '',
+      Severity: 'Medium', Issue: 'Payer Map name listed twice', MRN: '',
       Detail: `${r.nextgenPayer} is on the Payer Map ${r.duplicates} times (names match ignoring case). Payer learning skips it until one row remains.`,
       Fix: 'Delete the extra rows on the Payer Map sheet so the name appears once.',
     }));
@@ -2291,7 +2490,7 @@
     const refs = rows.map((r) => str(r['Sohar Ref'])).filter(Boolean);
     const n = rows.length;
     return [{
-      Severity: 'High', Issue: 'Sohar results with no patient identifiers', 'Per Nbr': '',
+      Severity: 'High', Issue: 'Sohar results with no patient identifiers', MRN: '',
       Detail: `${plural(n, 'Sohar result')} with no id, member ID, name or DOB${refs.length ? ` (Sohar ref ${refs.slice(0, 5).join(', ')}${refs.length > 5 ? ', ...' : ''})` : ''}. Likely an export anomaly or a check run outside the batch.`,
       Fix: 'Open the Sohar link on those Sohar Results rows (Match = No identifiers) to see who each one is. No NextGen task is made for them.',
     }];
@@ -2391,72 +2590,478 @@
   /** reverifyDue for one policy (verifyRows entry, or null for any verification) from Sohar Results rows. */
   function reverifyCheck(rows, v, opts) { return reverifyDue(policyResults(rows, v, opts && opts.per), opts); }
 
-  // Hidden Re-verify Requests sheet: a person asked to send a recently verified patient anyway.
-  const REVERIFY_REQUEST_COLS = ['Per Nbr', 'Requested'];
+  // Hidden Re-verify Requests sheet: someone asked to send a recently verified patient anyway. By: who asked (the Clinic
+  // tab, a clinic file brought back, or the admin's "re-verify all"). Rows saved before v0.12 have Per Nbr, read as PER- keys.
+  const REVERIFY_REQUEST_COLS = ['MRN', 'Requested', 'By'];
   /**
    * Requests still waiting: a request is dropped once that patient has a Sohar verification (any status) dated after it.
-   * A request whose time cannot be read is kept. Returns {rows (kept), active: Map(Per Nbr -> Requested), dropped}.
+   * A request whose time cannot be read is kept. perToKey (optional) converts rows saved before v0.12.
+   * Returns {rows (kept), active: Map(key -> Requested), dropped}.
    */
-  function pruneReverifyRequests(requests, results) {
+  function pruneReverifyRequests(requests, results, perToKey) {
     const latest = new Map();
     for (const r of results || []) {
-      if (!isVerResult(r) || untrustedMatch(r) || !str(r['Per Nbr'])) continue;
+      const k = keyOf(r);
+      if (!isVerResult(r) || untrustedMatch(r) || !k) continue;
       const t = soharTime(r['Sohar Date']);
-      if (!isNaN(t) && t > (latest.get(str(r['Per Nbr'])) ?? -Infinity)) latest.set(str(r['Per Nbr']), t);
+      if (!isNaN(t) && t > (latest.get(k) ?? -Infinity)) latest.set(k, t);
     }
     const rows = [], active = new Map(), seen = new Set();
     let dropped = 0;
     for (const q of requests || []) {
-      const per = str(q['Per Nbr']), when = str(q.Requested);
-      if (!per || seen.has(per)) { if (per) dropped++; continue; }
+      const k = migrateKey(savedKey(q), perToKey), when = str(q.Requested);
+      if (!k || seen.has(k)) { if (k) dropped++; continue; }
       const t = soharTime(when);
-      if (!isNaN(t) && latest.has(per) && latest.get(per) > t) { dropped++; continue; }
-      seen.add(per);
-      rows.push({ 'Per Nbr': per, 'Requested': when });
-      active.set(per, when);
+      if (!isNaN(t) && latest.has(k) && latest.get(k) > t) { dropped++; continue; }
+      seen.add(k);
+      rows.push({ 'MRN': k, 'Requested': when, 'By': str(q.By) });
+      active.set(k, when);
     }
     return { rows, active, dropped };
   }
-  /** Requests with one more (or a refreshed) Per Nbr. */
-  function addReverifyRequest(requests, per, when) {
-    const p = str(per);
-    const rows = (requests || []).filter((q) => str(q['Per Nbr']) && str(q['Per Nbr']) !== p).map((q) => ({ 'Per Nbr': str(q['Per Nbr']), 'Requested': str(q.Requested) }));
-    if (p) rows.push({ 'Per Nbr': p, 'Requested': str(when) });
+  /** Requests with more (or refreshed) patient keys: keys a key or a list of keys. by: who asked. */
+  function addReverifyRequest(requests, keys, when, by) {
+    const add = new Set((Array.isArray(keys) ? keys : [keys]).map(str).filter(Boolean));
+    const rows = (requests || []).map((q) => ({ 'MRN': savedKey(q), 'Requested': str(q.Requested), 'By': str(q.By) })).filter((q) => q.MRN && !add.has(q.MRN));
+    for (const k of add) rows.push({ 'MRN': k, 'Requested': str(when), 'By': str(by) });
     return rows;
+  }
+  /** Requests without these patient keys (a clinic unticked "Re-verify anyway", or the admin cancelled all). */
+  function removeReverifyRequest(requests, keys) {
+    const drop = new Set((Array.isArray(keys) ? keys : [keys]).map(str).filter(Boolean));
+    return (requests || []).map((q) => ({ 'MRN': savedKey(q), 'Requested': str(q.Requested), 'By': str(q.By) })).filter((q) => q.MRN && !drop.has(q.MRN));
+  }
+  /**
+   * Requests from a clinic file brought back by the admin: its Re-verify Requests rows (MRN, Requested, Action On/Off).
+   * Ticks add a request, unticks remove one. Returns the new request rows and counts.
+   */
+  function mergeClinicRequests(requests, clinicRows, by) {
+    let rows = (requests || []).slice(), added = 0, removed = 0;
+    for (const c of clinicRows || []) {
+      const k = savedKey(c);
+      if (!k) continue;
+      const on = !/^(off|no|n|false|0|removed)$/i.test(str(c['Re-verify Anyway'] ?? c.Action ?? 'On'));
+      const had = rows.some((q) => savedKey(q) === k);
+      if (on && !had) { rows = addReverifyRequest(rows, k, str(c.Requested) || new Date().toISOString(), by); added++; }
+      else if (!on && had) { rows = removeReverifyRequest(rows, k); removed++; }
+    }
+    return { rows, added, removed };
   }
 
   /**
    * Apply the skip window to built patients (buildPatients). results: Sohar Results rows from the saved uploads
-   * (mergeSoharResults). opts: {skip, days, newMonth (reverifyConfig), today, requests (Map or Set of Per Nbr asking to
-   * re-verify anyway)}. Only in-scope verification patients are checked. Each verifyRows entry not due gets reverifySkip
+   * (mergeSoharResults). opts: {skip, days, newMonth (reverifyConfig), today, requests (Map or Set of patient keys asking
+   * to re-verify anyway)}. Only in-scope verification patients are checked. Each verifyRows entry not due gets reverifySkip
    * {verified, due, reason}; buildExports leaves those rows out. A patient with a skipped row keeps Route verification,
    * gets "; skipped: verified eligible MM/DD/YYYY, next check MM/DD/YYYY" on Route Reason and x.reverifySkip
-   * {verified, due, reason, partial} (partial: another insurance still goes). Returns {patients (copies), skipped: [{per,
-   * last, first, verified, due, reason, partial}]}.
+   * {verified, due, reason, partial} (partial: another insurance still goes). Returns {patients (copies), skipped: [{key,
+   * per, mrn, last, first, location, nextAppt, verified, due, reason, partial}], requested: [same shape: patients the skip
+   * would have left out but a request sends anyway]}.
    */
   function applyReverifySkips(patients, results, opts) {
     const o = { ...REVERIFY_DEFAULTS, ...(opts || {}) };
     const asked = o.requests instanceof Map || o.requests instanceof Set ? o.requests : new Set(o.requests || []);
-    const byPer = new Map();
-    for (const r of results || []) { const per = str(r && r['Per Nbr']); if (!per) continue; if (!byPer.has(per)) byPer.set(per, []); byPer.get(per).push(r); }
-    const skipped = [];
+    const byKey = new Map();
+    for (const r of results || []) { const k = keyOf(r); if (!k) continue; if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(r); }
+    const skipped = [], requested = [];
     const out = (patients || []).map((p) => {
-      const per = str(p['Per Nbr']);
+      const k = keyOf(p);
       const vrs = (p.x && p.x.verifyRows) || [];
-      if (!o.skip || p.Route !== 'verification' || p['In Scope'] !== 'Yes' || !vrs.length || asked.has(per)) return p;
-      const rows = byPer.get(per) || [];
+      if (!o.skip || p.Route !== 'verification' || p['In Scope'] !== 'Yes' || !vrs.length) return p;
+      const rows = byKey.get(k) || [];
       const checks = vrs.map((v) => reverifyCheck(rows, v, { ...o, nextAppt: p['Next Appt'] }));
       if (checks.every((c) => c.due)) return p;
       const first = checks.find((c) => !c.due);
       const partial = checks.some((c) => c.due);
       const skip = { verified: first.verified, due: first.dueDate, reason: first.reason, partial };
-      skipped.push({ per, last: p['Last Name'], first: p['First Name'], ...skip });
+      const who = { key: k, per: str(p['Per Nbr']), mrn: str(p.MRN), last: p['Last Name'], first: p['First Name'],
+        location: str(p.x && p.x.location), nextAppt: str(p['Next Appt']), ...skip };
+      if (asked.has(k)) {
+        requested.push({ ...who, requested: asked instanceof Map ? str(asked.get(k)) : '' });
+        return { ...p, x: { ...p.x, reverifyRequested: true, reverifySkipped: skip } };
+      }
+      skipped.push(who);
       return {
         ...p, 'Route Reason': `${p['Route Reason']}; skipped: ${first.reason}${partial ? ' (the other insurance is still sent)' : ''}`,
         x: { ...p.x, reverifySkip: skip, verifyRows: vrs.map((v, i) => (checks[i].due ? v : { ...v, reverifySkip: { verified: checks[i].verified, due: checks[i].dueDate, reason: checks[i].reason } })) },
       };
     });
-    return { patients: out, skipped };
+    return { patients: out, skipped, requested };
+  }
+
+  // ---------- guarantor resubmission (v0.12, approved by Brendan 2026-10-20) ----------
+  // A patient with a guarantor on the chart (Guar Name, not the patient) and no coverage from Sohar can be searched again
+  // with the guarantor as the person (discovery id <key>-G, the guarantor's name and Guar Birth Dt). The admin is asked
+  // after an upload; a yes saves a request, and the next discovery file carries the guarantor row.
+  const GUARANTOR_REASONS = { none: 'Discovery found nothing', failed: 'Verification ineligible or failed' };
+  const GUARANTOR_REQUEST_COLS = ['MRN', 'Requested', 'Reason', 'By'];
+  const resolvedResult = (r) => !!r && r['Sohar Status'] !== 'Not in Sohar file' && !untrustedMatch(r) && !/^pending/i.test(str(r['Sohar Status']));
+  const latestOf = (rows) => rows.slice().sort((a, b) => (soharTime(b['Sohar Date']) || 0) - (soharTime(a['Sohar Date']) || 0))[0] || null;
+  /** A patient's Sohar results by key (trusted matches only). */
+  function resultsByKey(results) {
+    const m = new Map();
+    for (const r of results || []) { const k = keyOf(r); if (!k || untrustedMatch(r)) continue; if (!m.has(k)) m.set(k, []); m.get(k).push(r); }
+    return m;
+  }
+
+  /**
+   * Patients without results who have a guarantor: in scope, a guarantor who is not the patient, and no coverage from Sohar:
+   * the latest patient discovery found nothing, or (no discovery found coverage and) every latest verification came back
+   * ineligible or with an error. Left out: an eligible verification, coverage found, a guarantor search already run or
+   * requested. requests: Guarantor Requests rows (or keys). Returns [{key, per, mrn, last, first, location, nextAppt,
+   * reason, hasDob, guarantor}], soonest visit first.
+   */
+  function guarantorCandidates(patients, results, requests) {
+    const byKey = resultsByKey(results);
+    const asked = new Set((requests || []).map((q) => (typeof q === 'string' ? q : savedKey(q))));
+    const out = [];
+    for (const p of patients || []) {
+      const g = p && p.x && p.x.guarantor, k = keyOf(p);
+      if (!g || p['In Scope'] !== 'Yes' || !k || asked.has(k)) continue;
+      const rows = (byKey.get(k) || []).filter(resolvedResult);
+      if (rows.some((r) => r['Searched As'] === 'Guarantor')) continue;
+      const disc = rows.filter((r) => r['Sent As'] === 'Discovery');
+      const ver = rows.filter((r) => r['Sent As'] === 'Verification' && !/^Superseded/.test(str(r.Action)));
+      if (disc.some((r) => r['Sohar Status'] === 'Coverage found') || ver.some((r) => /^complete\.eligible/i.test(str(r['Sohar Status'])))) continue;
+      const lastDisc = latestOf(disc);
+      let reason = '';
+      if (lastDisc && lastDisc['Sohar Status'] === 'No coverage found') reason = GUARANTOR_REASONS.none;
+      else if (ver.length && ver.every((r) => /^(complete\.ineligible|error)/i.test(str(r['Sohar Status'])))) reason = GUARANTOR_REASONS.failed;
+      if (!reason) continue;
+      out.push({ key: k, per: str(p['Per Nbr']), mrn: str(p.MRN), last: p['Last Name'], first: p['First Name'], location: str(p.x.location),
+        nextAppt: str(p['Next Appt']), reason, hasDob: !!g.dob, guarantor: g });
+    }
+    const t = (s) => { const d = parseDate(s); return d ? d.getTime() : Infinity; };
+    return out.sort((a, b) => t(a.nextAppt) - t(b.nextAppt) || str(a.last).localeCompare(str(b.last)) || str(a.first).localeCompare(str(b.first)));
+  }
+  /** Requests plus these candidates (guarantorCandidates entries). */
+  function addGuarantorRequests(requests, candidates, when, by) {
+    const add = new Map((candidates || []).filter((c) => c && c.key).map((c) => [c.key, c]));
+    const rows = (requests || []).map((q) => ({ 'MRN': savedKey(q), 'Requested': str(q.Requested), 'Reason': str(q.Reason), 'By': str(q.By) })).filter((q) => q.MRN && !add.has(q.MRN));
+    for (const [k, c] of add) rows.push({ 'MRN': k, 'Requested': str(when), 'Reason': str(c.reason), 'By': str(by) });
+    return rows;
+  }
+  /**
+   * Requests still waiting: dropped once a guarantor search (<key>-G) for that patient came back after the request.
+   * perToKey (optional) converts PER- keys. Returns {rows, active: Map(key -> row), dropped}.
+   */
+  function pruneGuarantorRequests(requests, results, perToKey) {
+    const back = new Map();
+    for (const r of results || []) {
+      if (r['Searched As'] !== 'Guarantor' || !resolvedResult(r)) continue;
+      const k = keyOf(r), t = soharTime(r['Sohar Date']);
+      if (k && !isNaN(t) && t > (back.get(k) ?? -Infinity)) back.set(k, t);
+    }
+    const rows = [], active = new Map();
+    let dropped = 0;
+    for (const q of requests || []) {
+      const k = migrateKey(savedKey(q), perToKey);
+      if (!k || active.has(k)) { if (k) dropped++; continue; }
+      const t = soharTime(q.Requested);
+      if (back.has(k) && (isNaN(t) || back.get(k) > t)) { dropped++; continue; }
+      const row = { 'MRN': k, 'Requested': str(q.Requested), 'Reason': str(q.Reason), 'By': str(q.By) };
+      rows.push(row); active.set(k, row);
+    }
+    return { rows, active, dropped };
+  }
+
+  /**
+   * Themes from guarantor searches: for each patient with a guarantor search back, what the patient's own checks found
+   * against what the guarantor search found. Theme: 'Guarantor only', 'Patient only', 'Both, same payer', 'Both,
+   * different payers', 'Neither'. Patient side: latest patient discovery with coverage, else latest eligible verification.
+   * Returns {patients: [{key, theme, nextgenPayer, patientPayer, guarantorPayer, reason}], rows (GUARANTOR_THEME_COLS,
+   * no patient identifiers: one per theme x NextGen payer x Sohar payers), counts: {theme: n}}.
+   */
+  const GUARANTOR_THEME_COLS = ['Theme', 'NextGen Payer', 'Found for patient', 'Found for guarantor', 'Patients'];
+  function guarantorThemes(results) {
+    const byKey = resultsByKey(results);
+    const patients = [];
+    for (const [k, rows0] of byKey) {
+      const rows = rows0.filter(resolvedResult);
+      const g = latestOf(rows.filter((r) => r['Searched As'] === 'Guarantor'));
+      if (!g) continue;
+      const own = rows.filter((r) => r['Searched As'] !== 'Guarantor');
+      const pd = latestOf(own.filter((r) => r['Sent As'] === 'Discovery' && r['Sohar Status'] === 'Coverage found'));
+      const pv = latestOf(own.filter((r) => r['Sent As'] === 'Verification' && /^complete\.eligible/i.test(str(r['Sohar Status'])) && !/^Superseded/.test(str(r.Action))));
+      const mine = pd || pv;
+      const gFound = g['Sohar Status'] === 'Coverage found';
+      const pid = (r) => str(r && r['Sohar payerId']) || str(r && r['Sohar Payer']).toLowerCase();
+      const theme = gFound && mine ? (pid(g) === pid(mine) ? 'Both, same payer' : 'Both, different payers') : gFound ? 'Guarantor only' : mine ? 'Patient only' : 'Neither';
+      patients.push({ key: k, theme, nextgenPayer: str(g['NextGen Payer']) || 'None on file', patientPayer: mine ? str(mine['Sohar Payer']) : '', guarantorPayer: gFound ? str(g['Sohar Payer']) : '' });
+    }
+    const counts = {}, agg = new Map();
+    for (const p of patients) {
+      counts[p.theme] = (counts[p.theme] || 0) + 1;
+      const k = [p.theme, p.nextgenPayer, p.patientPayer, p.guarantorPayer].join('|').toLowerCase();
+      if (!agg.has(k)) agg.set(k, { 'Theme': p.theme, 'NextGen Payer': p.nextgenPayer, 'Found for patient': p.patientPayer || '—', 'Found for guarantor': p.guarantorPayer || '—', n: 0 });
+      agg.get(k).n++;
+    }
+    const order = ['Guarantor only', 'Both, different payers', 'Both, same payer', 'Patient only', 'Neither'];
+    const rows = [...agg.values()].sort((a, b) => order.indexOf(a.Theme) - order.indexOf(b.Theme) || b.n - a.n || a['NextGen Payer'].localeCompare(b['NextGen Payer']))
+      .map(({ n, ...r }) => ({ ...r, 'Patients': String(n) }));
+    return { patients, rows, counts };
+  }
+
+  // ---------- payer tests (v0.12, approved 2026-10-20; Off by default) ----------
+  // For a NextGen payer name without a confident Sohar payer, the same policy (member ID) is verified under the most
+  // similar Sohar payers (Config "Payer test payers", 3) for a few patients (Config "Payer test patients", 2): ids
+  // <key>-T1.. on their own file. A Sohar payer that comes back eligible for every patient tried (at least the patient
+  // count) is suggested on the Payer Learning list; a person confirms it. Results never become the patient's benefits.
+  const PAYER_TEST_DEFAULTS = { on: false, payers: 3, patients: 2 };
+  const PAYER_TEST_COLS = ['Test Id', 'MRN', 'NextGen Payer', 'Candidate payerId', 'Candidate Payer', 'First Built', 'Status', 'Sohar Date', 'Sohar Ref'];
+  const PAYER_TEST_CONFIG_ROWS = [
+    { setting: 'Payer mapping discovery', value: 'On', what: 'On or Off. On: discovery patients whose NextGen payer has no confident Sohar payer, but who have a member ID, go on a separate Payer Mapping discovery file that includes the member ID (one discovery each). Off: they go on the regular discovery file.' },
+    { setting: 'Payer tests', value: 'Off', what: 'On or Off. On: a separate verification file sends the same policy under the most similar Sohar payers, for a few patients per unconfident NextGen payer, to learn which payer sticks. Each row is a Sohar check.' },
+    { setting: 'Payer test payers', value: 3, what: 'Similar Sohar payers tried per NextGen payer name.' },
+    { setting: 'Payer test patients', value: 2, what: 'Patients tried per NextGen payer name. A Sohar payer eligible for this many is suggested.' },
+  ];
+  function payerTestConfig(cfg) {
+    const c = cfg || {};
+    const raw = (k) => (c[k] == null ? '' : String(c[k]).trim());
+    const count = (k, d, max) => { const n = parseInt(raw(k), 10); return isNaN(n) || n < 1 ? d : Math.min(n, max); };
+    return {
+      on: /^(on|yes|y|true|1)$/i.test(raw('Payer tests')),
+      mappingDiscovery: !/^(off|no|n|false|0)$/i.test(raw('Payer mapping discovery')),
+      payers: count('Payer test payers', PAYER_TEST_DEFAULTS.payers, 9),
+      patients: count('Payer test patients', PAYER_TEST_DEFAULTS.patients, 10),
+    };
+  }
+
+  /**
+   * Sohar payers ranked by similarity to a NextGen payer name (autoMatchPayer's scoring): exact name or alias matches
+   * first, then the fuzzy score. opts.confirmed as for autoMatchPayer. Returns [{payerId, payerName, score}] (n best).
+   */
+  function rankPayers(name, soharPayers, n, opts) {
+    const q = autoTokens(name);
+    if (!q.length) return [];
+    const prepared = autoPrepWith(soharPayers, opts && opts.confirmed);
+    const qW = q.reduce((s, t) => s + autoWeight(t), 0);
+    const qHasStrong = q.some((t) => autoWeight(t) === 1);
+    const key = q.join(' ');
+    const scored = [];
+    for (const p of prepared) {
+      if (!p.payerId) continue;
+      let best = 0;
+      for (const v of p.variants) {
+        if (v.toks.join(' ') === key) { best = 2; break; }
+        const hit = q.filter((t) => v.toks.includes(t));
+        if (!hit.length || (qHasStrong && !hit.some((t) => autoWeight(t) === 1))) continue;
+        const hW = hit.reduce((s, t) => s + autoWeight(t), 0), cW = v.toks.reduce((s, t) => s + autoWeight(t), 0);
+        best = Math.max(best, 0.7 * (hW / qW) + 0.3 * (hW / cW));
+      }
+      if (best > 0) scored.push({ payerId: p.payerId, payerName: p.payerName, score: Math.round(best * 100) / 100 });
+    }
+    scored.sort((a, b) => b.score - a.score || a.payerName.localeCompare(b.payerName));
+    return scored.slice(0, n || 3);
+  }
+
+  /** NextGen payer names worth testing: no confident Sohar payer (Auto-Low, Auto-Medium, Review, unknown label) or a Sohar payer error on record. */
+  function testWorthy(confidence, payerId, payerErrors) {
+    const c = str(confidence).toLowerCase();
+    if (c === 'not a payer') return false;
+    return payerErrors > 0 || c === 'auto-medium' || needsClassification(confidence, payerId);
+  }
+
+  /**
+   * The payer test file. patients: built patients (after the skip window). ctx: {soharPayers, payerMap, previous (Payer
+   * Tests rows), payerErrors (Map(lower name -> patients with a payer error)), payers, patients, specialty, when}.
+   * For each test-worthy NextGen name of in-scope patients with a member ID: the patients already tried (still in the
+   * report), then the soonest visits, up to ctx.patients; each tried on the ctx.payers most similar Sohar payers. A row
+   * whose result came back (Status) is not sent again; a name with a Sohar payer eligible for ctx.patients patients is done.
+   * Returns {rows (VERIFICATION_COLS), table (PAYER_TEST_COLS: previous rows kept, new ones added), names: [{name, done, sent}]}.
+   */
+  function buildPayerTests(patients, ctx) {
+    const c = { ...PAYER_TEST_DEFAULTS, ...(ctx || {}) };
+    const idx = payerMapIndex(c.payerMap || []);
+    const confirmed = confirmedNames(c.payerMap || []);
+    const prev = (c.previous || []).map((t) => ({ ...Object.fromEntries(PAYER_TEST_COLS.map((k) => [k, str(t[k])])) }));
+    const byName = new Map();
+    for (const t of prev) { const k = t['NextGen Payer'].toLowerCase(); if (!byName.has(k)) byName.set(k, []); byName.get(k).push(t); }
+    const pool = new Map();
+    for (const p of patients || []) {
+      const name = str(p['Primary Payer']);
+      if (p['In Scope'] !== 'Yes' || !name || !str(p['Member ID']) || isVip(name) || isSelfPay(name) || (p.x && p.x.vip)) continue;
+      const h = idx.get(name.toLowerCase());
+      const errs = c.payerErrors ? +(c.payerErrors.get(name.toLowerCase()) || 0) : 0;
+      if (!testWorthy(h ? h.confidence : 'Unmapped', h ? h.payerId : '', errs)) continue;
+      if (!pool.has(name.toLowerCase())) pool.set(name.toLowerCase(), { name, list: [] });
+      pool.get(name.toLowerCase()).list.push(p);
+    }
+    const rows = [], table = prev.slice(), names = [];
+    const day = (s) => { const d = parseDate(s); return d ? d.getTime() : Infinity; };
+    for (const [k, { name, list }] of pool) {
+      const tried = byName.get(k) || [];
+      const elig = new Map();
+      for (const t of tried) if (/^complete\.eligible/i.test(t.Status)) elig.set(t['Candidate payerId'], (elig.get(t['Candidate payerId']) || 0) + 1);
+      if ([...elig.values()].some((n) => n >= c.patients)) { names.push({ name, done: true, sent: 0 }); continue; }
+      const cands = rankPayers(name, c.soharPayers || [], c.payers, { confirmed });
+      if (!cands.length) { names.push({ name, done: false, sent: 0, none: true }); continue; }
+      const triedKeys = new Set(tried.map((t) => t.MRN));
+      const chosen = list.slice().sort((a, b) => (triedKeys.has(keyOf(b)) - triedKeys.has(keyOf(a))) || day(a['Next Appt']) - day(b['Next Appt'])).slice(0, c.patients);
+      let sent = 0;
+      for (const p of chosen) {
+        const key = keyOf(p);
+        const mine = table.filter((t) => t.MRN === key);
+        for (const cand of cands) {
+          let t = mine.find((x) => x['Candidate payerId'] === cand.payerId && x['NextGen Payer'].toLowerCase() === k);
+          if (!t) {
+            const used = new Set(mine.map((x) => x['Test Id']));
+            let i = 1; while (used.has(`${key}-T${i}`) && i < 9) i++;
+            if (used.has(`${key}-T${i}`)) continue; // nine tests on file for this patient: no room
+            t = { 'Test Id': `${key}-T${i}`, 'MRN': key, 'NextGen Payer': name, 'Candidate payerId': cand.payerId, 'Candidate Payer': cand.payerName, 'First Built': str(c.when), 'Status': '', 'Sohar Date': '', 'Sohar Ref': '' };
+            table.push(t); mine.push(t);
+          }
+          if (t.Status) continue;
+          rows.push({
+            firstName: p['First Name'], lastName: p['Last Name'], dateOfBirth: p.DOB, state: p.State, memberId: p['Member ID'],
+            payerId: cand.payerId, placeOfServiceCode: p.POS, specialtyCode: c.specialty || 'PSY', id: t['Test Id'],
+            subscriberFirstName: p['Subscriber First'], subscriberLastName: p['Subscriber Last'], subscriberDateOfBirth: p['Subscriber DOB'],
+          });
+          sent++;
+        }
+      }
+      names.push({ name, done: false, sent });
+    }
+    return { rows, table, names };
+  }
+
+  /** Payer Tests rows with the results that came back (mergeSoharResults payerTests): Status, Sohar Date, Sohar Ref (latest wins). */
+  function recordPayerTests(table, results) {
+    const by = new Map();
+    for (const r of results || []) {
+      const id = str(r['Test Id']);
+      const prev = by.get(id);
+      if (!prev || (soharTime(r['Sohar Date']) || 0) >= (soharTime(prev['Sohar Date']) || 0)) by.set(id, r);
+    }
+    let updated = 0;
+    const out = (table || []).map((t) => {
+      const r = by.get(str(t['Test Id']));
+      if (!r || (str(t['Sohar Ref']) === str(r['Sohar Ref']) && str(t.Status) === str(r['Sohar Status']))) return t;
+      updated++;
+      return { ...t, 'Status': str(r['Sohar Status']), 'Sohar Date': str(r['Sohar Date']), 'Sohar Ref': str(r['Sohar Ref']) };
+    });
+    return { table: out, updated };
+  }
+
+  /**
+   * Per NextGen name: each Sohar payer tried, how many patients were sent, came back, came back eligible. suggestion: the
+   * one payer eligible for at least `patients` patients (two payers both doing so: no suggestion, shown as ambiguous).
+   * Returns Map(lower name -> {name, candidates: [{payerId, payerName, sent, back, eligible}], suggestion, ambiguous, text}).
+   */
+  function payerTestSummary(table, cfg) {
+    const need = (cfg && cfg.patients) || PAYER_TEST_DEFAULTS.patients;
+    const g = new Map();
+    for (const t of table || []) {
+      const name = str(t['NextGen Payer']), k = name.toLowerCase();
+      if (!name) continue;
+      if (!g.has(k)) g.set(k, { name, cands: new Map() });
+      const cs = g.get(k).cands, id = str(t['Candidate payerId']);
+      if (!cs.has(id)) cs.set(id, { payerId: id, payerName: str(t['Candidate Payer']), sent: 0, back: 0, eligible: 0 });
+      const e = cs.get(id);
+      e.sent++;
+      if (str(t.Status)) e.back++;
+      if (/^complete\.eligible/i.test(str(t.Status))) e.eligible++;
+    }
+    const out = new Map();
+    for (const [k, { name, cands }] of g) {
+      const list = [...cands.values()].sort((a, b) => b.eligible - a.eligible || b.back - a.back || a.payerName.localeCompare(b.payerName));
+      const winners = list.filter((x) => x.eligible >= need);
+      const suggestion = winners.length === 1 ? { payerId: winners[0].payerId, payerName: winners[0].payerName, n: winners[0].eligible, tried: winners[0].back, source: 'test' } : null;
+      const text = list.map((x) => `${x.payerName || x.payerId}: ${x.eligible} of ${x.back} eligible${x.sent > x.back ? ` (${x.sent - x.back} waiting)` : ''}`).join('; ');
+      out.set(k, { name, candidates: list, suggestion, ambiguous: winners.length > 1, text });
+    }
+    return out;
+  }
+  /** Rollup rows (learnPayers) with payer test results: r.tests, and a test suggestion where discovery gave none. */
+  function withTestSuggestions(rollup, summary) {
+    const s = summary || new Map();
+    const rows = (rollup || []).map((r) => {
+      const t = s.get(r.key);
+      if (!t) return r;
+      const c = str(r.confidence).toLowerCase();
+      const may = !r.duplicate && (!r.mapped || c === 'auto-low' || c === 'auto-medium' || c === 'review' || r.payerErrors > 0);
+      const sg = !r.suggestion && may && t.suggestion && t.suggestion.payerId !== r.payerId ? t.suggestion : r.suggestion;
+      return { ...r, tests: t, suggestion: sg };
+    });
+    const have = new Set(rows.map((r) => r.key));
+    for (const [k, t] of s) {
+      if (have.has(k)) continue;
+      rows.push({ key: k, nextgenPayer: t.name, mapped: false, payerId: '', payerName: '', confidence: '', notes: '', agree: 0, payerErrors: 0, discovery: 0, otherPayer: 0, unrelated: 0,
+        conflicts: 0, score: 50, n: 0, top: null, decision: '', note: '', suggestion: t.suggestion, duplicate: false, duplicates: 0, lastOutcome: '', tests: t });
+    }
+    return rows;
+  }
+
+  // ---------- payer metrics (v0.12) ----------
+  // Per NextGen payer, today: in-scope patients (and their upcoming appointments) sent to discovery because the payer
+  // has no confident Sohar payer, and those whose latest verification failed; plus payer test results. The history
+  // sheet keeps one row per day and payer, so a payer that keeps coming back shows as recurring.
+  const PAYER_METRIC_COLS = ['NextGen Payer', 'Confidence', 'Unmapped patients', 'Unmapped appts', 'Failed verification patients', 'Failed verification appts',
+    'Most common failure', 'Payer tests sent', 'Payer tests back', 'Payer tests eligible', 'Test success rate', 'Best test payer', 'Days with issues', 'Recurring'];
+  const PAYER_METRIC_HISTORY_COLS = ['Date', 'NextGen Payer', 'Unmapped patients', 'Unmapped appts', 'Failed verification patients', 'Failed verification appts', 'Payer tests sent', 'Payer tests eligible'];
+  const RECURRING_DAYS = 3;
+  /**
+   * patients: built patients; results: Sohar Results rows; tests: Payer Tests rows; history: earlier history rows.
+   * Returns {rows (PAYER_METRIC_COLS, worst first), totals}.
+   */
+  function payerMetrics(patients, results, tests, history) {
+    const byKey = resultsByKey(results);
+    const g = new Map();
+    const at = (name, conf) => {
+      const k = str(name).toLowerCase() || '(none on file)';
+      if (!g.has(k)) g.set(k, { name: str(name) || 'None on file', conf: str(conf), um: 0, ua: 0, fp: 0, fa: 0, fail: new Map(), ts: 0, tb: 0, te: 0, best: null });
+      return g.get(k);
+    };
+    for (const p of patients || []) {
+      if (!p || p['In Scope'] !== 'Yes') continue;
+      const name = str(p['Primary Payer']);
+      if (!name || isSelfPay(name) || isVip(name)) continue;
+      const appts = (p.x && p.x.apptCount) || (str(p['Next Appt']) ? 1 : 0);
+      if (p.Route === 'discovery' && needsClassification(p.Confidence, p['Sohar payerId'])) { const e = at(name, p.Confidence); e.um++; e.ua += appts; }
+      const ver = (byKey.get(keyOf(p)) || []).filter((r) => r['Sent As'] === 'Verification' && resolvedResult(r) && !/^Superseded/.test(str(r.Action)) && r['Searched As'] !== 'Payer test');
+      const last = latestOf(ver);
+      if (last && /^(complete\.ineligible|error)/i.test(str(last['Sohar Status']))) {
+        const e = at(name, p.Confidence); e.fp++; e.fa += appts;
+        const why = str(last['Sohar Status']).replace(/\s*\(.*$/, '');
+        e.fail.set(why, (e.fail.get(why) || 0) + 1);
+      }
+    }
+    for (const t of payerTestSummary(tests).values()) {
+      const e = at(t.name, '');
+      for (const c of t.candidates) { e.ts += c.sent; e.tb += c.back; e.te += c.eligible; }
+      e.best = t.suggestion || (t.candidates[0] && t.candidates[0].eligible ? t.candidates[0] : null);
+    }
+    const days = new Map();
+    for (const h of history || []) {
+      const k = str(h['NextGen Payer']).toLowerCase();
+      if (!k || !(+h['Unmapped appts'] || +h['Failed verification appts'])) continue;
+      if (!days.has(k)) days.set(k, new Set());
+      days.get(k).add(str(h.Date));
+    }
+    const rows = [...g.entries()].filter(([, e]) => e.um || e.fp || e.ts).map(([k, e]) => {
+      const top = [...e.fail].sort((a, b) => b[1] - a[1])[0];
+      const d = days.get(k) ? days.get(k).size : 0;
+      return {
+        'NextGen Payer': e.name, 'Confidence': e.conf, 'Unmapped patients': String(e.um), 'Unmapped appts': String(e.ua),
+        'Failed verification patients': String(e.fp), 'Failed verification appts': String(e.fa), 'Most common failure': top ? `${top[0]} (${top[1]})` : '',
+        'Payer tests sent': String(e.ts), 'Payer tests back': String(e.tb), 'Payer tests eligible': String(e.te),
+        'Test success rate': e.tb ? `${Math.round((100 * e.te) / e.tb)}%` : '', 'Best test payer': e.best ? `${e.best.payerName || e.best.payerId} (${e.best.payerId})` : '',
+        'Days with issues': String(d), 'Recurring': d >= RECURRING_DAYS ? 'Yes' : '',
+      };
+    });
+    rows.sort((a, b) => (+b['Unmapped appts'] + +b['Failed verification appts']) - (+a['Unmapped appts'] + +a['Failed verification appts']) || a['NextGen Payer'].localeCompare(b['NextGen Payer']));
+    const sum = (c) => rows.reduce((s, r) => s + (+r[c] || 0), 0);
+    return { rows, totals: { unmappedPatients: sum('Unmapped patients'), unmappedAppts: sum('Unmapped appts'), failedPatients: sum('Failed verification patients'),
+      failedAppts: sum('Failed verification appts'), testsSent: sum('Payer tests sent'), testsBack: sum('Payer tests back'), testsEligible: sum('Payer tests eligible'),
+      recurring: rows.filter((r) => r.Recurring).length } };
+  }
+  /** History with today's metric rows (one row per day and payer; today's replace earlier ones from today). */
+  function appendMetricHistory(history, metricRows, date) {
+    const d = str(date);
+    const keep = (history || []).filter((h) => str(h.Date) !== d).map((h) => Object.fromEntries(PAYER_METRIC_HISTORY_COLS.map((c) => [c, str(h[c])])));
+    const add = (metricRows || []).map((r) => ({ 'Date': d, 'NextGen Payer': r['NextGen Payer'], 'Unmapped patients': r['Unmapped patients'], 'Unmapped appts': r['Unmapped appts'],
+      'Failed verification patients': r['Failed verification patients'], 'Failed verification appts': r['Failed verification appts'], 'Payer tests sent': r['Payer tests sent'], 'Payer tests eligible': r['Payer tests eligible'] }));
+    return keep.concat(add);
   }
 
   function summarize(patients) {
@@ -2483,6 +3088,10 @@
     SOHAR_REF_COLS, refsOf, refIndex, appendRefs, noIdentifierReviewRows,
     REVERIFY_DEFAULTS, REVERIFY_CONFIG_ROWS, reverifyConfig, reverifyDue, policyResults, reverifyCheck,
     REVERIFY_REQUEST_COLS, pruneReverifyRequests, addReverifyRequest, applyReverifySkips, soharDay,
+    PER_PREFIX, keyOf, savedKey, perKey, migrateKey, perKeyMap, splitId, searchedAs, idLabel, MAPPING_DISCOVERY_COLS, isMappingCandidate, subscriberFor,
+    removeReverifyRequest, mergeClinicRequests, GUARANTOR_REASONS, GUARANTOR_REQUEST_COLS, guarantorCandidates, addGuarantorRequests, pruneGuarantorRequests,
+    GUARANTOR_THEME_COLS, guarantorThemes, PAYER_TEST_DEFAULTS, PAYER_TEST_COLS, PAYER_TEST_CONFIG_ROWS, payerTestConfig, rankPayers, testWorthy, buildPayerTests,
+    recordPayerTests, payerTestSummary, withTestSuggestions, PAYER_METRIC_COLS, PAYER_METRIC_HISTORY_COLS, RECURRING_DAYS, payerMetrics, appendMetricHistory, suggestionWhy,
     resultKind, readResultRows, mergeSoharResults, benefitFields, oonBenefitFields, accumulatorStatus, benefitFlag, benefitsExport, buildTasks, taskMessage, keepDone, chunkMessage, messageAssembler, workQueue, lasfir, adminMessage,
   };
 });

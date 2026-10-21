@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.11.0';
+  const VERSION = '0.12.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -14,7 +14,10 @@
     // outcomes / finClasses start null ("not read yet"): build reads the ledger once, and retries after a read error.
     outcomes: null, learning: null, finClasses: null, learnRowsChecked: false,
     // Fee estimates (v0.11): null while Off; the fee sheets are read only when Config "Fee estimates" is On.
-    fees: null };
+    fees: null,
+    // v0.12: Per Nbr -> patient key (MRN) from the last build, for converting rows saved before v0.12; skip window
+    // lists; guarantor requests (active Map) and candidates; payer tests; metrics; guarantor themes.
+    perToKey: new Map(), skipped: [], requestedAnyway: [], guarantorActive: new Map(), guarantorCandidates: [], payerTests: [], metrics: null, themes: null };
   const $ = (id) => document.getElementById(id);
 
   // ---------- boot ----------
@@ -117,6 +120,8 @@
     state.recoveredNote = '';
     setStatus(`${note ? `${note} ` : ''}Updated ${now}: ${what}.`, note ? 'warn' : 'ok');
   }
+  /** "2026-10-20 18:05 UTC": readable on the Config sheet, never turned into a date by Excel, parsed by core.soharTime. */
+  function utcStamp(d) { return `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`; }
   function fmtStamp(d) {
     if (isNaN(d)) return '';
     return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()} ${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
@@ -143,6 +148,11 @@
     state.clinicFile = true;
     const m = cf.meta || {};
     state.clinic = { rows: cf.rows || [], review: cf.review || [], runDate: m['Run Date'] || '', location: m.Location || '' };
+    // The clinic's own ticks saved in this file win over what the file was made with.
+    for (const q of cf.requests || []) {
+      const r = state.clinic.rows.find((x) => C.keyOf(x) === String(q.MRN));
+      if (r) r['Re-verify Anyway'] = /^(on|yes|y|true|1)$/i.test(String(q['Re-verify Anyway'] || '')) ? 'Yes' : '';
+    }
     $('adminSteps').hidden = true;
     document.querySelectorAll('#panelAdmin > details').forEach((d) => { d.hidden = true; });
     $('adminOnlyTemplate').hidden = false;
@@ -179,9 +189,21 @@
     $('btnScan').addEventListener('click', () => guard(refreshAll, 'scanResult'));
     $('btnBuild').addEventListener('click', () => guard(build, 'buildResult'));
     $('skipBox').addEventListener('click', (e) => {
-      const b = e.target.closest('[data-reverify]');
-      if (b) guard(() => reverifyAnyway(b.dataset.reverify), 'skipBox');
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.id === 'btnReverifyAll') guard(reverifyAll, 'preflight');
+      else if (b.id === 'btnReverifyCancel') guard(cancelRequests, 'preflight');
+      else if (b.id === 'btnSkipCsv') guard(() => saveCSV(C.fileName('skipped'), SKIP_COLS, skipRows(), 'preflight'), 'preflight');
     });
+    $('btnDlMap').addEventListener('click', () => guard(() => saveCSV(C.fileName('mapping'), C.MAPPING_DISCOVERY_COLS, (state.exports && state.exports.mapping) || [], 'preflight'), 'preflight'));
+    $('btnDlTest').addEventListener('click', () => guard(() => saveCSV(C.fileName('payerTests'), C.VERIFICATION_COLS, (state.exports && state.exports.payerTests) || [], 'preflight'), 'preflight'));
+    $('guarBox').addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (b && b.id === 'btnGuarYes') guard(resubmitGuarantors, 'resultsResult');
+      else if (b && b.id === 'btnGuarNo') { $('guarBox').hidden = true; state.guarantorDismissed = true; }
+    });
+    dropZone('dropClinicBack', 'fileClinicBack', (files) => guard(() => bringBackClinicFiles(files), 'clinicFilesNote'));
+    $('learnBox').addEventListener('click', (e) => { const b = e.target.closest('[data-goto]'); if (b) X.activate(b.dataset.goto); });
     $('btnDlVer').addEventListener('click', () => guard(() => download('verification'), 'preflight'));
     $('btnDlDisc').addEventListener('click', () => guard(() => download('discovery'), 'preflight'));
     dropZone('dropReport', 'fileImport', (files) => guard(() => uploadImport(files), 'scanResult'));
@@ -461,7 +483,10 @@
         state.learnRowsChecked = true;
         // Fee estimates: only the "Fee estimates" (Off) row while Off; its estimate defaults once it is On.
         const feeRows = F ? (feesOn() ? F.FEE_CONFIG_ROWS : F.FEE_CONFIG_ROWS.slice(0, 1)) : [];
-        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, feeRows)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
+        // "MRN ids since": Sohar checks created before this time carry the Per Nbr as their id, later ones the MRN.
+        const since = { setting: 'MRN ids since', value: utcStamp(new Date()), what: 'When this workbook started sending the MRN (not the Per Nbr) as the Sohar id. Sohar results created before then are matched by Per Nbr. Set by the add-in; do not change.' };
+        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
+        if (!String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
       }
       const learn = state.cfg.learning || C.LEARN_DEFAULTS;
       state.payerMap = await X.readPayerMap();
@@ -476,6 +501,9 @@
       // after each upload. If it cannot be read, nothing is learned this time (never a guess from nothing) and the
       // next build tries again.
       if (!state.outcomes) state.outcomes = await X.readPayerOutcomes().catch((e) => { console.error(e); return null; });
+      // Ledger rows saved before v0.12 name the patient by Per Nbr: read them as this report's MRN so one patient counts once.
+      if (!state.perToKey.size) { const pk = C.buildPatients(state.rows, { ...state.cfg, payerMap: state.payerMap, scope: 'all' }); if (!pk.error) state.perToKey = pk.perToKey; }
+      if (state.outcomes) state.outcomes = C.appendOutcomes(state.outcomes, [], state.perToKey).rows;
       const outcomes = state.outcomes || [];
       state.finClasses = learn.on ? C.learnFinClasses(outcomes, learn) : [];
       const cfgFor = () => ({ ...state.cfg, payerMap: state.payerMap, soharPayers: state.soharPayers, learnedFinClasses: state.finClasses });
@@ -504,7 +532,9 @@
         state.payerMap = await X.readPayerMap();
         rebuild = true;
       }
-      state.learning = plan.rollup;
+      // Payer tests (Off by default): their results add suggestions where discovery gave none.
+      state.payerTests = await X.readPayerTests().catch((e) => { console.error(e); return state.payerTests || []; });
+      state.learning = C.withTestSuggestions(plan.rollup, C.payerTestSummary(state.payerTests, state.cfg.payerTests));
       if (rebuild) {
         res = C.buildPatients(state.rows, cfgFor());
         if (res.error) { out.innerHTML = `<p class="bad">${esc(res.error)}</p>`; return; }
@@ -523,9 +553,23 @@
       if (sk.warn) sheetWarn.push(sk.warn);
       const nSkip = state.skipped.length;
       const skipNote = nSkip ? `<p class="hint">${nSkip} skipped: verified within ${sk.days} days (listed in step 2).</p>` : '';
+      state.perToKey = res.perToKey || state.perToKey;
       renderPayers();
       state.patients = res.patients; state.review = res.review.concat(C.learningReviewRows(state.learning));
-      state.exports = C.buildExports(res.patients, state.cfg);
+      const pt = state.cfg.payerTests || C.PAYER_TEST_DEFAULTS;
+      state.exports = C.buildExports(res.patients, { ...state.cfg, guarantorRequests: state.guarantorActive, mappingDiscovery: pt.mappingDiscovery !== false });
+      await X.writePayerMapping(C.MAPPING_DISCOVERY_COLS, state.exports.mapping).catch((e) => { console.error(e); sheetWarn.push(`Payer Mapping sheet not updated: ${e.message}`); });
+      state.exports.payerTests = [];
+      if (pt.on) {
+        const errs = new Map();
+        for (const o of outcomes) if (o.Kind === 'Verification' && o.Signal === 'payer error' && o['NextGen Payer']) errs.set(String(o['NextGen Payer']).toLowerCase(), (errs.get(String(o['NextGen Payer']).toLowerCase()) || 0) + 1);
+        const built = C.buildPayerTests(res.patients, { soharPayers: state.soharPayers, payerMap: state.payerMap, previous: state.payerTests, payerErrors: errs,
+          payers: pt.payers, patients: pt.patients, specialty: state.cfg.specialty, when: fmtStamp(new Date()) });
+        state.exports.payerTests = built.rows;
+        if (built.table.length !== state.payerTests.length) {
+          try { await X.writePayerTests(C.PAYER_TEST_COLS, built.table); state.payerTests = built.table; } catch (e) { console.error(e); sheetWarn.push(`Payer Tests not saved: ${e.message}`); state.exports.payerTests = []; }
+        }
+      }
       await X.replaceTable(X.TABLES.patients, C.PATIENT_COLS, res.patients);
       // The Review sheet is written by refreshRules (build review + clinic rule flags).
       await X.replaceTable(X.TABLES.verification, C.VERIFICATION_COLS, state.exports.verification);
@@ -555,7 +599,9 @@
       const nvp = new Set(state.exports.verification.map((r) => r.id)).size;
       $('btnDlVer').disabled = !nv; $('btnDlDisc').disabled = !nd;
       $('fnVer').textContent = `${nvp} patient${nvp === 1 ? '' : 's'}${nv > nvp ? ` (${nv} rows: ${nv - nvp} with two insurances)` : ''} · ${C.fileName('verification')}`;
-      $('fnDisc').textContent = `${nd} patient${nd === 1 ? '' : 's'} · ${C.fileName('discovery')}`;
+      const ng = state.exports.discovery.filter((r) => /-G$/.test(r.id)).length;
+      $('fnDisc').textContent = `${nd - ng} patient${nd - ng === 1 ? '' : 's'}${ng ? ` + ${ng} guarantor${ng === 1 ? '' : 's'}` : ''} · ${C.fileName('discovery')}`;
+      renderExtraFiles();
       renderSkipped(sk.days);
       if (!(opts && opts.deferRules)) await refreshRules();
     } finally {
@@ -570,54 +616,159 @@
 
   /**
    * Re-verify skip window (Config: Skip recent verifications, Re-verify days, Re-verify in new month; core.applyReverifySkips).
-   * The history is the saved Sohar uploads matched again (Per Nbr, Sohar ref or Member ID; never a name match).
+   * The history is the saved Sohar uploads matched again (MRN or an old Per Nbr id, Sohar ref or Member ID; never a name match).
    * "Re-verify anyway" requests are dropped once a newer verification exists. If the uploads, refs or requests cannot
    * be read, nobody is skipped this time: a patient is never left out on a guess.
    */
   async function applySkips(res, cfgFor) {
     const rc = (state.cfg && state.cfg.reverify) || C.REVERIFY_DEFAULTS;
-    state.skipped = [];
+    state.skipped = []; state.requestedAnyway = [];
+    const pk = res.perToKey || state.perToKey;
     const none = (warn) => ({ patients: res.patients, days: rc.days, warn });
-    if (!rc.skip) return none('');
-    let saved, refs, requests;
+    let saved, refs, requests, gReq;
     try {
       saved = await X.readUploads();
       refs = await X.readSoharRefs();
       requests = await X.readReverifyRequests();
+      gReq = await X.readGuarantorRequests();
     } catch (e) { console.error(e); return none(`Recent verifications not checked, so nobody was skipped: ${e.message}`); }
-    if (!saved.length) return none('');
-    const acc = C.accumulateResults(saved, [], '', refs);
-    const merged = C.mergeSoharResults(state.rows, acc.files, { ...cfgFor(), refs });
+    const merged = saved.length ? C.mergeSoharResults(state.rows, C.accumulateResults(saved, [], '', refs).files, { ...cfgFor(), refs }) : { results: [] };
     if (merged.error) return none('');
-    const pr = C.pruneReverifyRequests(requests, merged.results);
-    if (pr.dropped) await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, pr.rows).catch((e) => console.warn('Re-verify Requests not pruned', e));
+    // Guarantor resubmissions still waiting (dropped once the guarantor search came back): the discovery file carries them.
+    const gp = C.pruneGuarantorRequests(gReq, merged.results, pk);
+    state.guarantorActive = gp.active;
+    if (gp.dropped) await X.writeGuarantorRequests(C.GUARANTOR_REQUEST_COLS, gp.rows).catch((e) => console.warn('Guarantor Requests not pruned', e));
+    if (!rc.skip || !saved.length) return none('');
+    const pr = C.pruneReverifyRequests(requests, merged.results, pk);
+    if (pr.dropped || requests.some((q) => !String(q.MRN || '').trim())) await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, pr.rows).catch((e) => console.warn('Re-verify Requests not pruned', e));
+    state.reverifyRequests = pr.rows;
     const out = C.applyReverifySkips(res.patients, merged.results, { ...rc, today: new Date(), requests: pr.active });
-    state.skipped = out.skipped;
+    state.skipped = out.skipped; state.requestedAnyway = out.requested;
     return { patients: out.patients, days: rc.days, warn: '' };
   }
 
-  /** Step 2: patients left out of the verification file because Sohar verified them eligible recently. */
+  /**
+   * Step 2: patients left out of the verification file because Sohar verified them eligible recently. Collapsed by
+   * default. Clinics pick patients to re-verify anyway (Clinic tab, clinic files); the admin can only send all of them.
+   */
   function renderSkipped(days) {
     const box = $('skipBox');
     if (!box) return;
-    const list = state.skipped || [];
-    box.hidden = !list.length;
-    if (!list.length) { box.innerHTML = ''; return; }
+    const list = state.skipped || [], asked = state.requestedAnyway || [];
+    box.hidden = !list.length && !asked.length;
+    if (box.hidden) { box.innerHTML = ''; return; }
     const short = (d) => esc(String(d || '').slice(0, 5));
-    box.innerHTML = `<p><b>Skipped (verified recently): ${list.length}</b>. Sohar verified the same insurance eligible within ${esc(days)} days, so ${list.length === 1 ? 'this patient is' : 'these patients are'} not on the verification file. They stay on the Patients sheet.</p>
-      <table class="watch"><thead><tr><th>Patient</th><th>Verified</th><th>Next check</th><th></th></tr></thead><tbody>${list.map((s) => `<tr>
-        <td><b>${esc(C.lasfir(s.last, s.first))}</b><br><span class="hint">Per ${esc(s.per)}${s.partial ? ' · other insurance still sent' : ''}</span></td>
-        <td title="${esc(s.verified)}">${short(s.verified)}</td><td title="${esc(s.due)}">${short(s.due)}</td>
-        <td><button class="link" data-reverify="${esc(s.per)}">Re-verify anyway</button></td></tr>`).join('')}</tbody></table>`;
+    const who = (s) => `<b>${esc(C.lasfir(s.last, s.first))}</b><br><span class="hint">${esc(C.idLabel({ MRN: s.mrn, 'Per Nbr': s.per }))}${s.location ? ` · ${esc(s.location)}` : ''}${s.partial ? ' · other insurance still sent' : ''}</span>`;
+    const by = (s) => { const q = (state.reverifyRequests || []).find((r) => r.MRN === s.key); return q && q.By ? q.By : 'request'; };
+    box.innerHTML = (list.length ? `<details class="more skiplist"><summary><b>Skipped (verified recently): ${list.length}</b></summary>
+      <p class="hint">Sohar verified the same insurance eligible within ${esc(days)} days, so ${list.length === 1 ? 'this patient is' : 'these patients are'} not on the verification file. Clinics can ask for a patient on the Clinic tab or in their clinic file.</p>
+      <table class="watch"><thead><tr><th>Patient</th><th>Verified</th><th>Next check</th></tr></thead><tbody>${list.map((s) => `<tr>
+        <td>${who(s)}</td><td title="${esc(s.verified)}">${short(s.verified)}</td><td title="${esc(s.due)}">${short(s.due)}</td></tr>`).join('')}</tbody></table>
+      <div class="actions"><button class="small" id="btnReverifyAll">Re-verify all ${list.length} anyway</button><button class="link" id="btnSkipCsv">Save this list</button></div>
+      </details>` : '')
+      + (asked.length ? `<details class="more skiplist"><summary>Sent anyway on request: ${asked.length}</summary>
+      <table class="watch"><thead><tr><th>Patient</th><th>Verified</th><th>Asked by</th></tr></thead><tbody>${asked.map((s) => `<tr>
+        <td>${who(s)}</td><td title="${esc(s.verified)}">${short(s.verified)}</td><td>${esc(by(s))}</td></tr>`).join('')}</tbody></table>
+      <div class="actions"><button class="link" id="btnReverifyCancel">Cancel these requests</button></div></details>` : '');
+  }
+  const SKIP_COLS = ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'];
+  const skipRows = () => (state.skipped || []).map((s) => ({ Location: s.location, 'Next Appt': s.nextAppt, MRN: s.mrn, 'Per Nbr': s.per, 'Last Name': s.last, 'First Name': s.first,
+    Verified: s.verified, 'Next Check': s.due, 'Other Insurance Sent': s.partial ? 'Yes' : '' }));
+
+  /** Admin opt-in: every skipped patient goes back on the verification file (until a newer Sohar verification exists). */
+  async function reverifyAll() {
+    const keys = (state.skipped || []).map((s) => s.key);
+    if (!keys.length) return;
+    await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, C.addReverifyRequest(await X.readReverifyRequests(), keys, new Date().toISOString(), 'Admin: all skipped'));
+    await build();
+    note('preflight', `${keys.length} patient${keys.length === 1 ? ' is' : 's are'} back on the verification file. Save it again before uploading to Sohar.`, 'ok');
+  }
+  async function cancelRequests() {
+    const keys = (state.requestedAnyway || []).map((s) => s.key);
+    await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, C.removeReverifyRequest(await X.readReverifyRequests(), keys));
+    await build();
+    note('preflight', 'Requests cancelled: those patients are skipped again until their next check.', 'ok');
+  }
+  /**
+   * A clinic's "Re-verify anyway" tick on the Clinic tab (this workbook): add or drop the request and rebuild. Inside a
+   * clinic file the tick is saved in that file (Clinic Requests) for the admin to bring back.
+   */
+  async function toggleClinicRequest(key, on) {
+    const r = ((state.clinic && state.clinic.rows) || []).find((x) => clinicKey(x) === key);
+    if (state.clinicFile) {
+      const prev = await X.readClinicRequests().catch(() => []);
+      const rows = prev.filter((q) => String(q.MRN) !== key);
+      rows.push({ MRN: key, 'Last Name': r ? r['Last Name'] : '', 'First Name': r ? r['First Name'] : '', 'Next Appt': r ? r['Next Appt'] : '', 'Re-verify Anyway': on ? 'On' : 'Off', Requested: new Date().toISOString() });
+      await X.writeClinicRequests(R.CLINIC_REQUEST_COLS, rows);
+      if (r) r['Re-verify Anyway'] = on ? 'Yes' : '';
+      renderClinicList();
+      note('clinicNote', `Saved in this file. Save it and send it back to the admin team (OneDrive or Teams), who bring the request into the main workbook.`, 'ok');
+      return;
+    }
+    const cur = await X.readReverifyRequests();
+    await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, on ? C.addReverifyRequest(cur, key, new Date().toISOString(), 'Clinic tab') : C.removeReverifyRequest(cur, key));
+    await build();
+    note('clinicNote', on ? `${r ? C.lasfir(r['Last Name'], r['First Name']) + ' is' : 'The patient is'} back on the verification file for the admin's next Sohar run.` : 'Request removed.', 'ok');
+  }
+  const clinicKey = (r) => C.keyOf(r);
+
+  /** Step 2: the payer mapping discovery (member ID sent) and, when Config "Payer tests" is On, the payer test file. */
+  function renderExtraFiles() {
+    const m = (state.exports && state.exports.mapping) || [], t = (state.exports && state.exports.payerTests) || [];
+    $('mapFile').hidden = !m.length; $('btnDlMap').disabled = !m.length;
+    $('fnMap').textContent = `${m.length} patient${m.length === 1 ? '' : 's'} · ${C.fileName('mapping')}`;
+    $('testFile').hidden = !t.length; $('btnDlTest').disabled = !t.length;
+    const names = new Set((state.payerTests || []).filter((x) => t.some((r) => r.id === x['Test Id'])).map((x) => x['NextGen Payer'].toLowerCase())).size;
+    $('fnTest').textContent = `${t.length} check${t.length === 1 ? '' : 's'} for ${names} payer name${names === 1 ? '' : 's'} · ${C.fileName('payerTests')}`;
   }
 
-  /** Put a skipped patient back on the verification file until a newer Sohar verification comes back. */
-  async function reverifyAnyway(per) {
-    const s = (state.skipped || []).find((x) => x.per === per);
-    await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, C.addReverifyRequest(await X.readReverifyRequests(), per, new Date().toISOString()));
+  /**
+   * After results: patients without coverage who have a guarantor. "Yes" saves a request for each; the next discovery
+   * file carries a guarantor row (id <MRN>-G) for those whose guarantor DOB is in the report.
+   */
+  function renderGuarantorPrompt() {
+    const box = $('guarBox');
+    const c = C.guarantorCandidates(state.patients || [], state.results || [], [...state.guarantorActive.keys()]);
+    state.guarantorCandidates = c;
+    if (!c.length || state.guarantorDismissed) { box.hidden = true; return; }
+    const noDob = c.filter((x) => !x.hasDob).length;
+    const none = c.filter((x) => x.reason === C.GUARANTOR_REASONS.none).length;
+    box.hidden = false;
+    box.innerHTML = `<p><b>${c.length} patient${c.length === 1 ? '' : 's'} without results ${c.length === 1 ? 'has a guarantor' : 'have guarantors'}.</b> Resubmit with the guarantor as the subscriber?</p>
+      <p class="hint">${none ? `${none} came back with no coverage from discovery` : ''}${none && c.length - none ? '; ' : ''}${c.length - none ? `${c.length - none} came back ineligible or with an error` : ''}. Their guarantor goes on the next discovery file (one extra row each); results come back tied to the patient and flagged Via guarantor on the Review sheet.</p>
+      ${noDob ? `<p class="warn">${noDob} of them ha${noDob === 1 ? 's' : 've'} no guarantor DOB in the report, so ${noDob === 1 ? 'it waits' : 'they wait'} until the NextGen report has a Guar Birth Dt column.</p>` : ''}
+      <details class="more inline"><summary>Who</summary><ul class="pc-items">${c.slice(0, 40).map((x) => `<li>${esc(C.lasfir(x.last, x.first))} · ${esc(C.idLabel({ MRN: x.mrn, 'Per Nbr': x.per }))} · ${esc(x.reason)}${x.hasDob ? '' : ' · no guarantor DOB'}</li>`).join('')}${c.length > 40 ? `<li>${c.length - 40} more</li>` : ''}</ul></details>
+      <div class="actions"><button class="primary" id="btnGuarYes">Yes, add to the next discovery file</button><button class="link" id="btnGuarNo">Not now</button></div>`;
+  }
+  async function resubmitGuarantors() {
+    const c = state.guarantorCandidates || [];
+    if (!c.length) return;
+    await X.writeGuarantorRequests(C.GUARANTOR_REQUEST_COLS, C.addGuarantorRequests(await X.readGuarantorRequests(), c, new Date().toISOString(), 'Admin'));
     await build();
-    const who = s ? C.lasfir(s.last, s.first) : '';
-    note('preflight', `${who ? `${who} · ` : ''}Per ${per} is back on the verification file. Save it again before uploading to Sohar.`, 'ok');
+    const n = ((state.exports && state.exports.discovery) || []).filter((r) => /-G$/.test(r.id)).length;
+    $('guarBox').hidden = true;
+    note('preflight', `${n} guarantor row${n === 1 ? ' is' : 's are'} on the discovery file${n < c.length ? ` (${c.length - n} wait for a guarantor DOB in the report)` : ''}. Save the discovery file again (step 2) and upload it to Sohar.`, 'ok');
+    setCurrent(2);
+  }
+
+  /** Clinic files sent back: their Clinic Requests ticks are merged into the Re-verify Requests, then rebuild. */
+  async function bringBackClinicFiles(files) {
+    let added = 0, removed = 0, read = 0;
+    for (const f of files) {
+      if (!/\.xls[xm]$/i.test(f.name)) throw new Error(`${f.name} is not a clinic file (.xlsx).`);
+      const wb = await XL.readWorkbook(new Uint8Array(await f.arrayBuffer()));
+      const sheet = wb.sheets.find((x) => /^clinic requests$/i.test(x.name));
+      const info = wb.sheets.find((x) => /^clinic info$/i.test(x.name));
+      if (!sheet) throw new Error(`${f.name} has no Clinic Requests sheet. Use a clinic file saved by this version of the add-in.`);
+      const [hdr, ...body] = sheet.rows.filter((r) => (r || []).some((v) => v !== '' && v != null));
+      const rows = body.map((r) => Object.fromEntries((hdr || []).map((h, j) => [String(h).trim(), r[j] == null ? '' : String(r[j])])));
+      const loc = info && info.rows[1] ? String(info.rows[1][(info.rows[0] || []).indexOf('Location')] || '') : '';
+      const m = C.mergeClinicRequests(await X.readReverifyRequests(), rows, `Clinic file${loc ? ` ${loc}` : ''}`);
+      await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, m.rows);
+      added += m.added; removed += m.removed; read++;
+    }
+    await build();
+    note('clinicFilesNote', `${read} clinic file${read === 1 ? '' : 's'} read: ${added} re-verify request${added === 1 ? '' : 's'} added, ${removed} removed. Save the verification file again (step 2).`, 'ok');
   }
 
   // ---------- clinic rules (R5-R10): flags, Review sheet, payer evidence, clinic view ----------
@@ -656,7 +807,7 @@
     if (bi) bi.innerHTML = sev.High ? `<span class="hi">${sev.High} high-priority item${sev.High === 1 ? '' : 's'}</span> on the Review sheet${flagRows.length ? ` (${flagRows.length} clinic flag${flagRows.length === 1 ? '' : 's'} included)` : ''}.` : '';
     try {
       const prev = await X.readPayerEvidence();
-      state.evidence = R.payerEvidence(pts, state.results || [], prev, new Date());
+      state.evidence = R.payerEvidence(pts, state.results || [], prev, new Date(), state.perToKey);
       await X.writePayerEvidence(R.PAYER_EVIDENCE_COLS, state.evidence);
     } catch (e) { console.error(e); note('clinicFilesNote', `Payer Evidence sheet not updated: ${e.message}`, 'warn'); }
     const run = new Date();
@@ -668,6 +819,50 @@
     renderClinic();
     renderClinicFiles();
     renderEvidence();
+    await refreshLearningViews();
+    renderGuarantorPrompt();
+  }
+
+  /**
+   * Payer metrics (today, plus one history row per payer and day), guarantor themes, and the pane's Payer learning
+   * section. The sheets have no patient identifiers.
+   */
+  async function refreshLearningViews() {
+    const warn = [];
+    try {
+      const history = await X.readPayerMetricHistory();
+      const today = C.localDate(new Date());
+      const first = C.payerMetrics(state.patients || [], state.results || [], state.payerTests || [], history);
+      const hist = C.appendMetricHistory(history, first.rows, today);
+      state.metrics = C.payerMetrics(state.patients || [], state.results || [], state.payerTests || [], hist);
+      await X.writePayerMetrics(C.PAYER_METRIC_COLS, state.metrics.rows);
+      if (first.rows.length || history.some((h) => String(h.Date) === today)) await X.writePayerMetricHistory(C.PAYER_METRIC_HISTORY_COLS, hist);
+    } catch (e) { console.error(e); warn.push(`Payer Metrics not updated: ${e.message}`); }
+    state.themes = C.guarantorThemes(state.results || []);
+    if (state.themes.rows.length) await X.writeGuarantorThemes(C.GUARANTOR_THEME_COLS, state.themes.rows).catch((e) => { console.error(e); warn.push(`Guarantor Themes not updated: ${e.message}`); });
+    renderLearning(warn);
+  }
+  function renderLearning(warn) {
+    const box = $('learnBox');
+    if (!box) return;
+    const m = state.metrics, t = m ? m.totals : null, th = state.themes || { counts: {} };
+    const pt = (state.cfg && state.cfg.payerTests) || C.PAYER_TEST_DEFAULTS;
+    const sugg = (state.learning || []).filter((r) => r.suggestion);
+    const top = m ? m.rows.slice(0, 8) : [];
+    const themeLine = Object.entries(th.counts || {}).map(([k, v]) => `${esc(k)}: ${v}`).join(' · ');
+    box.innerHTML = (t ? `<div class="counts q4">
+        <div class="count unm"><div class="n">${t.unmappedAppts}</div><div class="l">appts, payer unmapped<br>(${t.unmappedPatients} patients)</div></div>
+        <div class="count act"><div class="n">${t.failedAppts}</div><div class="l">appts, verification failed<br>(${t.failedPatients} patients)</div></div>
+        <div class="count pen"><div class="n">${t.testsBack ? `${Math.round((100 * t.testsEligible) / t.testsBack)}%` : '—'}</div><div class="l">payer tests eligible<br>(${t.testsEligible} of ${t.testsBack} back)</div></div>
+        <div class="count clr"><div class="n">${t.recurring}</div><div class="l">payers recurring<br>(${C.RECURRING_DAYS}+ days)</div></div>
+      </div>` : '')
+      + (top.length ? `<table class="watch"><thead><tr><th>NextGen payer</th><th>Unmapped</th><th>Failed</th><th>Tests</th></tr></thead><tbody>${top.map((r) => `<tr>
+        <td>${esc(r['NextGen Payer'])}${r.Recurring ? ' <span class="pill p-amber">Recurring</span>' : ''}<br><span class="hint">${esc(r['Most common failure'] || r.Confidence || '')}</span></td>
+        <td>${esc(r['Unmapped appts'])}</td><td>${esc(r['Failed verification appts'])}</td><td>${r['Payer tests back'] !== '0' ? `${esc(r['Payer tests eligible'])}/${esc(r['Payer tests back'])}${r['Best test payer'] ? `<br><span class="hint">${esc(r['Best test payer'])}</span>` : ''}` : '—'}</td></tr>`).join('')}</tbody></table>` : '<p class="hint">No unmapped or failed payers in this report.</p>')
+      + `<p class="hint">${sugg.length ? `${sugg.length} payer suggestion${sugg.length === 1 ? '' : 's'} wait${sugg.length === 1 ? 's' : ''} for you in step 1 (Use ...). ` : ''}Payer mapping discovery is ${pt.mappingDiscovery !== false ? 'On' : 'Off'}; payer tests are ${pt.on ? `On (${pt.payers} payers × ${pt.patients} patients)` : 'Off (Config "Payer tests")'}. A discovery that finds a different payer only counts when Sohar returns the same member ID.</p>`
+      + (themeLine ? `<p><b>Guarantor searches:</b> ${themeLine}.</p>` : '')
+      + (warn || []).map((w) => `<p class="warn">${esc(w)}</p>`).join('')
+      + '<div class="actions"><button class="link" data-goto="Payer Metrics">Payer Metrics</button><button class="link" data-goto="Payer Metrics History">History</button><button class="link" data-goto="Payer Learning">Payer Learning</button><button class="link" data-goto="Payer Mapping">Payer Mapping</button>' + (themeLine ? '<button class="link" data-goto="Guarantor Themes">Guarantor Themes</button>' : '') + '</div>';
   }
 
   // ---------- Clinic tab (R11) ----------
@@ -697,7 +892,7 @@
   const SEV_WORD = { high: 'Action', medium: 'Check' };
   /** Card review items with severity; per-appointment repeats collapsed (rules.collapseFlags). */
   function cardItems(per, r) {
-    const rv = ((state.clinic && state.clinic.review) || []).filter((x) => String(x['Per Nbr']) === per && x.Severity !== 'Low');
+    const rv = ((state.clinic && state.clinic.review) || []).filter((x) => String(x.MRN || C.perKey(x['Per Nbr'])) === per && x.Severity !== 'Low');
     if (!rv.length) return splitList(r['Review Items'], '|').map((t) => ({ detail: t, severity: '' }));
     return R.collapseFlags(rv.map((x) => ({ code: x.Issue, label: x.Pill, severity: String(x.Severity || '').toLowerCase(), detail: x.Detail,
       appt: { date: x['Appt Date'], event: x.Event, rendering: x.Rendering } })));
@@ -711,6 +906,12 @@
       if (!state.clinicFile && !state.demo) X.setConfigValue('Clinic location', $('clinicLoc').value || 'All').catch(() => {});
     });
     $('clinicText').addEventListener('input', () => renderClinicList());
+    $('clinicList').addEventListener('change', (e) => {
+      const cb = e.target.closest && e.target.closest('input[data-rv]');
+      if (!cb) return;
+      cb.disabled = true;
+      guard(() => toggleClinicRequest(cb.dataset.rv, cb.checked), 'clinicNote').finally(() => { cb.disabled = false; });
+    });
     $('clinicChips').addEventListener('click', (e) => {
       const b = e.target.closest('button[data-pill]'); if (!b) return;
       state.clinicFilter = state.clinicFilter === b.dataset.pill ? '' : b.dataset.pill;
@@ -719,7 +920,7 @@
     $('btnClinicEmail').addEventListener('click', () => guard(async () => {
       const loc = $('clinicLoc').value;
       const text = R.clinicEmail(loc, clinicRowsAt(loc), { runDate: runDateOf() });
-      await copyOrShow(text, 'clinicNote', `Email summary for ${loc || 'all locations'} copied (LASFIR + Per Nbr only). Paste it into Outlook or Teams.`);
+      await copyOrShow(text, 'clinicNote', `Email summary for ${loc || 'all locations'} copied (LASFIR + MRN only). Paste it into Outlook or Teams.`);
     }, 'clinicNote'));
   }
   function runDateOf() {
@@ -767,7 +968,7 @@
     const q = $('clinicText').value.trim().toLowerCase();
     const all = clinicRowsAt(loc);
     const rows = all.filter((r) => (!state.clinicFilter || splitList(r.Pills, ';').includes(state.clinicFilter))
-      && (!q || [r['Last Name'], r['First Name'], r['Per Nbr'], r.MRN].some((v) => String(v || '').toLowerCase().includes(q))));
+      && (!q || [r['Last Name'], r['First Name'], r.MRN, r['Per Nbr']].some((v) => String(v || '').toLowerCase().includes(q))));
     const list = $('clinicList');
     const meta = $('clinicMeta');
     if (!state.clinic) { meta.textContent = ''; return; }
@@ -777,7 +978,7 @@
     for (const r of rows) { const d = r['Next Appt'] || 'No date'; if (!days.has(d)) days.set(d, []); days.get(d).push(r); }
     const wd = (s) => { const d = C.parseDate(s); return d ? d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' }) + ' ' : ''; };
     list.innerHTML = [...days].map(([d, rs]) => `<h3 class="cday">${esc(wd(d) + d)} <span class="hint">${rs.length}</span></h3>` + rs.map((r) => {
-      const per = String(r['Per Nbr']);
+      const per = clinicKey(r);
       const pills = splitList(r.Pills, ';');
       const items = cardItems(per, r);
       const choose = plainChoose(r['Choose in NextGen']);
@@ -787,7 +988,7 @@
       const ver = r['Verified Date'] ? `Verified ${esc(r['Verified Date'])}${r['Days Since Verified'] !== '' && r['Days Since Verified'] != null ? ` (${esc(r['Days Since Verified'])}d)` : ''}` : 'Not verified in Sohar';
       const ben = meterHtml('Deductible', r.Deductible, r['Deductible Remaining'], r['Deductible Status']) + meterHtml('OOP max', r['OOP Max'], r['OOP Remaining'], r['OOP Status']);
       return `<article class="pcard${high ? ' hi' : ''}">
-        <div class="pc-head"><span class="pc-time">${esc(r['Next Time'] || '')}</span><b>${esc([r['Last Name'], r['First Name']].filter(Boolean).join(', '))}</b><span class="hint">Per ${esc(per)}</span></div>
+        <div class="pc-head"><span class="pc-time">${esc(r['Next Time'] || '')}</span><b>${esc([r['Last Name'], r['First Name']].filter(Boolean).join(', '))}</b><span class="hint">${esc(C.idLabel(r))}</span></div>
         <div class="pc-sub">${esc([r['Next Event'], r['Next Provider']].filter(Boolean).join(' · '))}${!loc && r.Location ? ` <span class="hint">· ${esc(r.Location)}</span>` : ''}</div>
         ${pills.length ? `<div class="pills">${cardPills(pills).map((l) => pillHtml(l)).join(' ')}</div>` : ''}
         <dl class="pc-dl">
@@ -795,9 +996,11 @@
           ${r['Choose in NextGen'] ? `<dt>NextGen</dt><dd>${choose.quoted ? `Choose "${esc(choose.text)}"` : esc(choose.text)}</dd>` : ''}
           <dt>Sohar</dt><dd>${esc(plainStatus(r['Sohar Status']))}${r.Plan ? ` · ${esc(r.Plan)}` : ''}<br><span class="hint">${ver}</span></dd>
           ${r.Copay !== '' || r.Coinsurance !== '' ? `<dt>Copay</dt><dd>${r.Copay !== '' ? esc(usd(r.Copay) || r.Copay) : '—'}${r.Coinsurance !== '' ? ` · coins ${esc(r.Coinsurance)}` : ''}</dd>` : ''}
-          ${feeCardHtml(per)}
+          ${feeCardHtml(r['Per Nbr'])}
         </dl>
         ${ben ? `<div class="pc-ben">${ben}</div>` : ''}
+        ${r['Verification Skipped'] || r['Re-verify Anyway'] ? `<div class="pc-skip"><span class="hint">${r['Verification Skipped'] ? `${esc(r['Verification Skipped'])}: not on this week's verification file (next check ${esc(r['Next Check'] || '?')}).` : 'Verified recently.'}</span>
+          <label class="inline"><input type="checkbox" data-rv="${esc(per)}" ${r['Re-verify Anyway'] ? 'checked' : ''}> Re-verify anyway</label></div>` : ''}
         ${items.length ? `<ul class="pc-items">${items.map((t) => `<li class="sev-${t.severity || 'high'}">${SEV_WORD[t.severity] ? `<b>${SEV_WORD[t.severity]}:</b> ` : ''}${esc(t.detail)}</li>`).join('')}</ul>` : ''}
         ${notes.length ? `<details class="more inline"><summary>Notes (${notes.length})</summary><ul class="pc-notes">${notes.map((t) => `<li>${esc(t)}</li>`).join('')}</ul></details>` : ''}
         ${reverify || /^https:\/\//.test(r['Sohar Link'] || '') ? `<div class="pc-links">${[
@@ -825,7 +1028,7 @@
     box.querySelectorAll('[data-cemail]').forEach((b) => b.addEventListener('click', () => guard(async () => {
       const l = b.dataset.cemail;
       const text = R.clinicEmail(l, clinicRowsAt(l), { runDate: runDateOf() });
-      await copyOrShow(text, 'clinicFilesNote', `Email summary for ${l} copied (LASFIR + Per Nbr only). Paste it into Outlook or Teams.`);
+      await copyOrShow(text, 'clinicFilesNote', `Email summary for ${l} copied (LASFIR + MRN only). Paste it into Outlook or Teams.`);
     }, 'clinicFilesNote')));
   }
 
@@ -840,6 +1043,8 @@
       sheets: [
         { name: 'Clinic', table: 'tblClinic', columns: R.CLINIC_COLS, rows, linkColumns: ['Re-verify Link', 'Sohar Link'], linkText: { 'Re-verify Link': 'Re-verify in Sohar' } },
         { name: 'Review', table: 'tblClinicReview', columns: R.CLINIC_REVIEW_COLS, rows: review, linkColumns: ['Link'], linkText: { Link: 'Re-verify in Sohar' } },
+        { name: 'Clinic Requests', table: 'tblClinicRequests', columns: R.CLINIC_REQUEST_COLS,
+          rows: rows.filter((r) => r['Re-verify Anyway']).map((r) => ({ MRN: C.keyOf(r), 'Last Name': r['Last Name'], 'First Name': r['First Name'], 'Next Appt': r['Next Appt'], 'Re-verify Anyway': 'On', Requested: '' })) },
         { name: 'Clinic Info', table: 'tblClinicMeta', columns: ['Kind', 'Location', 'Run Date', 'Add-in Version'], rows: [{ Kind: 'Sohar Clinic', Location: loc, 'Run Date': runDate, 'Add-in Version': VERSION }], hidden: true },
       ],
       webExtension: { id: ADDIN_ID, version: '0.1.1.0' },
@@ -964,7 +1169,8 @@
     // Fin Class matches its last-encounter row here (and its outcome is recorded against that Fin Class).
     // combineResults matches again when a blank re-export's ref is only learned in this pass, and records the payerId
     // sent on this upload's verification records (Sohar exports have none) for the skip window.
-    const cr = C.combineResults(state.rows, saved, list, new Date().toISOString(), refs || [], { ...cfg, payerMap: await X.readPayerMap(), soharPayers: state.soharPayers, learnedFinClasses: await learnedFinClassesFor(cfg) });
+    const payerTests = await X.readPayerTests().catch(() => state.payerTests || []);
+    const cr = C.combineResults(state.rows, saved, list, new Date().toISOString(), refs || [], { ...cfg, payerMap: await X.readPayerMap(), soharPayers: state.soharPayers, learnedFinClasses: await learnedFinClassesFor(cfg), payerTestRows: payerTests });
     const { acc, res } = cr;
     if (list.length) {
       step(`${acc.added} new result${acc.added === 1 ? '' : 's'}${acc.replaced ? `, ${acc.replaced} replaced` : ''}; ${acc.saved.length} saved in this workbook.`);
@@ -974,11 +1180,11 @@
     const learnedRefs = cr.refs;
     const noIds = res.counts.noIdentifiers || 0;
     step(`Matched ${res.counts.matched} results to patients (${res.counts.unmatched} unmatched${noIds ? `, ${noIds} with no patient identifiers` : ''})${res.counts.twoInsurances ? `; ${res.counts.twoInsurances} patient${res.counts.twoInsurances === 1 ? '' : 's'} had two insurances checked` : ''}. Writing the Sohar Results sheet…`);
-    // Remember the refs of records matched by Per Nbr or Member ID (append-only; "Clear saved Sohar results" keeps them).
+    // Remember the refs of records matched by their id or Member ID (append-only; "Clear saved Sohar results" keeps them).
     if (refs && learnedRefs.length) {
       try {
-        const kept = C.appendRefs(refs, learnedRefs, fmtStamp(new Date()));
-        if (kept.added) await X.writeSoharRefs(C.SOHAR_REF_COLS, kept.rows);
+        const kept = C.appendRefs(refs, learnedRefs, fmtStamp(new Date()), res.perToKey);
+        if (kept.added || refs.some((r) => !String(r.MRN || '').trim())) await X.writeSoharRefs(C.SOHAR_REF_COLS, kept.rows);
       } catch (e) { console.error(e); note('resultsResult', `Sohar Refs not updated: ${e.message}`, 'warn'); }
     }
     // Flags need the new results (re-verify, Medi-Cal from Sohar); the Results sheet gets a Pills column after RESULTS_COLS.
@@ -986,15 +1192,21 @@
     computeFlags();
     const secBy = secondaryByPer();
     // Pills and Secondary Payer ride along for full screen (Secondary Payer is not written to the Results sheet).
-    res.results = res.results.map((r) => ({ ...r, Pills: pillsFor(r['Per Nbr']), 'Secondary Payer': secBy.get(String(r['Per Nbr'])) || '' }));
+    res.results = res.results.map((r) => ({ ...r, Pills: pillsFor(C.keyOf(r)), 'Secondary Payer': secBy.get(String(r['Per Nbr'])) || '' }));
     await X.writeResults(C.RESULTS_COLS.concat('Pills'), res.results);
     const tasks = C.keepDone(C.buildTasks(res.results), await X.readTasks());
     step(`Writing ${tasks.length} rows to the NextGen Tasks sheet…`);
     await X.writeTasks(C.TASK_COLS, tasks);
-    const dv = C.keepMemberIds(res.discoveryVerification, await X.readDiscoveryVerify());
+    if (res.perToKey) state.perToKey = res.perToKey;
+    // Payer test results go to the hidden Payer Tests sheet (never the patient's results).
+    if (res.payerTests && res.payerTests.length) {
+      const pt = C.recordPayerTests(payerTests, res.payerTests);
+      if (pt.updated) { await X.writePayerTests(C.PAYER_TEST_COLS, pt.table).catch((e) => note('resultsResult', `Payer Tests not updated: ${e.message}`, 'warn')); state.payerTests = pt.table; step(`${pt.updated} payer test result${pt.updated === 1 ? '' : 's'} recorded.`); }
+    }
+    const dv = C.keepMemberIds(res.discoveryVerification, await X.readDiscoveryVerify(), state.perToKey);
     await X.writeDiscoveryVerify(C.VERIFICATION_COLS, dv);
     // Keep ZIPs an admin typed on the Discovery from Verify sheet.
-    const zips = new Map((await X.readVerifyFailed()).filter((r) => String(r.zipCode || '').trim()).map((r) => [String(r.id), String(r.zipCode).trim()]));
+    const zips = new Map((await X.readVerifyFailed()).filter((r) => String(r.zipCode || '').trim()).map((r) => [state.perToKey.get(String(r.id)) || String(r.id), String(r.zipCode).trim()]));
     const vf = res.verificationDiscovery.map((r) => (r.zipCode ? r : { ...r, zipCode: zips.get(String(r.id)) || '' }));
     await X.writeVerifyFailed(C.DISCOVERY_COLS, vf);
     state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv; state.verifyFailed = vf;
@@ -1002,8 +1214,9 @@
     // "Clear saved Sohar results" does not touch it. A read error skips the update, so the ledger is never overwritten.
     let newOutcomes = 0;
     try {
-      const ledger = C.appendOutcomes(await X.readPayerOutcomes(), C.payerOutcomes(res.results, res.patients, fmtStamp(new Date())));
-      if (ledger.added) {
+      const before = await X.readPayerOutcomes();
+      const ledger = C.appendOutcomes(before, C.payerOutcomes(res.results, res.patients, fmtStamp(new Date())), state.perToKey);
+      if (ledger.added || before.some((o) => !String(o.MRN || '').trim())) {
         await X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, ledger.rows);
         step(`${ledger.added} new Sohar outcome${ledger.added === 1 ? '' : 's'} recorded for payer learning.`);
       }
@@ -1082,7 +1295,7 @@
     const tile = (n, l, cls) => `<div class="count ${cls}"><div class="n">${n}</div><div class="l">${l}</div></div>`;
     const bar = (pct) => `<span class="meter" data-pct="${pct === '' ? 0 : pct}"><span></span></span>`;
     const rows = s.watch.slice(0, 25).map((r) => `<tr>
-        <td><b>${esc(C.lasfir(r['Last Name'], r['First Name']))}</b><br><span class="hint">Per ${esc(r['Per Nbr'])}${r.Service ? ` · ${esc(r.Service)}` : ''}</span></td>
+        <td><b>${esc(C.lasfir(r['Last Name'], r['First Name']))}</b><br><span class="hint">${esc(C.idLabel(r))}${r.Service ? ` · ${esc(r.Service)}` : ''}</span></td>
         <td>${esc(String(r['Next Appt'] || '').slice(0, 5)) || '<span class="hint">no visit</span>'}</td>
         <td>${r['OOP Status'] === 'Met' ? '<b class="okc">Met</b>' : `${esc(usd(r['OOP Remaining']))} left`}<br><span class="hint">of ${esc(usd(r['OOP Max']))}</span></td>
         <td class="meterc">${bar(r['OOP % Met'])}<span class="hint">${r['OOP % Met'] === '' ? '' : Math.round(r['OOP % Met'] * 100) + '%'}</span></td>
@@ -1109,7 +1322,7 @@
   const feesOn = () => !!(F && state.cfg && state.cfg.fees && state.cfg.fees.on);
   const benefitCols = () => C.BENEFIT_SHEET_COLS.concat('Pills', ...(feesOn() ? ['Est MD', 'Est NP'] : []));
   function benefitRows(view) {
-    return view.rows.map((r) => ({ ...r, Pills: pillsFor(r['Per Nbr']), ...(feesOn() ? estCols(r['Per Nbr']) : {}) }));
+    return view.rows.map((r) => ({ ...r, Pills: pillsFor(C.keyOf(r)), ...(feesOn() ? estCols(r['Per Nbr']) : {}) }));
   }
   const estAmount = (e) => (e && e.patient != null ? `${e.patient.toFixed(2)}${F.partialNote(e) ? ` (${F.partialNote(e)})` : ''}` : '');
   function estCols(per) {
@@ -1304,7 +1517,7 @@
     await saveCSV(C.fileName('tracker'), C.TRACKER_EXPORT_COLS, out.rows, 'benBox');
     const n = `${out.rows.length} patient${out.rows.length === 1 ? '' : 's'}`;
     if (out.pending.length) {
-      const who = out.pending.map((r) => `${C.lasfir(r['Last Name'], r['First Name'])} · Per ${r['Per Nbr']}`).join(', ');
+      const who = out.pending.map((r) => `${C.lasfir(r['Last Name'], r['First Name'])} · ${C.idLabel(r)}`).join(', ');
       note('benBox', `${n} in the file. Left out, still waiting on the step 3 verification: ${who}. Save the tracker file again after that output is uploaded.`, 'warn');
     } else note('benBox', `${n} in the tracker file. Import it in the TMS Tracker and the ESK Tracker.`, 'ok');
   }
@@ -1406,6 +1619,13 @@
       type: 'data', focus: focus || '', web: isWeb(), results: ((await currentResults()) || []).map(({ x, resultKey, chooseGuess, oon, ...r }) => r), tasks: await currentTasks(), ir: await currentIr(),
       exports: state.exports || null, discoveryVerify: await currentDiscoveryVerify(), verifyFailed: await currentVerifyFailed(), scope: state.cfg ? state.cfg.scope : 'upcoming',
       asOf: state.resultsAsOf ? state.resultsAsOf.toISOString() : null,
+      // v0.12: clinic lists (with the skip window) for the Clinic lists tab, and the Payer learning views.
+      clinic: state.clinic ? { rows: state.clinic.rows, review: state.clinic.review, runDate: state.clinic.runDate } : null,
+      skipped: skipRows(), skipCols: SKIP_COLS,
+      learning: { rows: C.payerLearningRows(state.learning || []), metrics: state.metrics ? state.metrics.rows : [], totals: state.metrics ? state.metrics.totals : null,
+        themes: state.themes ? state.themes.rows : [], themeCounts: state.themes ? state.themes.counts : {}, tests: state.payerTests || [],
+        mapping: (state.exports && state.exports.mapping) || [], payerTestRows: (state.exports && state.exports.payerTests) || [] },
+      guarantor: { count: (state.guarantorCandidates || []).length, noDob: (state.guarantorCandidates || []).filter((x) => !x.hasDob).length },
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -1468,6 +1688,12 @@
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
+    } else if (m.type === 'clinic-file') {
+      await saveClinicFile(m.location);
+      await sendToDialog({ type: 'notice', ok: true, text: `Clinic file for ${m.location} saved to Downloads (Excel on the web: see the pane for "Save in a new tab").` });
+    } else if (m.type === 'guarantor-resubmit') {
+      await resubmitGuarantors();
+      await sendToDialog({ ...(await payload('upload')), notice: { ok: true, text: 'Guarantors added to the discovery file. Save it again on this tab.' } });
     } else if (m.type === 'fee-defaults' && feesOn()) {
       await saveFeeDefaults(m.feePayer, m.toggles);
     }
@@ -1563,7 +1789,7 @@
   }
   function isoToUs(iso) { const [y, m, d] = iso.split('-'); return `${m}/${d}/${y}`; }
   function label(f) {
-    return { patName: 'Patient name', dob: 'DOB', perNbr: 'Per Nbr', mrn: 'MRN', apptDt: 'Appt date', begTm: 'Start time', event: 'Event', loc: 'Location', sts: 'Status', patSts: 'Patient status', payer: 'Payer', secPayer: 'Secondary payer', polNbr: 'Member ID', polNbrLstEnc: 'Member ID (last enc)', zip: 'ZIP', state: 'State', guarName: 'Guarantor', rendering: 'Rendering',
+    return { patName: 'Patient name', dob: 'DOB', perNbr: 'Per Nbr', mrn: 'MRN', apptDt: 'Appt date', begTm: 'Start time', event: 'Event', loc: 'Location', sts: 'Status', patSts: 'Patient status', payer: 'Payer', secPayer: 'Secondary payer', polNbr: 'Member ID', polNbrLstEnc: 'Member ID (last enc)', zip: 'ZIP', state: 'State', guarName: 'Guarantor', guarDob: 'Guarantor DOB', rendering: 'Rendering',
       resName: 'Resource', finClass: 'Fin class', finClassLstEnc: 'Fin class (last enc)', secPayerLstEnc: 'Secondary (last enc)', authCd: 'Auth code', authCdLstEnc: 'Auth code (last enc)' }[f] || f;
   }
   /** Run fn; show any error next to the step that failed (boxId) as well as in the header. */
@@ -1620,7 +1846,7 @@
       'Gender Identity', 'Current Gender', 'Preferred Pronoun', 'MRN', 'Status', 'Dur', 'Birth Dt', 'Rendering', 'End Tm', 'Per Nbr', 'Nxt Appt Dt', 'Nxt Beg Tm',
       'Nxt Event', 'Rschd', 'Rschd Desc', 'Guar Zip', 'Chkin Dt', 'Chkout Dt', 'Sec Payer (Lst Enc)', 'Fin Class (Lst Enc)', 'Pol Nbr (Lst Enc)', 'Auth Cd (Lst Enc)',
       'Payer Name (Cht Guar)', 'Sec Payer (Cht Guar)', 'Fin Class (Cht Guar)', 'Pol Nbr (Cht Guar)', 'Auth Cd (Cht Guar)', 'Other ID Nbr', 'Crt Dt', 'Created By',
-      'Mod Dt', 'Modified By', 'Measures Needed?', 'No Show/Late Cancel Charged?'];
+      'Mod Dt', 'Modified By', 'Measures Needed?', 'No Show/Late Cancel Charged?', 'Guar Name', 'Guar Birth Dt'];
     const col = (h) => hdr.indexOf(h);
     const now = new Date();
     const day = (off) => { const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + off); return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`; };
@@ -1663,6 +1889,8 @@
       ['Grant, Theo', '200117', '01/17/1949', '94949', 'Kaiser Medicare Northern CA', '', 'Kaiser', 'KPM200117', '', 'Kaiser', 'KPM200117', '',
         [[8, '11:30 AM', 'Med Management In-Office', 'San Rafael', DO]]],
     ];
+    // Made-up guarantors: Lindqvist's search found nothing (guarantor DOB on file); Ibarra's guarantor has no DOB in the report.
+    const DEMO_GUAR = { 200103: ['Lindqvist, Freya', '02/14/1970'], 200115: ['Ibarra, Rosa', ''], 200116: ['Fischer, Jonas', '05/05/1960'] };
     let rows = [[], ['', '', '', '', 'Mindful Health Solutions'], [], ['', '', '', '', 'Appointments Listing'], ['', '', '', '', `From ${day(-30)} to ${day(30)}`], [], hdr];
     let n = 0;
     for (const [name, per, dob, zip, payer, sec, fin, pol, auth, finL, polL, authL, appts] of P) {
@@ -1674,6 +1902,8 @@
         r[col('Fin Class (Lst Enc)')] = finL; r[col('Pol Nbr (Lst Enc)')] = polL; r[col('Auth Cd (Lst Enc)')] = authL;
         r[col('Payer Name (Cht Guar)')] = payer; r[col('Sec Payer (Cht Guar)')] = sec; r[col('Fin Class (Cht Guar)')] = fin;
         r[col('Pol Nbr (Cht Guar)')] = pol; r[col('Auth Cd (Cht Guar)')] = auth; r[col('Created By')] = 'synthetic';
+        const g = DEMO_GUAR[per];
+        if (g) { r[col('Guar Name')] = g[0]; r[col('Guar Birth Dt')] = g[1]; }
         rows.push(r); n++;
       }
     }
@@ -1713,8 +1943,10 @@
       ver(200108, 'Partnership HealthPlan of California', 'PHP200108', 'complete.eligible', '0', '0', '0', '0', '0', '0', -2, 'MEDI-CAL MANAGED CARE'),
       ver(200108, 'Blue Shield of California', 'XEA200108', 'complete.ineligible', '', '', '', '', '', '', -2, ''),
       ver(200107, 'Carelon Behavioral Health', 'CBH200107', 'error.member.id', '', '', '', '', '', '', -1, ''),
-      { requestid: 'disc-200103', id: '200103', responsepayerid: '95567', responsepayername: 'Health Net', created: iso(-2) },
-    ].map((rec) => { const kind = rec.responsepayerid ? 'discovery' : 'verification'; return { Kind: kind, Key: C.resultKey(kind, rec), File: 'demo', Uploaded: iso(-1), Record: JSON.stringify(rec) }; });
+      { requestid: 'disc-200103', id: '200103', resolved: iso(-2), created: iso(-2) },
+      { requestid: 'disc-200115', id: '200115', resolved: iso(-2), created: iso(-2) },
+      { requestid: 'disc-200116-g', id: '800116-G', responsepayerid: '94036', responsepayername: 'Blue Shield of California', memberid: 'XEB200116', resolved: iso(-1), created: iso(-1) },
+    ].map((rec) => { const kind = rec.responsepayerid || /^disc/.test(rec.requestid) ? 'discovery' : 'verification'; return { Kind: kind, Key: C.resultKey(kind, rec), File: 'demo', Uploaded: iso(-1), Record: JSON.stringify(rec) }; });
     // Synthetic payer-learning history (made-up Per Nbrs, earlier weeks): discovery keeps agreeing with the Partnership guess
     // (promoted to Learned), keeps finding Senior Advantage for "Kaiser Medicare Northern CA" (a suggestion), and two
     // Blue Card verifications came back eligible (evidence only).
@@ -1732,6 +1964,8 @@
       past('290008', 'Verification', 'Blue Shield CA Blue Card', '94036', '', 'Blue Shield of California', 'agree', -23),
     ];
     let mapLog = [], soharRefs = [], reverifyRequests = [];
+    // v0.12 tables, in memory. Fischer's guarantor search was asked for earlier and found Blue Shield (Via guarantor).
+    let guarantorRequests = [{ MRN: '800116', Requested: iso(-3), Reason: 'Discovery found nothing', By: 'demo' }], payerTests = [], metricHistory = [], clinicRequests = [];
     // Fee estimates demo: ?fees=1 turns them on with a made-up fee schedule (fees.js DEMO_WORKBOOK), in memory.
     const feesDemo = /[?&]fees=1\b/.test(location.search) && !!F;
     const feeStore = {};
@@ -1757,7 +1991,12 @@
       // Sohar ref memory and Re-verify anyway requests, in memory.
       async readSoharRefs() { return soharRefs; }, async writeSoharRefs(c, r) { soharRefs = r; },
       async readReverifyRequests() { return reverifyRequests; }, async writeReverifyRequests(c, r) { reverifyRequests = r; },
-      async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', learning: C.learningConfig({}), fees: F ? F.feeConfig({ 'Fee estimates': feesDemo ? 'On' : 'Off' }) : { on: false } }; },
+      async readGuarantorRequests() { return guarantorRequests; }, async writeGuarantorRequests(c, r) { guarantorRequests = r; },
+      async readPayerTests() { return payerTests; }, async writePayerTests(c, r) { payerTests = r; },
+      async writePayerMapping() {}, async readPayerMapping() { return []; }, async writePayerMetrics() {}, async writeGuarantorThemes() {},
+      async readPayerMetricHistory() { return metricHistory; }, async writePayerMetricHistory(c, r) { metricHistory = r; },
+      async readClinicRequests() { return clinicRequests; }, async writeClinicRequests(c, r) { clinicRequests = r; },
+      async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', payerTests: C.payerTestConfig({ 'Payer tests': /[?&]tests=1\b/.test(location.search) ? 'On' : 'Off' }), mrnSince: '', learning: C.learningConfig({}), fees: F ? F.feeConfig({ 'Fee estimates': feesDemo ? 'On' : 'Off' }) : { on: false } }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },
       async upsertPayerMap(e, o) { return this.upsertPayerMapMany([e], o); },

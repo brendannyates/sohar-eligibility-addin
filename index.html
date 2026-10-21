@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.11.0">
+  <link rel="stylesheet" href="style.css?v=0.12.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -33,7 +33,7 @@
           <select id="clinicLoc"><option value="">All locations</option></select>
         </label>
         <label>Search
-          <input id="clinicText" type="search" placeholder="Name or Per Nbr">
+          <input id="clinicText" type="search" placeholder="Name or MRN">
         </label>
       </div>
       <div id="clinicChips" class="chips filterchips" role="group" aria-label="Filter by flag"></div>
@@ -100,6 +100,14 @@
             <button class="primary filebtn" id="btnDlVer" disabled><span>Verification file</span><span class="fname" id="fnVer"></span></button>
             <button class="primary filebtn alt" id="btnDlDisc" disabled><span>Discovery file</span><span class="fname" id="fnDisc"></span></button>
           </div>
+          <div id="mapFile" class="extrafile" hidden>
+            <button class="primary filebtn alt" id="btnDlMap" disabled><span>Payer mapping discovery</span><span class="fname" id="fnMap"></span></button>
+            <p class="hint">Patients whose NextGen payer has no confident Sohar payer, sent to discovery with their member ID so Sohar can say which payer it is. They are on this file instead of the discovery file. Not a standard Sohar template (memberId is added at the end): check that Sohar accepts it on the first upload.</p>
+          </div>
+          <div id="testFile" class="extrafile" hidden>
+            <button class="primary filebtn alt" id="btnDlTest" disabled><span>Payer tests (verification)</span><span class="fname" id="fnTest"></span></button>
+            <p class="hint">The same policy sent under the most similar Sohar payers, to learn which one sticks. Every row is a Sohar check. Results show under Payer learning; they never become the patient's benefits.</p>
+          </div>
           <div id="preflight" class="result" hidden></div>
           <div id="skipBox" class="callout" hidden></div>
         </div>
@@ -115,6 +123,7 @@
             Drop the Sohar outputs here, or <u>choose files</u><br><span class="hint">verification output and discovery output, together or separately</span>
           </div>
           <div id="resultsResult" class="result" hidden></div>
+          <div id="guarBox" class="callout" hidden></div>
           <div id="discVerBox" class="callout" hidden>
             <p id="discVerText"></p>
             <button class="primary filebtn" id="btnDlDiscVer"><span>Verification file for these patients</span><span class="fname" id="fnDiscVer"></span></button>
@@ -164,10 +173,20 @@
 
     <details class="more section" id="clinicSection" open>
       <summary>Clinic files and emails</summary>
-      <p class="hint">One file per location for the clinic team: patients with an upcoming visit, benefits, flags and a re-verify link. Opening it in Excel shows the Clinic tab. The email summary uses LASFIR and Per Nbr only.</p>
+      <p class="hint">One file per location for the clinic team: patients with an upcoming visit, benefits, flags and a re-verify link. Opening it in Excel shows the Clinic tab, where the clinic ticks <b>Re-verify anyway</b> for patients the skip window left out. The email summary uses LASFIR and MRN only.</p>
       <p class="hint warn-text">Clinic files contain PHI. Share them only through MHS OneDrive or Teams with the clinic team; do not email them outside MHS.</p>
       <div id="clinicFiles"><p class="hint">Shows after the NextGen report is loaded.</p></div>
+      <input type="file" id="fileClinicBack" accept=".xlsx,.xlsm" multiple hidden>
+      <div id="dropClinicBack" class="drop slim" tabindex="0" role="button" aria-label="Bring back clinic files">
+        Bring back clinic files: drop them here, or <u>choose files</u><br><span class="hint">their Re-verify anyway ticks go on the next verification file</span>
+      </div>
       <div id="clinicFilesNote" class="result" hidden></div>
+    </details>
+
+    <details class="more section" id="learnSection">
+      <summary>Payer learning</summary>
+      <p class="hint">Appointments whose payer is unmapped or whose verification failed, by NextGen payer, with payer test results and guarantor search themes. Full screen has the whole list.</p>
+      <div id="learnBox" class="result"><p class="hint">Shows after the NextGen report is loaded.</p></div>
     </details>
 
     <details class="more section" id="evidenceSection">
@@ -202,7 +221,7 @@
       <div class="actions">
         <button class="link" id="btnClearSaved">Clear saved Sohar results</button>
       </div>
-      <p class="hint">Messages use LASFIR and Per Nbr only. Send inside Outlook or Teams only.</p>
+      <p class="hint">Messages use LASFIR and MRN only. Send inside Outlook or Teams only.</p>
     </details>
     </section>
   </main>
@@ -213,11 +232,11 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="core.js?v=0.11.0"></script>
-  <script src="rules.js?v=0.11.0"></script>
-  <script src="fees.js?v=0.11.0"></script>
-  <script src="xlsx.js?v=0.11.0"></script>
-  <script src="excel.js?v=0.11.0"></script>
-  <script src="app.js?v=0.11.0"></script>
+  <script src="core.js?v=0.12.0"></script>
+  <script src="rules.js?v=0.12.0"></script>
+  <script src="fees.js?v=0.12.0"></script>
+  <script src="xlsx.js?v=0.12.0"></script>
+  <script src="excel.js?v=0.12.0"></script>
+  <script src="app.js?v=0.12.0"></script>
 </body>
 </html>
