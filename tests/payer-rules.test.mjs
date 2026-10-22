@@ -54,6 +54,7 @@ test('credential × ESK step', () => {
   assert.equal(PR.check(PR.match(rules, 'Orbit Medicare'), 'MD', 'obs').ok, null);   // no MD row
   assert.equal(PR.check(PR.match(rules, 'Nowhere EAP'), 'MD', 'obs').ok, false);
   assert.equal(PR.check(null, 'NP', 'obs').ok, null);
+  assert.equal(PR.credOf('Do, Minh NP'), 'NP'); assert.equal(PR.credOf('Nguyen, Do PMHNP'), 'NP'); assert.equal(PR.credOf('Do MD, Minh'), 'MD');
   assert.equal(PR.step('Esketamine Start'), 'start');
   assert.equal(PR.step('Esketamine Follow Up', true), 'first');
   assert.equal(PR.step('Esketamine Follow Up', false), 'obs');

@@ -25,7 +25,8 @@
   // "Blue Shield of CA - HMO" -> "blue shield of ca hmo"
   const norm = s => ' ' + txt(s).toLowerCase().replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
   function yn(v){ const s = txt(v).toLowerCase(); if (/^(y|yes|true|approved)$/.test(s)) return 'yes'; if (/^(n|no|false|not approved)$/.test(s)) return 'no'; if (/^n\/?a$/.test(s)) return 'na'; return ''; }
-  const credOf = v => { const s = txt(v).toUpperCase().replace(/[^A-Z]/g, ' '); if (/\b(MD|DO)\b/.test(s)) return 'MD'; if (/\b(NP|PMHNP|FNP|APRN|DNP|ARNP|CRNP)\b/.test(s)) return 'NP'; if (/\b(PA|PAC)\b/.test(s)) return 'PA'; return ''; };
+  // NP first: "Do" is also a name ("Do, Minh NP", "Nguyen, Do PMHNP"), so DO only counts when no NP credential is present
+  const credOf = v => { const s = txt(v).toUpperCase().replace(/[^A-Z]/g, ' '); if (/\b(NP|PMHNP|FNP|APRN|DNP|ARNP|CRNP)\b/.test(s)) return 'NP'; if (/\b(MD|DO)\b/.test(s)) return 'MD'; if (/\b(PA|PAC)\b/.test(s)) return 'PA'; return ''; };
 
   // Two-letter state in a payer, rule or clinic name: "Anthem CA", "Medicare WA (Noridian)", "Castro - CA", "Blue Shield of California".
   function stateOf(s){
