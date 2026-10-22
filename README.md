@@ -23,6 +23,7 @@ Two tabs at the top: **Clinic** and **Admin**. The pane opens on Admin in the So
 - **Auto-Low, Review, or an unrecognized label** (anything that is not Exact, Probable, Confirmed, Auto-High, Auto-Medium, Auto-Low, Learned, Not a payer or Review, blank included): listed at the top of step 1 as needing manual classification, and each patient gets a High `Payer needs manual classification` row on the Review sheet. So do human-labeled payers Sohar disagrees with, and names with a Sohar suggestion.
 - **R6 Medi-Cal** other than Kaiser or SFHP (NextGen, secondary, Fin Class, or what Sohar returned): red `Medi-Cal` pill, plus `New Medi-Cal` when the last visit was not Medi-Cal. SFHP patients booked with a provider not on Config `SFHP providers` (names or last names, `;` separated) are flagged; an empty list asks to confirm the provider.
 - **R7** UMR and Carelon (incl. Beacon) TMS visits with an NP rendering provider: `NP-TMS`.
+- **R13 Esketamine payer credential rules** (v0.13). Each upcoming ESK visit (esketamine, Spravato, ESK) is checked against the **Payer Credential Rules** sheet: the patient's payer (primary, else Fin Class) with a state hint from the patient's State, else the visit location (Config location states). Credential from the rendering name; the step from the event (start, first treatment, else observation). Not allowed: red `ESK credential` (High). Payer matches state rules that disagree: `ESK payer state?` (Low). Besse not approved: amber `Not Besse-approved` (Medium); blank Besse: `Besse pending` (Low). Besse is a flag only; routing does not change. Payer not on the list, or no sheet: no flag.
 - **R8 Secondary** on the chart: "may cover the deductible, copay or coinsurance" (stronger, medium, when Medicare/Noridian/QMB is involved). QMB anywhere: `QMB` pill, do not collect Medicare cost-sharing until billing confirms.
 - **R9 Re-verify**, for patients with an upcoming visit, uses the same due rule as the re-verify skip window below (`core.reverifyCheck`), per insurance sent (verifyRows; no verifyRows: any verification): missing, latest not `complete.eligible`, `Re-verify days` (default 7) or more calendar days old, coverage ending before the visit, or a next visit in a new month within `Re-verify days`. A name-only match never counts.
 
@@ -100,6 +101,10 @@ On the mapping sheets, change the value column and the add-in keeps it (the row 
 **Remove completely:** set `Fee estimates` = `Off`; delete the sheets above (unhide `Fee Schedule` and `Fee Schedule Info` first: right-click a sheet tab > Unhide); optionally delete the four `Fee estimates` / `Estimate ...` Config rows. To remove the code, revert to tag `v0.10.0`.
 
 **Demo:** `npm run serve`, then `http://localhost:8080/?fees=1` (made-up fee schedule; `dashboard.html?fees=1#benefits` for the window on its own).
+
+### Esketamine payer rules (v0.13)
+
+Admin tab > **Esketamine payer rules**: drop `Payer Credential Rules.csv` (OneDrive, Add-In Manifests folder) or an .xlsx copy. It is parsed by `payer-rules.js` and written to the visible, editable **Payer Credential Rules** sheet (`tblPayerCredRules`). Every refresh (⟳) re-reads the sheet, so edits made in Excel count; **Re-read the sheet** does it on demand. A re-import replaces the sheet. The rules table is never committed (this repo is public): tests and the demo use made-up payers only.
 
 ### v0.12: MRN, clinic re-verify, guarantors, payer mapping (approved by Brendan 2026-10-20)
 
@@ -195,6 +200,7 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 |---|---|
 | `core.js` | Pure logic: header detection, name/date parsing, routing, auto payer matching, exports, CSV. Shared with tests. |
 | `rules.js` | Pure clinic rules (R5-R10): flags and pills, Review rows, clinic sheet and email, payer evidence. Loads after `core.js` (R9 uses `core.reverifyCheck`). |
+| `payer-rules.js` | Pure esketamine payer credential rules (read the sheet/CSV, match a payer, check credential × ESK step, Besse). Byte-identical copy shared with the Clinic Template Tool and ESK Tracker repos: change all three together. Loads before `core.js`. |
 | `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts), and a small reader (`readWorkbook`) for the fee schedule upload. |
 | `fees.js` | Pure fee estimate logic (v0.11, a test, Off by default): fee schedule parsing, location / payer matching, estimate math, made-up demo schedule. Loads after `core.js`. |
 | `save.html`, `save.js` | Fallback save tab for Excel on the web; takes CSV text or base64 (.xlsx). |

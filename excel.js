@@ -63,6 +63,8 @@
     tblGuarantorThemes: { sheet: 'Guarantor Themes' },
     // Inside a clinic file: the clinic's own "Re-verify anyway" ticks, brought back to the admin workbook.
     tblClinicRequests: { sheet: 'Clinic Requests' },
+    // Esketamine payer credential rules (R13): imported from the shared CSV in OneDrive, visible and editable. No patient data.
+    tblPayerCredRules: { sheet: 'Payer Credential Rules' },
   };
   // Fee estimate tables by short name (app.js uses readFee / writeFee with these).
   const FEE_TABLES = { schedule: 'tblFeeSchedule', meta: 'tblFeeMeta', locations: 'tblFeeLocations', homes: 'tblProviderHome',
@@ -527,6 +529,9 @@
   const writePayerMetricHistory = (cols, rows) => writeAddinTable('Payer Metrics History', 'tblPayerMetricHistory', cols, rows, false);
   const writeGuarantorThemes = (cols, rows) => writeAddinTable('Guarantor Themes', 'tblGuarantorThemes', cols, rows, false);
   const readClinicRequests = () => readOwned('tblClinicRequests');
+  // Payer Credential Rules: missing sheet = [] (the rule is silent until the CSV is imported).
+  const readPayerCredRules = () => readOwned('tblPayerCredRules');
+  const writePayerCredRules = (cols, rows) => writeAddinTable('Payer Credential Rules', 'tblPayerCredRules', cols, rows, false);
   const writeClinicRequests = (cols, rows) => writeAddinTable('Clinic Requests', 'tblClinicRequests', cols, rows, false);
 
   // Fee estimates (v0.11): read / write by short name (FEE_TABLES). Missing table = nothing saved yet (readOwned).
@@ -775,7 +780,7 @@
     readPayerOutcomes, writePayerOutcomes, readPayerMapLog, writePayerMapLog, appendPayerMapLog, writePayerLearning,
     readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests, FEE_TABLES, readFee, writeFee,
     readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, writePayerMetrics,
-    readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests,
+    readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

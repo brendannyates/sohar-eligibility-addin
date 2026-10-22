@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.12.0">
+  <link rel="stylesheet" href="style.css?v=0.13.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -183,6 +183,20 @@
       <div id="clinicFilesNote" class="result" hidden></div>
     </details>
 
+    <details class="more section" id="credSection">
+      <summary>Esketamine payer rules</summary>
+      <p class="hint">Which payers let an NP or an MD bill each esketamine visit (first treatment, start, observation), and which are Besse-approved. Import <b>Payer Credential Rules.csv</b> from the Add-In Manifests folder in OneDrive; it goes on the <b>Payer Credential Rules</b> sheet, which you can edit in Excel. Upcoming ESK visits are checked against it on every refresh. No sheet, no check.</p>
+      <input type="file" id="fileCred" accept=".csv,.xlsx,.xlsm" hidden>
+      <div id="dropCred" class="drop slim" tabindex="0" role="button" aria-label="Import the payer credential rules">
+        Drop the payer credential rules here, or <u>choose the file</u><br><span class="hint">.csv or .xlsx; it replaces the sheet in this workbook</span>
+      </div>
+      <div id="credStatus" class="result"></div>
+      <div class="actions">
+        <button class="link" data-goto="Payer Credential Rules">Payer Credential Rules sheet</button>
+        <button class="link" id="btnCredRefresh">Re-read the sheet</button>
+      </div>
+    </details>
+
     <details class="more section" id="learnSection">
       <summary>Payer learning</summary>
       <p class="hint">Appointments whose payer is unmapped or whose verification failed, by NextGen payer, with payer test results and guarantor search themes. Full screen has the whole list.</p>
@@ -232,11 +246,12 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="core.js?v=0.12.0"></script>
-  <script src="rules.js?v=0.12.0"></script>
-  <script src="fees.js?v=0.12.0"></script>
-  <script src="xlsx.js?v=0.12.0"></script>
-  <script src="excel.js?v=0.12.0"></script>
-  <script src="app.js?v=0.12.0"></script>
+  <script src="payer-rules.js?v=0.13.0"></script>
+  <script src="core.js?v=0.13.0"></script>
+  <script src="rules.js?v=0.13.0"></script>
+  <script src="fees.js?v=0.13.0"></script>
+  <script src="xlsx.js?v=0.13.0"></script>
+  <script src="excel.js?v=0.13.0"></script>
+  <script src="app.js?v=0.13.0"></script>
 </body>
 </html>

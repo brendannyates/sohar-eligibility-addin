@@ -1,12 +1,13 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.12.0';
+  const VERSION = '0.13.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
   const XL = window.SoharXlsx;
   const F = window.SoharFees; // fee estimates (v0.11, a test, Off by default)
+  const PRM = window.PayerRules; // esketamine payer credential rules (v0.13, payer-rules.js, shared with other add-ins)
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
   const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, discoveryVerify: null, pendingFocus: '', demo: false,
@@ -89,6 +90,7 @@
   /** Scan the Import sheet, build the patient list and Sohar imports, then re-match saved Sohar and IR uploads. */
   async function refreshAll() {
     if (state.fees) state.fees.loaded = false; // fee estimates (On only): pick up edits made on the fee sheets
+    await loadPayerRules(); // esketamine payer credential rules: pick up edits made on the sheet
     await scan();
     if ($('btnBuild').disabled) return;
     await build({ deferRules: true });
@@ -203,6 +205,8 @@
       else if (b && b.id === 'btnGuarNo') { $('guarBox').hidden = true; state.guarantorDismissed = true; }
     });
     dropZone('dropClinicBack', 'fileClinicBack', (files) => guard(() => bringBackClinicFiles(files), 'clinicFilesNote'));
+    dropZone('dropCred', 'fileCred', (files) => guard(() => uploadPayerRules(files), 'credStatus'));
+    $('btnCredRefresh').addEventListener('click', () => guard(async () => { await loadPayerRules(); await refreshRules(); renderCredStatus(); }, 'credStatus'));
     $('learnBox').addEventListener('click', (e) => { const b = e.target.closest('[data-goto]'); if (b) X.activate(b.dataset.goto); });
     $('btnDlVer').addEventListener('click', () => guard(() => download('verification'), 'preflight'));
     $('btnDlDisc').addEventListener('click', () => guard(() => download('discovery'), 'preflight'));
@@ -775,7 +779,55 @@
   const inScopePatients = () => (state.patients || []).filter((p) => p['In Scope'] === 'Yes');
   function rulesCfg() {
     const c = state.cfg || {};
-    return { today: new Date(), sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? c.reverifyDays : 7, reverifyNewMonth: !!(c.reverify && c.reverify.newMonth) };
+    return { today: new Date(), sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? c.reverifyDays : 7, reverifyNewMonth: !!(c.reverify && c.reverify.newMonth),
+      payerRules: state.payerRules || [], locationState: c.locationState || {} };
+  }
+
+  // ---------- esketamine payer credential rules (R13): the editable Payer Credential Rules sheet ----------
+  /** Read the sheet (staff may have edited it). Missing sheet = no rules, and the rule stays silent. */
+  async function loadPayerRules() {
+    try { state.payerRules = R.payerRulesFrom(await X.readPayerCredRules()); }
+    catch (e) { console.warn('Payer Credential Rules not read', e); state.payerRules = []; }
+    renderCredStatus();
+    return state.payerRules;
+  }
+  /** Import the shared CSV (or an .xlsx copy) and replace the sheet. The file stays in OneDrive; only the sheet changes. */
+  async function uploadPayerRules(files) {
+    const file = files[0];
+    if (!file) return;
+    if (!PRM) throw new Error('payer-rules.js did not load. Close and reopen the pane.');
+    dropBusy('dropCred', `Reading ${file.name}…`);
+    try {
+      let res;
+      if (isCSV(file)) res = PRM.read(C.parseCSV(await readText(file)));
+      else if (isXlsx(file)) {
+        const wb = await XL.readWorkbook(new Uint8Array(await file.arrayBuffer()));
+        const tries = wb.sheets.filter((s) => !s.hidden).map((s) => PRM.read(s.rows));
+        res = tries.find((r) => r.rules && r.rules.length) || tries.find((r) => r.rules) || tries[0] || { error: 'The workbook has no sheets.' };
+      } else throw new Error(`${file.name} is not a .csv or .xlsx file.`);
+      if (res.error) throw new Error(`${file.name}: ${res.error} The Payer Credential Rules sheet was not changed.`);
+      if (!res.rules.length) throw new Error(`${file.name} has no payer rows. The Payer Credential Rules sheet was not changed.`);
+      await X.writePayerCredRules(PRM.HEADERS, R.payerRuleRows(res.rules));
+      state.payerRules = res.rules;
+      await refreshRules();
+      const payers = new Set(res.rules.map((r) => r.payer)).size;
+      renderCredStatus();
+      note('credStatus', `${file.name}: ${res.rules.length} rows for ${payers} payer${payers === 1 ? '' : 's'} saved to Payer Credential Rules${res.skipped ? `; ${res.skipped} row${res.skipped === 1 ? '' : 's'} skipped (no MD or NP credential)` : ''}.`, 'ok');
+    } finally { dropBusy('dropCred'); }
+  }
+  function renderCredStatus() {
+    const box = $('credStatus');
+    if (!box) return;
+    const rules = state.payerRules || [];
+    if (!rules.length) { box.innerHTML = '<p class="hint">No Payer Credential Rules sheet in this workbook yet, so nothing is checked. Import the file to turn it on.</p>'; return; }
+    const payers = new Set(rules.map((r) => r.payer)).size;
+    const n = { ESK_CRED: 0, ESK_STATE: 0, BESSE_NO: 0, BESSE_PENDING: 0 };
+    for (const fl of (state.flags && state.flags.values()) || []) for (const f of fl) if (n[f.code] != null) n[f.code]++;
+    const parts = [`<p class="ok">${rules.length} rules for ${payers} payer${payers === 1 ? '' : 's'} on the Payer Credential Rules sheet.</p>`];
+    if (state.patients) {
+      parts.push(`<p>Upcoming esketamine visits: ${n.ESK_CRED} with a provider the payer doesn't allow, ${n.ESK_STATE} to check the plan's state, ${n.BESSE_NO} patient${n.BESSE_NO === 1 ? '' : 's'} not Besse-approved, ${n.BESSE_PENDING} Besse pending.</p>`);
+    }
+    box.innerHTML = parts.join('');
   }
   function computeFlags() {
     state.flags = state.patients ? R.allFlags(inScopePatients(), state.results || [], rulesCfg()) : new Map();
@@ -819,6 +871,7 @@
     renderClinic();
     renderClinicFiles();
     renderEvidence();
+    renderCredStatus();
     await refreshLearningViews();
     renderGuarantorPrompt();
   }
@@ -1888,6 +1941,12 @@
         [[7, '9:00 AM', 'TMS Treatment Unilateral', 'Mission Viejo', MD]]],
       ['Grant, Theo', '200117', '01/17/1949', '94949', 'Kaiser Medicare Northern CA', '', 'Kaiser', 'KPM200117', '', 'Kaiser', 'KPM200117', '',
         [[8, '11:30 AM', 'Med Management In-Office', 'San Rafael', DO]]],
+      // Esketamine payer credential rules (R13) against the made-up demo rules below: an NP booked for a first treatment
+      // the payer only lets an MD bill (and not Besse-approved), and a payer whose Besse approval is pending.
+      ['Castillo, Rosa', '200118', '04/04/1987', '92660', 'Zephyr Health PPO', '', 'Contracted Commercial', 'ZPH200118', '', 'Contracted Commercial', 'ZPH200118', '',
+        [[3, '9:00 AM', 'Esketamine First Treatment', 'Newport Beach', NP], [5, '9:00 AM', 'Esketamine Follow Up', 'Newport Beach', NP]]],
+      ['Brandt, Felix', '200119', '09/19/1973', '92691', 'Lumen Care HMO', '', 'Contracted Commercial', 'LUM200119', '', 'Contracted Commercial', 'LUM200119', '',
+        [[5, '2:00 PM', 'Esketamine Follow Up', 'Mission Viejo', PMHNP]]],
     ];
     // Made-up guarantors: Lindqvist's search found nothing (guarantor DOB on file); Ibarra's guarantor has no DOB in the report.
     const DEMO_GUAR = { 200103: ['Lindqvist, Freya', '02/14/1970'], 200115: ['Ibarra, Rosa', ''], 200116: ['Fischer, Jonas', '05/05/1960'] };
@@ -1974,7 +2033,15 @@
       feeStore.schedule = s.rows;
       feeStore.meta = F.feeMetaRows('Demo fee schedule (made-up rates).xlsx', new Date().toISOString(), s);
     }
+    // Payer Credential Rules: made-up payers only (the real list is imported in each workbook, never committed).
+    let credRules = PRM ? R.payerRuleRows(PRM.read([PRM.HEADERS,
+      ['Zephyr Health', '', 'NP', 'No', 'No', 'No', 'No', 'Yes', 'zephyr health', 'NP may do observation only'],
+      ['Zephyr Health', '', 'MD', 'No', 'N/A', 'Yes', 'Yes', 'Yes', 'zephyr health', ''],
+      ['Lumen Care', '', 'NP', '', 'Yes', 'Yes', 'Yes', 'Yes', 'lumen care', ''],
+      ['Lumen Care', '', 'MD', '', 'N/A', 'Yes', 'Yes', 'Yes', 'lumen care', ''],
+    ]).rules) : [];
     return {
+      async readPayerCredRules() { return credRules; }, async writePayerCredRules(c, r) { credRules = r; return r.length; },
       async readFee(kind) { return feeStore[kind] || []; }, async writeFee(kind, c, r) { feeStore[kind] = r; return r.length; },
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
