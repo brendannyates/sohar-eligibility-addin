@@ -1,9 +1,10 @@
 /* rules.js — pure clinic rules (R5-R12), no Office.js, no DOM. Loaded by index.html, dashboard.html and tests/.
-   Needs core.js loaded first (R9 shares core.reverifyCheck with the build's re-verify skip). */
+   Needs core.js loaded first (R9 shares core.reverifyCheck with the build's re-verify skip), and payer-rules.js for the
+   esketamine payer credential rule (R13; without it that rule is silent). */
 (function (root, factory) {
-  if (typeof module === 'object' && module.exports) module.exports = factory(require('./core.js'));
-  else root.SoharRules = factory(root.SoharCore);
-})(typeof self !== 'undefined' ? self : this, function (C) {
+  if (typeof module === 'object' && module.exports) module.exports = factory(require('./core.js'), require('./payer-rules.js'));
+  else root.SoharRules = factory(root.SoharCore, root.PayerRules);
+})(typeof self !== 'undefined' ? self : this, function (C, PR) {
   'use strict';
 
   const REVERIFY_URL = 'https://app.soharhealth.com/create?type=verification';
@@ -15,6 +16,9 @@
     { code: 'SFHP_PROVIDER', label: 'SFHP provider', severity: 'high', color: 'red' },
     { code: 'KAISER_MM_NOAUTH', label: 'Kaiser/VA MM no auth', severity: 'high', color: 'red' },
     { code: 'NP_TMS', label: 'NP-TMS', severity: 'high', color: 'red' },
+    // R13 esketamine payer credential rules (Payer Credential Rules sheet). Besse is a flag only: nothing is re-routed.
+    { code: 'ESK_CRED', label: 'ESK credential', severity: 'high', color: 'red' },
+    { code: 'BESSE_NO', label: 'Not Besse-approved', severity: 'medium', color: 'amber' },
     { code: 'REVERIFY', label: 'Re-verify', severity: 'medium', color: 'amber' },
     { code: 'QMB', label: 'QMB', severity: 'medium', color: 'amber' },
     { code: 'SECONDARY', label: 'Secondary may cover', severity: 'info', color: 'blue' },
@@ -22,6 +26,8 @@
     { code: 'DUAL', label: 'Two insurances sent', severity: 'info', color: 'blue' },
     // v0.12: Sohar found coverage when it searched with the guarantor as the person (discovery id <MRN>-G).
     { code: 'GUARANTOR', label: 'Via guarantor', severity: 'medium', color: 'blue' },
+    { code: 'ESK_STATE', label: 'ESK payer state?', severity: 'info', color: 'grey' },
+    { code: 'BESSE_PENDING', label: 'Besse pending', severity: 'info', color: 'blue' },
     { code: 'KAISER_MM', label: 'Kaiser/VA MM', severity: 'info', color: 'grey' },
   ];
   const PILL = {};
@@ -88,7 +94,9 @@
   const isNP = (r) => /\b(np|pmhnp|fnp|aprn|dnp|anp|agnp|crnp|arnp)\b/i.test(str(r));
   /** TMS family: TMS, MT (Redo), MagV, Theta. "Telepsych TMS F/U" is TMS. */
   const isTMSEvent = (e) => /\btms\b|\bmt\b|mag\s*v|theta/i.test(str(e));
-  const NOT_MM = /\btms\b|\bmt\b|mag\s*v|theta|esketamine|spravato|ketamine|\bivk\b|\bivn\b|meeting|training|on\s*call|peer\s*to\s*peer|adhd|testing|psychotherapy/i;
+  /** Esketamine: "Esketamine Treatment", "Spravato First Dose", "ESK Obs". Not IV ketamine. */
+  const isESKEvent = (e) => /esketamine|spravato|\besk\b/i.test(str(e));
+  const NOT_MM =/\btms\b|\bmt\b|mag\s*v|theta|esketamine|spravato|ketamine|\bivk\b|\bivn\b|meeting|training|on\s*call|peer\s*to\s*peer|adhd|testing|psychotherapy/i;
   /** Medication management: "Med Management ...", plain "Telepsych", "Tel/IP New Patient", "Transition Telepsych Patient". */
   const isMedMgmtEvent = (e) => {
     const s = str(e);
@@ -239,6 +247,38 @@
       }
     }
 
+    // R13 Esketamine payer credential rules (cfg.payerRules, read from the Payer Credential Rules sheet; none = silent).
+    // The payer (primary, else Fin Class, as R7) is matched with a state hint from the patient, else the visit location.
+    // Credential from the rendering name; the ESK step from the event. Besse is a flag only: routing does not change.
+    const credRules = Array.isArray(c.payerRules) ? c.payerRules : [];
+    const esk = credRules.length && PR ? up.filter((a) => isESKEvent(a.event)) : [];
+    if (esk.length) {
+      const locState = {};
+      for (const [k, v] of Object.entries(c.locationState || {})) locState[low(k)] = str(v).toUpperCase();
+      let first = null, ambiguous = null;
+      for (const a of esk) {
+        const appt = apptInfo(a, x);
+        const loc = str(a.loc) || str(x.location);
+        const hint = str(p.State) || locState[low(loc)] || loc;
+        const payer = guar.find((t) => PR.match(credRules, t, hint));
+        const m = payer ? PR.match(credRules, payer, hint) : null;
+        if (!m) continue;
+        if (!first) first = { payer, m, appt };
+        // isNP first: credOf reads a "Do" surname as a DO ("Do, Minh NP" -> MD).
+        const r = PR.check(m, isNP(appt.rendering) ? 'NP' : PR.credOf(appt.rendering), PR.step(a.event, /first/i.test(str(a.event))));
+        if (r.ok === false) out.push(mk('ESK_CRED', `${r.why}: ${appt.event} on ${appt.date} with ${appt.rendering}`, { appt, group: r.why }));
+        else if (r.ok === null && m.ambiguous.length && !ambiguous) ambiguous = { payer, m, appt };
+      }
+      if (first) {
+        const b = PR.besse(first.m), when = `${first.appt.event} ${first.appt.date}`;
+        // Besse unknown because the state rules disagree: the same "which state" review item.
+        if (b === 'unknown' && first.m.ambiguous.length && !ambiguous) ambiguous = first;
+        if (ambiguous) out.push(mk('ESK_STATE', `${ambiguous.payer} matches ${ambiguous.m.ambiguous.join(' and ')} on Payer Credential Rules: check which state the plan is from (${ambiguous.appt.event} ${ambiguous.appt.date} with ${ambiguous.appt.rendering || 'no rendering provider'})`, { appt: ambiguous.appt }));
+        if (b === 'not approved') out.push(mk('BESSE_NO', `Payer isn't Besse-approved: ${first.m.payer} (${when})`, { appt: first.appt }));
+        else if (b === 'pending') out.push(mk('BESSE_PENDING', `Besse approval pending for ${first.m.payer} (${when})`, { appt: first.appt }));
+      }
+    }
+
     // R8 Secondary insurance and QMB.
     if (sec && !isSelfPay(sec) && low(sec) !== low(primary)) {
       const best = bestResult(rows);
@@ -340,6 +380,10 @@
     DUAL: 'Choose the insurance Sohar returned eligible in NextGen.',
     KAISER_MM: 'Confirm the authorization covers this visit.',
     GUARANTOR: 'Add the guarantor\'s policy in NextGen with the patient as a dependent, then send the patient for verification.',
+    ESK_CRED: 'Reassign to a provider the payer allows, or confirm with billing.',
+    ESK_STATE: 'Check which state the plan is from, then confirm on Payer Credential Rules that the payer allows this provider.',
+    BESSE_NO: 'Confirm with billing before using Besse (buy-and-bill) stock for this patient.',
+    BESSE_PENDING: 'Besse approval for this payer is pending. Confirm with billing before using Besse stock.',
   };
   const REVIEW_SEV = { high: 'High', medium: 'Medium', info: 'Low' };
 
@@ -365,6 +409,8 @@
   const PER_APPT = {
     NP_TMS: { byProvider: true, lead: (d) => `${(d.match(/^(\w+) does not/) || [0, 'This payer'])[1]} does not allow an NP rendering provider for TMS` },
     SFHP_PROVIDER: { byProvider: true, lead: () => 'SFHP patient booked with a provider not on the SFHP providers list' },
+    // One group per provider and reason (an NP may be blocked for the first treatment but not for observation).
+    ESK_CRED: { byProvider: true, lead: (d, f) => str(f.group) || 'This payer does not allow this provider to bill esketamine' },
     KAISER_MM_NOAUTH: { lead: (d) => `${(d.match(/^(.+?) med management/) || [0, 'Kaiser/VA'])[1]} med management with no Auth Cd on file` },
     KAISER_MM: { lead: (d) => `${(d.match(/^(.+?) med management/) || [0, 'Kaiser/VA'])[1]} med management` },
   };
@@ -382,7 +428,7 @@
       const spec = PER_APPT[f.code];
       const a = f.appt || {};
       if (!spec || !str(a.date) || (f.code === 'SFHP_PROVIDER' && f.severity === 'medium')) { out.push(f); continue; }
-      const k = `${f.code}|${spec.byProvider ? low(a.rendering) : ''}`;
+      const k = `${f.code}|${spec.byProvider ? low(a.rendering) : ''}|${str(f.group)}`;
       if (!groups.has(k)) { const g = { first: f, spec, list: [] }; groups.set(k, g); out.push(g); }
       groups.get(k).list.push(f);
     }
@@ -392,7 +438,7 @@
       const f = g.first;
       const provs = [...new Set(g.list.map((x) => str(x.appt.rendering)).filter(Boolean))];
       const dates = g.list.map((x) => shortDate(x.appt.date)).join(', ');
-      return Object.assign({}, f, { detail: `${g.spec.lead(str(f.detail))}: ${g.list.length} visits${provs.length === 1 ? ` with ${provs[0]}` : ''} (${dates})`, count: g.list.length });
+      return Object.assign({}, f, { detail: `${g.spec.lead(str(f.detail), f)}: ${g.list.length} visits${provs.length === 1 ? ` with ${provs[0]}` : ''} (${dates})`, count: g.list.length });
     });
   }
 
@@ -614,9 +660,28 @@
       .sort((a, b) => b.count - a.count || a.nextgenPayer.localeCompare(b.nextgenPayer) || a.prefix.localeCompare(b.prefix) || a.location.localeCompare(b.location));
   }
 
+  // ---------- Payer Credential Rules sheet (R13) ----------
+  // The sheet is imported from the shared CSV (never committed) and staff may edit it in Excel.
+  /** Table rows read from the sheet (objects by header) -> rules for cfg.payerRules. No sheet / no module = []. */
+  function payerRulesFrom(tableRows) {
+    const rows = (tableRows || []).filter(Boolean);
+    if (!PR || !rows.length) return [];
+    const head = Object.keys(rows[0]);
+    const res = PR.read([head].concat(rows.map((r) => head.map((h) => (r[h] == null ? '' : r[h])))));
+    return res.rules || [];
+  }
+  /** Rules -> sheet rows (objects keyed by PayerRules.HEADERS) for writeAddinTable. */
+  function payerRuleRows(rules) {
+    if (!PR) return [];
+    const [head, ...rows] = PR.toRows(rules || []);
+    return rows.map((v) => Object.fromEntries(head.map((h, i) => [h, v[i] == null ? '' : v[i]])));
+  }
+
   return {
+    payerRuleRows,
     REVERIFY_URL, PILLS, CLINIC_COLS, CLINIC_REVIEW_COLS, CLINIC_REQUEST_COLS, PAYER_EVIDENCE_COLS,
-    isMediCal, isKaiser, isVA, isSFHP, isQMB, isCarelon, isUMR, isNP, isTMSEvent, isMedMgmtEvent, isVIP, isMedicare,
+    isMediCal, isKaiser, isVA, isSFHP, isQMB, isCarelon, isUMR, isNP, isTMSEvent, isESKEvent, isMedMgmtEvent, isVIP, isMedicare,
+    payerRulesFrom,
     patientFlags, allFlags, reviewRows, clinicRows, clinicReviewRows, clinicEmail, payerEvidence, evidenceSummary,
     bestResult, lasfir, collapseFlags,
   };

@@ -27,6 +27,12 @@ const learning = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntr
 const refs = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'Sohar Ref': `${tag}-q-${i}`, 'MRN': `00${i}`, Kind: i % 2 ? 'discovery' : 'verification',
   'Result Key': `v|00${i}|synthetic payer|0${i}`, 'First Matched': '10/20/2026 9:00 AM' }));
 const requests = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'MRN': `0${i}`, Requested: `2026-10-20T1${i % 10}:00:00.000Z`, By: 'Clinic tab' }));
+// Payer Credential Rules (R13): made-up payers, as rules.payerRuleRows writes them.
+const PR = createRequire(import.meta.url)('../payer-rules.js');
+const RL = createRequire(import.meta.url)('../rules.js');
+const credRules = (n, tag) => Array.from({ length: n }, (_, i) => ({ Payer: `${tag} Payer ${Math.floor(i / 2)}`, State: i % 4 < 2 ? '' : 'WA', Credential: i % 2 ? 'MD' : 'NP',
+  'Besse Approved': ['Yes', 'No', ''][i % 3], 'NP Fully Approved': i % 2 ? 'N/A' : 'No', 'Esketamine First Treatment': 'No', 'Esketamine Start': 'Yes', 'Esketamine Observation': 'Yes',
+  'Match Names': `${tag} payer ${Math.floor(i / 2)}`, Notes: i % 5 ? '' : 'synthetic note' }));
 
 // ---------- happy path ----------
 
@@ -376,6 +382,7 @@ const CASES = {
   learning: { write: (X, rows) => X.writePayerLearning(C.PAYER_LEARNING_COLS, rows), read: (X) => X.readTable('tblPayerLearning', true), cols: C.PAYER_LEARNING_COLS, make: learning, sheet: 'Payer Learning', hidden: false },
   refs: { write: (X, rows) => X.writeSoharRefs(C.SOHAR_REF_COLS, rows), read: (X) => X.readSoharRefs(), cols: C.SOHAR_REF_COLS, make: refs, sheet: 'Sohar Refs', hidden: true },
   requests: { write: (X, rows) => X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, rows), read: (X) => X.readReverifyRequests(), cols: C.REVERIFY_REQUEST_COLS, make: requests, sheet: 'Re-verify Requests', hidden: true },
+  credRules: { write: (X, rows) => X.writePayerCredRules(PR.HEADERS, rows), read: (X) => X.readPayerCredRules(), cols: PR.HEADERS, make: credRules, sheet: 'Payer Credential Rules', hidden: false },
 };
 const KNOBS = { op: 'failAtOp', sync: 'failAtSync', kill: 'killAfterSync' };
 const short = (v) => (v instanceof Error ? `Error: ${v.message}` : Array.isArray(v) ? `${v.length} rows` : inspect(v));
@@ -434,7 +441,7 @@ test('fail-safe: reopening the pane after any failure recovers or keeps the old 
 });
 // Payer learning tables (v0.10): the ledger grows past one chunk; the log and the rollup are rewritten from fewer rows.
 // Sohar Refs grows past one chunk (append-only); Re-verify Requests shrinks when requests are dropped.
-for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2]]) {
+for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2], ['credRules', 6, 40]]) {
   test(`fail-safe: ${CASES[kase].sheet} survives a failure at every op, a failed sync, and Excel closing`, async () => {
     await sweep(kase, 'op', nOld, nNew);
     await sweep(kase, 'sync', nOld, nNew);
@@ -710,4 +717,22 @@ test('v0.12 hidden tables: Guarantor Requests and Payer Tests round-trip hidden;
   await X.writePayerMetricHistory(C.PAYER_METRIC_HISTORY_COLS, [{ Date: '2026-10-20', 'NextGen Payer': 'P', 'Unmapped appts': '3' }]);
   assert.equal((await X.readPayerMetricHistory())[0]['Unmapped appts'], '3');
   assert.equal(m.activeSheet(), 'Import', 'none of them activates');
+});
+
+test('Payer Credential Rules: missing sheet reads [] (rule silent); import writes a visible sheet that reads back as the same rules', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  assert.deepEqual(await X.readPayerCredRules(), []);
+  assert.deepEqual(RL.payerRulesFrom(await X.readPayerCredRules()), []);
+  const rules = PR.read([PR.HEADERS,
+    ['Zenith CA', 'CA', 'NP', 'No', 'No', 'No', 'No', 'No', 'zenith', ''],
+    ['Zenith CA', 'CA', 'MD', 'No', 'N/A', 'Yes', 'Yes', 'Yes', 'zenith', ''],
+    ['Orbit Medicare', '', 'NP', '', 'Yes', 'Yes', 'Yes', 'Yes', 'orbit medicare', 'Besse pending'],
+  ]).rules;
+  await X.writePayerCredRules(PR.HEADERS, RL.payerRuleRows(rules));
+  assert.equal(m.sheetVisibility('Payer Credential Rules'), 'Visible');
+  assert.equal(m.activeSheet(), 'Import', 'the import does not activate');
+  const sig = (rs) => rs.map((r) => [r.payer, r.state, r.cred, r.besse, r.first, r.start, r.obs, r.match.join(), r.notes]);
+  assert.deepEqual(sig(RL.payerRulesFrom(await X.readPayerCredRules())), sig(rules));
+  await X.writePayerCredRules(PR.HEADERS, RL.payerRuleRows(rules.slice(0, 1)));
+  assert.equal((await X.readPayerCredRules()).length, 1, 'a re-import replaces every row');
 });
