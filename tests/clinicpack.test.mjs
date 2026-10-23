@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 const require = createRequire(import.meta.url);
 const C = require('../core.js');
 const R = require('../rules.js');
@@ -100,7 +101,7 @@ async function roundTrip(pack) {
 }
 // Compare without the stripped fields and the clinic-only extras; the guarantor's name is taken out of core's Action text.
 const STRIPPED = ['Last Name', 'First Name', 'DOB'];
-const EXTRA = ['LASFIR', 'Source', 'doneBy', 'clinic', 'clinicNote'];
+const EXTRA = ['LASFIR', 'Source', 'doneBy', 'clinic', 'clinicNote', 'sentNote'];
 const norm = (list) => list.map((r) => Object.fromEntries(Object.keys(r).filter((k) => !EXTRA.includes(k))
   .map((k) => [k, STRIPPED.includes(k) ? '' : typeof r[k] === 'string' ? r[k].replace(' (Parentisson, Guardia)', '') : r[k]])));
 const byTaskKey = (a, b) => a['Task Key'].localeCompare(b['Task Key']);
@@ -260,6 +261,90 @@ test('clinicDerive: each task carries its Clinic Work done note; a note saved un
   work = R.workRows(work, { Kind: 'Task done', Key: ben, MRN: '900001', Value: 'No', By: 'Front desk' }, at);
   d = R.clinicDerive(se, work, TODAY);
   assert.deepEqual([t(ben).Done, t(ben).clinicNote], ['', 'called patient, new card scanned']);
+});
+
+test('clinicPack: SE Done carries the admin\'s Clinic Note back to the clinic (scrubbed); clinicDerive shows it as sentNote', async () => {
+  const { src, fixKey } = admin();
+  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  const notes = { [fixKey]: 'asked for a photo of the card (Front desk, San Rafael, 10/21)',
+    [ben]: 'called Testa Quillfeather, new card scanned (Front desk, San Rafael, 10/21)' };
+  const tasks = src.tasks.map((t) => (notes[t['Task Key']] ? { ...t, 'Clinic Note': notes[t['Task Key']] } : t))
+    .concat([{ ...src.tasks[0], 'Task Key': '900004|Update benefits in NextGen', MRN: '900004', Done: '', 'Clinic Note': 'Distantly called back' }]);
+  const pack = R.clinicPack(LOC, { ...src, tasks });
+  const { tables } = await roundTrip(pack);
+  assert.deepEqual(tables['SE Done'][0], ['Task Key', 'Done', 'Clinic Note']);
+  const rows = R.tableObjects(tables['SE Done']).sort(byTaskKey);
+  assert.deepEqual(rows.map((r) => [r['Task Key'], r.Done, r['Clinic Note']]), [
+    [ben, '', 'called QUITES, new card scanned (Front desk, San Rafael, 10/21)'],
+    [fixKey, 'x', 'asked for a photo of the card (Front desk, San Rafael, 10/21)'],
+  ], 'a note alone is enough; the other clinic\'s task stays out; the patient\'s name is scrubbed');
+  assert.equal(pack.counts.done, 2);
+  const text = stringsOf(tables);
+  for (const s of NEVER) assert.ok(!text.toLowerCase().includes(s.toLowerCase()), `"${s}" is not in the file`);
+  const se = R.clinicUnpack(tables);
+  assert.deepEqual(se.done.find((d) => d['Task Key'] === ben), { 'Task Key': ben, 'Done': '', 'Clinic Note': rows[0]['Clinic Note'] });
+  let d = R.clinicDerive(se, [], TODAY);
+  const t = (k) => d.tasks.find((x) => x['Task Key'] === k);
+  assert.deepEqual([t(ben).Done, t(ben).doneBy, t(ben).sentNote, t(ben).clinicNote], ['', '', rows[0]['Clinic Note'], ''], 'a note alone does not tick the task');
+  assert.deepEqual([t(fixKey).Done, t(fixKey).sentNote], ['x', notes[fixKey]]);
+  assert.equal(t(fixKey)['Clinic Note'], notes[fixKey], 'the Clinic Note column as the admin has it');
+  assert.equal(d.tasks.filter((x) => x.sentNote).length, 2);
+  assert.equal(d.counts.sentNotes, 2);
+  // The clinic's new note sits beside the admin's copy; neither replaces the other.
+  const work = R.workRows([], { Kind: 'Task done', Key: ben, MRN: '900001', Note: 'card photo emailed too', By: 'Front desk' }, new Date(Date.UTC(2026, 9, 22, 17)));
+  d = R.clinicDerive(se, work, TODAY);
+  assert.deepEqual([t(ben).sentNote, t(ben).clinicNote], [rows[0]['Clinic Note'], 'card photo emailed too']);
+  // A file made before SE Done had Clinic Note (two columns, still Format 1) reads with blank notes.
+  const old = { ...tables, 'SE Done': [['Task Key', 'Done'], [fixKey, 'x']] };
+  const se0 = R.clinicUnpack(old);
+  assert.deepEqual(se0.done, [{ 'Task Key': fixKey, 'Done': 'x', 'Clinic Note': '' }]);
+  const d0 = R.clinicDerive(se0, [], TODAY);
+  assert.ok(d0.tasks.every((x) => x.sentNote === '' && x['Clinic Note'] === ''));
+  assert.equal(d0.tasks.find((x) => x['Task Key'] === fixKey).Done, 'x');
+});
+
+test('clinicPack: a Clinic Note typed by hand loses a first or last name alone and the patient\'s or guarantor\'s DOB', async () => {
+  const { src } = admin();
+  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  const kid = src.tasks.find((x) => x.MRN === '900003')['Task Key'];
+  const notes = {
+    [ben]: 'Spoke w/ Testa, DOB 4/5/1981 confirmed; QUILLFEATHER ok; born 04-05-81, Apr 5, 1981, 5 April 1981, 1981-04-05; visit 4/6/1981 stays',
+    [kid]: 'Guardia called (DOB 03/03/1970), Parentisson to bring the card; Juniper seen 3/3/1971',
+  };
+  const tasks = src.tasks.map((t) => (notes[t['Task Key']] ? { ...t, 'Clinic Note': notes[t['Task Key']] } : t));
+  const { tables } = await roundTrip(R.clinicPack(LOC, { ...src, tasks }));
+  const got = Object.fromEntries(R.tableObjects(tables['SE Done']).map((r) => [r['Task Key'], r['Clinic Note']]));
+  assert.equal(got[ben], 'Spoke w/ QUITES, DOB [date removed] confirmed; QUITES ok; born [date removed], [date removed], [date removed], [date removed]; visit 4/6/1981 stays');
+  assert.equal(got[kid], 'the guarantor called (DOB [date removed]), the guarantor to bring the card; KIDJUN seen 3/3/1971');
+  const text = stringsOf(tables);
+  for (const s of NEVER.concat(['04-05-81', 'Apr 5', '5 April', '1981-04-05'])) assert.ok(!text.toLowerCase().includes(s.toLowerCase()), `"${s}" is not in the file`);
+  const d = R.clinicDerive(R.clinicUnpack(tables), [], TODAY);
+  assert.equal(d.tasks.find((x) => x['Task Key'] === ben).sentNote, got[ben], 'CTT shows the scrubbed note');
+  // Whole words only: a longer word holding the name stays.
+  const t2 = src.tasks.map((t) => (t['Task Key'] === ben ? { ...t, 'Clinic Note': 'Testament on file' } : t));
+  const two = await roundTrip(R.clinicPack(LOC, { ...src, tasks: t2 }));
+  assert.equal(R.tableObjects(two.tables['SE Done']).find((r) => r['Task Key'] === ben)['Clinic Note'], 'Testament on file');
+});
+
+test('app.js cttWorkbook: SE Done takes Done and Clinic Note from the NextGen Tasks sheet as it is now, not the upload\'s copy', async () => {
+  const { src, fixKey } = admin();
+  const app = readFileSync(new globalThis.URL('../app.js', import.meta.url), 'utf8'); // URL here is the Sohar link helper
+  const cut = (from, to) => { const i = app.indexOf(from), j = app.indexOf(to, i); assert.ok(i >= 0 && j > i, `app.js has ${from}`); return app.slice(i, j); };
+  const body = cut('  async function cttWorkbook(', '  async function saveCttFile(') + cut('  async function currentTasks(', '  async function copyAdminMessage(');
+  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  // The upload's copy has no notes; since then a bring-back wrote one and the admin typed one on the sheet.
+  const sheet = src.tasks.map((t) => (t['Task Key'] === ben ? { ...t, 'Clinic Note': 'called patient (Front desk, San Rafael, 10/22)' }
+    : t['Task Key'] === fixKey ? { ...t, Done: 'x', 'Clinic Note': 'billing has the new card' } : t));
+  const state = { tasks: src.tasks.map((t) => ({ ...t, 'Clinic Note': '' })), demo: false, results: src.results, review: src.review, learning: [], metrics: null,
+    cfg: src.cfg, payerRules: R.payerRulesFrom(src.payerRuleRows) };
+  const X = { async readTasks() { return sheet; } };
+  const make = new Function('R', 'C', 'XL', 'X', 'state', 'inScopePatients', 'VERSION', `${body}\nreturn { cttWorkbook };`);
+  const { cttWorkbook } = make(R, C, XL, X, state, () => src.patients, '0.14.0');
+  const f = await cttWorkbook(LOC);
+  const wb = await XL.readWorkbook(f.bytes);
+  const done = R.tableObjects(wb.sheets.find((s) => s.name === 'SE Done').rows);
+  assert.deepEqual(done.map((r) => [r['Task Key'], r.Done, r['Clinic Note']]).sort((a, b) => a[0].localeCompare(b[0])),
+    [[ben, '', 'called patient (Front desk, San Rafael, 10/22)'], [fixKey, 'x', 'billing has the new card']]);
 });
 
 test('mergeClinicWork: requests, Done (No only clears clinic-set Done), notes and payer notes; last row per Kind + Key wins', () => {

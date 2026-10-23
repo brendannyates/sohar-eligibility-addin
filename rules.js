@@ -748,12 +748,28 @@
   // Core's guarantor Action quotes "(Last, First)"; either part can be blank (a one-word Guar Name), so it goes whatever it holds.
   const GUAR_QUOTE = /(Found through the guarantor)\s*\([^()]*\)/g;
   /** The free-text fields of r with the names in res ([[regex, replacement]]) and core's guarantor quote taken out. */
+  const scrubText = (s, res) => res.reduce((t, [re, word]) => t.replace(re, (m) => (m.trim()[0] === '(' ? '' : word)), s.replace(GUAR_QUOTE, '$1'));
+  // A typed note can name the patient by one name alone or quote the DOB, so the SE Done Clinic Note gets more than the
+  // full-name scrub: each name, and each part of one ("Smith-Jones", "De la Cruz"), as a whole word, and the DOB written
+  // as M/D/YY(YY) with / - or ., as YYYY-MM-DD, or with the month's name. Over-scrubbing a word ("Will") beats a leak.
+  function wordRes(last, first, word) {
+    const parts = [last, first].map(str).flatMap((n) => [n].concat(n.split(/[\s-]+/))).filter((n) => n.replace(/[^\p{L}]/gu, '').length >= 2);
+    return [...new Set(parts.map(low))].sort((a, b) => b.length - a.length)
+      .map((n) => [new RegExp(`(?<!\\p{L})${reEsc(n)}(?!\\p{L})`, 'giu'), word]);
+  }
+  const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+  function dobRes(dob) {
+    const d = parseDate(dob);
+    if (!d) return [];
+    const y = d.getUTCFullYear(), m = d.getUTCMonth() + 1, day = d.getUTCDate();
+    const n0 = (v) => `0?${v}`, yr = `(?:${y}|${String(y).slice(2)})`;
+    const mon = `${MONTHS[m - 1].slice(0, 3)}${MONTHS[m - 1].slice(3) ? `(?:${MONTHS[m - 1].slice(3)})?` : ''}\\.?`;
+    const forms = [`${n0(m)}([/.-])${n0(day)}\\1${yr}`, `${y}-0?${m}-0?${day}`, `${mon}\\s+${n0(day)}(?:st|nd|rd|th)?,?\\s+${y}`, `${n0(day)}\\s+${mon},?\\s+${y}`];
+    return [[new RegExp(`(?<![\\d/.-])(?:${forms.join('|')})(?![\\d/-])`, 'gi'), '[date removed]']];
+  }
   function scrub(r, res) {
     const o = Object.assign({}, r);
-    for (const k of SCRUB_COLS) {
-      if (typeof o[k] !== 'string') continue;
-      o[k] = res.reduce((s, [re, word]) => s.replace(re, (m) => (m.trim()[0] === '(' ? '' : word)), o[k].replace(GUAR_QUOTE, '$1'));
-    }
+    for (const k of SCRUB_COLS) if (typeof o[k] === 'string') o[k] = scrubText(o[k], res);
     return o;
   }
   function stripRecord(r, res, tag) {
@@ -812,7 +828,9 @@
       const x = xOf(p), g = x.guarantor;
       const tag = lasfir(p['Last Name'], p['First Name']);
       const res = [[nameRe(p['Last Name'], p['First Name']), tag], [g ? nameRe(g.lastName, g.firstName) : null, 'the guarantor']].filter((e) => e[0]);
-      scrubs.set(per, { res, tag });
+      const noteRes = res.concat(wordRes(p['Last Name'], p['First Name'], tag), g ? wordRes(g.lastName, g.firstName, 'the guarantor') : [],
+        dobRes(p.DOB), g ? dobRes(g.dob) : []);
+      scrubs.set(per, { res, tag, noteRes });
       const rec = stripRecord(p, res, tag);
       const xs = Object.assign({}, x);
       delete xs.guarantor; delete xs.guarZip;
@@ -843,8 +861,11 @@
     };
     for (const r of s.learningRows || []) addPayer(r, 'learning');
     for (const r of s.metricRows || []) addPayer(r, 'metrics');
-    const done = (s.tasks || []).filter((t) => t && str(t.Done) && (keys.has(keyOf(t)) || keys.has(str(t['Task Key']).split('|')[0])))
-      .map((t) => ({ 'Task Key': str(t['Task Key']), 'Done': str(t.Done) }));
+    // Done, and the Clinic Note the admin holds (the clinic's done note as brought back, or one typed on NextGen Tasks), so the
+    // clinic sees its note arrived. A note typed by hand can quote the patient, so names (whole or one alone) and DOBs go.
+    const done = (s.tasks || []).filter(Boolean).map((t) => [t, scrubs.get(keyOf(t)) || scrubs.get(str(t['Task Key']).split('|')[0])])
+      .filter(([t, sc]) => sc && (str(t.Done) || str(t['Clinic Note'])))
+      .map(([t, sc]) => ({ 'Task Key': str(t['Task Key']), 'Done': str(t.Done), 'Clinic Note': scrubText(str(t['Clinic Note']), sc.noteRes) }));
     const ruleRows = (s.payerRuleRows || []).filter(Boolean);
     const settings = seSettings(s.cfg);
     const meta = { Kind: SE_KIND, Location: location, 'Run Date': runDate, 'Run At': runAt.toISOString(), 'Sohar Version': str(s.version), Format: SE_FORMAT,
@@ -868,7 +889,7 @@
       { name: SE_SHEETS.review, table: 'tblSEReview', columns: ['Key', 'Record'], rows: review, hidden: true },
       { name: SE_SHEETS.payers, table: 'tblSEPayers', columns: ['Key', 'Record'],
         rows: [...payers].map(([k, v]) => ({ Key: k, Record: recordCell(v, location, runDay) })), hidden: true },
-      { name: SE_SHEETS.done, table: 'tblSEDone', columns: ['Task Key', 'Done'], rows: done, hidden: true },
+      { name: SE_SHEETS.done, table: 'tblSEDone', columns: ['Task Key', 'Done', 'Clinic Note'], rows: done, hidden: true },
     ];
     if (ruleRows.length) sheets.push({ name: SE_SHEETS.rules, table: 'tblPayerCredRules', columns: PR ? PR.HEADERS : Object.keys(ruleRows[0]), rows: ruleRows, hidden: true });
     return {
@@ -906,7 +927,8 @@
       results: records(SE_SHEETS.results).map((r) => Object.assign({}, blank, r)),
       review: records(SE_SHEETS.review),
       payers: records(SE_SHEETS.payers),
-      done: find(SE_SHEETS.done).map((r) => ({ 'Task Key': str(r['Task Key']), 'Done': str(r.Done) })).filter((r) => r['Task Key']),
+      // Clinic Note: files made before it was added have no such column (still Format 1), so it reads blank.
+      done: find(SE_SHEETS.done).map((r) => ({ 'Task Key': str(r['Task Key']), 'Done': str(r.Done), 'Clinic Note': str(r['Clinic Note']) })).filter((r) => r['Task Key']),
       payerRules: payerRulesFrom(find(SE_SHEETS.rules)),
     };
   }
@@ -928,7 +950,7 @@
    * The clinic's view of an unpacked file at `now`: {rows (clinicRows + LASFIR), review (flag rows, then build review rows,
    * CLINIC_REVIEW_COLS + LASFIR + Source), flags (Map), benefits ({rows, pending}, benefitsView for the clinic's patients),
    * tasks (buildTasks with Done from SE Done then Clinic Work; clinic: true on patient-facing types; doneBy; clinicNote, the
-   * Note on the task's Clinic Work "Task done" row), payers, notes
+   * Note on the task's Clinic Work "Task done" row; sentNote and Clinic Note, the admin's Clinic Note from SE Done), payers, notes
    * (Map MRN -> Clinic Work note), counts}. Clinic Work overrides Re-verify anyway, task Done and notes.
    */
   function clinicDerive(pack, work, now) {
@@ -964,6 +986,7 @@
     const benefits = { rows: view.rows.filter((b) => pers.has(str(b['Per Nbr']))).map((b) => Object.assign(b, { LASFIR: pers.get(str(b['Per Nbr'])) })),
       pending: (view.pending || []).filter((r) => pers.has(str(r['Per Nbr']))) };
     const sent = new Map((pk.done || []).map((d) => [str(d['Task Key']), str(d.Done)]).filter((e) => e[0] && e[1]));
+    const sentNotes = new Map((pk.done || []).map((d) => [str(d['Task Key']), str(d['Clinic Note'])]).filter((e) => e[0] && e[1]));
     // A Task Key starts with the patient key (the MRN column can differ for a shared MRN).
     const who = (t) => str(t['Task Key']).split('|')[0];
     const tasks = C.buildTasks(results).filter((t) => byKey.has(who(t))).map((t) => {
@@ -973,8 +996,10 @@
       // A blank Value is a note saved with the box never ticked here: Done stays as the file has it.
       const clinicDone = !admin && (cw && cw.Value ? isOn(cw.Value) : !!was);
       // Clinic No only undoes the clinic's own tick; the admin's Done stays. clinicNote: the clinic's own note (Clinic Work).
-      return Object.assign(t, { Done: admin || (clinicDone ? was || 'Yes' : ''), doneBy: admin ? 'admin' : clinicDone ? 'clinic' : '',
-        clinic: CLINIC_TASK_TYPES.includes(t.Task), LASFIR: tags.get(who(t)) || '', clinicNote: cw ? cw.Note : '' });
+      // sentNote: the Clinic Note the admin had when the file was made ('note (By, Location, M/D)'), whatever the clinic edits.
+      const sentNote = sentNotes.get(k) || '';
+      return Object.assign(t, { Done: admin || (clinicDone ? was || 'Yes' : ''), 'Clinic Note': sentNote, doneBy: admin ? 'admin' : clinicDone ? 'clinic' : '',
+        clinic: CLINIC_TASK_TYPES.includes(t.Task), LASFIR: tags.get(who(t)) || '', clinicNote: cw ? cw.Note : '', sentNote });
     });
     const notes = new Map();
     for (const r of w.values()) if (r.kind === 'note' && r.Note && byKey.has(r.Key)) notes.set(r.Key, { Note: r.Note, By: r.By, When: r.When });
@@ -998,7 +1023,7 @@
     const counts = {
       patients: rows.length, flagged: rows.filter((r) => r.Pills).length, review: review.length, high: review.filter((r) => r.Severity === 'High').length,
       tasks: tasks.length, openTasks: open.length, clinicTasks: open.filter((t) => t.clinic).length,
-      reverifyAnyway: rows.filter((r) => r['Re-verify Anyway']).length, notes: notes.size, taskNotes: tasks.filter((t) => t.clinicNote).length, payerNotes: payers.filter((p) => p.note).length, benefits: benefits.rows.length,
+      reverifyAnyway: rows.filter((r) => r['Re-verify Anyway']).length, notes: notes.size, taskNotes: tasks.filter((t) => t.clinicNote).length, sentNotes: tasks.filter((t) => t.sentNote).length, payerNotes: payers.filter((p) => p.note).length, benefits: benefits.rows.length,
     };
     return { rows, review, flags, benefits, tasks, payers, notes, counts };
   }

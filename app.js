@@ -1262,6 +1262,8 @@
   /**
    * "Clinic Eligibility - <Location> YYYY-MM-DD.xlsx" (v0.14) for the Clinic Template Tool, which opens it and re-derives
    * the list with the same rules.js. rules.clinicPack keeps only this clinic's patients and strips names and DOBs.
+   * SE Done takes Done and Clinic Note from NextGen Tasks as the sheet has them now (liveTasks), so a note brought back or
+   * typed after the upload reaches the clinic.
    */
   async function cttWorkbook(loc) {
     const pack = R.clinicPack(loc, {
@@ -1502,7 +1504,7 @@
           <div class="count clr"><div class="n">${q.Clear || 0}</div><div class="l">clear</div></div>
         </div>
         ${open ? `<p><b>${open} NextGen fix${open === 1 ? '' : 'es'}</b> to make before visits (NextGen Tasks sheet).</p>` : ''}
-        ${noted ? `<p class="hint">${noted} task${noted === 1 ? ' has a note' : 's have notes'} from the clinic (Clinic Note column on NextGen Tasks, and in full screen).</p>` : ''}
+        ${noted ? `<p class="hint">${noted} task${noted === 1 ? ' has a note' : 's have notes'} (Clinic Note column on NextGen Tasks, and in full screen). The clinic sees these notes in its next file, so keep names and dates of birth out of any you type.</p>` : ''}
         ${noIds ? `<p class="warn"><b>${noIds} Sohar result${noIds === 1 ? ' has' : 's have'} no patient identifiers</b> (no id, member ID or name): likely an export anomaly or a check run outside the batch. Open the Sohar link on those rows (Match = No identifiers); one item is on the Review sheet.</p>` : ''}
         ${acc.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar output): ${acc.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
     await renderBenefits(res.results, cfg, kinds);
