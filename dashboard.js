@@ -354,8 +354,7 @@
     $('cLoc').value = locs.includes(keep) ? keep : '';
     const list = clinicFiltered();
     $('cShown').textContent = clinic ? `Showing ${list.length} of ${all.length}${clinic.runDate ? `, run ${clinic.runDate}` : ''}` : 'Upload the NextGen report in the pane first.';
-    $('btnCFile').disabled = !$('cLoc').value;
-    $('btnCFile').title = $('cLoc').value ? '' : 'Pick a clinic first';
+    for (const id of ['btnCFile', 'btnCttFile']) { $(id).disabled = !$('cLoc').value; $(id).title = $('cLoc').value ? '' : 'Pick a clinic first'; }
     $('cTbl').querySelector('tbody').innerHTML = list.map((r) => `<tr>
       ${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r.Location)}<td><b>${esc(name(r))}</b></td>${cell(idText(r))}
       <td>${esc(r['Next Event'])}<br><span class="hint">${esc(r['Next Provider'])}</span></td>
@@ -529,6 +528,7 @@
   document.querySelectorAll('[data-csave]').forEach((b) => b.addEventListener('click', () => save({ list: 'clinicList', flags: 'clinicFlags', skipped: 'skipped' }[b.dataset.csave])));
   document.querySelectorAll('[data-lsave]').forEach((b) => b.addEventListener('click', () => save(b.dataset.lsave)));
   $('btnCFile').addEventListener('click', () => { if ($('cLoc').value) { notice(`Saving the clinic file for ${$('cLoc').value}…`, true); toPane({ type: 'clinic-file', location: $('cLoc').value }); } });
+  $('btnCttFile').addEventListener('click', () => { if ($('cLoc').value) { notice(`Saving the Clinic Template Tool file for ${$('cLoc').value}…`, true); toPane({ type: 'ctt-file', location: $('cLoc').value }); } });
   $('btnGuar').addEventListener('click', () => { notice('Adding guarantors to the discovery file…', true); toPane({ type: 'guarantor-resubmit' }); });
   $('fText').addEventListener('input', render);
   document.querySelectorAll('[data-queue]').forEach((b) => b.addEventListener('click', () => { $('fQueue').value = b.dataset.queue; $('fBen').value = ''; render(); }));

@@ -63,6 +63,10 @@
     tblGuarantorThemes: { sheet: 'Guarantor Themes' },
     // Inside a clinic file: the clinic's own "Re-verify anyway" ticks, brought back to the admin workbook.
     tblClinicRequests: { sheet: 'Clinic Requests' },
+    // v0.14: notes and payer notes from returned Clinic Eligibility files. Visible: a person reads them and acts.
+    tblClinicNotes: { sheet: 'Clinic Notes' }, tblClinicPayerNotes: { sheet: 'Clinic Payer Notes' },
+    // Which Clinic Work rows were already brought back (a file sent twice changes nothing). Keys are MRNs: hidden.
+    tblClinicWorkApplied: { sheet: 'Clinic Work Applied', hidden: true },
     // Esketamine payer credential rules (R13): imported from the shared CSV in OneDrive, visible and editable. No patient data.
     tblPayerCredRules: { sheet: 'Payer Credential Rules' },
   };
@@ -533,6 +537,13 @@
   const readPayerCredRules = () => readOwned('tblPayerCredRules');
   const writePayerCredRules = (cols, rows) => writeAddinTable('Payer Credential Rules', 'tblPayerCredRules', cols, rows, false);
   const writeClinicRequests = (cols, rows) => writeAddinTable('Clinic Requests', 'tblClinicRequests', cols, rows, false);
+  // Clinic Notes / Clinic Payer Notes (rules.CLINIC_NOTE_COLS / CLINIC_PAYER_NOTE_COLS): missing sheet = none yet.
+  const readClinicNotes = () => readOwned('tblClinicNotes');
+  const writeClinicNotes = (cols, rows) => writeAddinTable('Clinic Notes', 'tblClinicNotes', cols, rows, false);
+  const readClinicPayerNotes = () => readOwned('tblClinicPayerNotes');
+  const writeClinicPayerNotes = (cols, rows) => writeAddinTable('Clinic Payer Notes', 'tblClinicPayerNotes', cols, rows, false);
+  const readClinicWorkApplied = () => readOwned('tblClinicWorkApplied'); // rules.CLINIC_APPLIED_COLS
+  const writeClinicWorkApplied = (cols, rows) => writeAddinTable('Clinic Work Applied', 'tblClinicWorkApplied', cols, rows, false); // hidden: OWNED
 
   // Fee estimates (v0.11): read / write by short name (FEE_TABLES). Missing table = nothing saved yet (readOwned).
   function feeTable(kind) {
@@ -781,6 +792,7 @@
     readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests, FEE_TABLES, readFee, writeFee,
     readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, writePayerMetrics,
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
+    readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
     writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

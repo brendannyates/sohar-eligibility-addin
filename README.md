@@ -102,6 +102,21 @@ On the mapping sheets, change the value column and the add-in keeps it (the row 
 
 **Demo:** `npm run serve`, then `http://localhost:8080/?fees=1` (made-up fee schedule; `dashboard.html?fees=1#benefits` for the window on its own).
 
+### Clinic Eligibility file for the Clinic Template Tool (v0.14)
+
+Central Sohar does every Sohar import, export, discovery and verification; a clinic works its own list in the Clinic Template Tool (CTT). Admin tab > **Clinic files and emails** has a **Clinic Template Tool file** button per location, next to **Save clinic file** (full screen: Clinic lists, pick a clinic). It saves `Clinic Eligibility - <Location> YYYY-MM-DD.xlsx` to Downloads (save-tab fallback on the web), built by `rules.clinicPack` from this workbook's state and written with `xlsx.js`:
+
+- Only patients whose next visit is at that location (`rules.clinicSet`). Unmatched and no-identifier results stay with the admin.
+- No patient or guarantor names, DOBs or guarantor ZIP: every record has `LASFIR` instead, and names are scrubbed (whole words) from the free-text fields (Action, Detail, Fix, Notes, Route Reason, Flags); provider, location and payer fields are left as they are so the clinic's derivation matches yours. Member IDs stay (staff fix them).
+- Sheets: visible `Read Me` and `Clinic Work` (empty), hidden `SE Info` (Kind `Clinic Eligibility`, Location, run date, version, Format 1, non-default settings), `SE Patients`, `SE Results`, `SE Review`, `SE Payers` (learning + metrics for the clinic's payers), `SE Done` (the admin's Done marks), and `Payer Credential Rules` when the sheet has rows. Never `tblClinicMeta`, so this add-in does not take the file over. The web-extension parts carry CTT's Id, so CTT opens with it.
+- A record too big for one Excel cell has its past appointments cut to the last 5; if it is still too big, the file is not made and the message names the MRN.
+
+CTT carries byte-identical copies of `core.js`, `rules.js` and `payer-rules.js` and re-derives the rows, flags, benefits and tasks itself (`rules.clinicUnpack`, `rules.clinicDerive`). The clinic's changes go on `Clinic Work` (`Kind`, `Key`, `MRN`, `LASFIR`, `Value`, `Note`, `By`, `When`; last row per Kind + Key wins).
+
+**Bringing it back:** drop the saved file on **Bring back clinic files** (old `Sohar Clinic` files with `Clinic Requests` still work). `rules.mergeClinicWork` applies the four kinds: `Re-verify anyway` On/Off -> Re-verify Requests (`By` = `Clinic file <Location>`); `Task done` Yes/No -> Done on NextGen Tasks, read fresh from the sheet so Done marks you typed there stay (a clinic Yes writes `Yes (clinic <Location>)`; No only reopens a task with that mark, never your own `Yes` or `x`); `Note` -> visible **Clinic Notes** sheet (`tblClinicNotes`: MRN, Location, Note, By, When); `Payer note` -> visible **Clinic Payer Notes** sheet (`tblClinicPayerNotes`: NextGen Payer, Location, Card Says, Note, By, When). Newest note per MRN (payer) + Location wins; a newer blank note removes it. Payer notes are listed under **Payer learning** for a person to act on and never change the Payer Map. The hidden **Clinic Work Applied** sheet (`tblClinicWorkApplied`: Location, Kind, Key, When; kept 120 days) remembers the newest row brought back per Location + Kind + Key, so the same file sent again changes nothing and a tick you have since undone is not re-applied. Every file is read before anything is saved, so one bad file leaves the workbook as it was. The note says what changed in plain words, then the pane rebuilds.
+
+The file has PHI (MRNs, insurance, appointments): MHS OneDrive or Teams only.
+
 ### Esketamine payer rules (v0.13)
 
 Admin tab > **Esketamine payer rules**: drop `Payer Credential Rules.csv` (OneDrive, Add-In Manifests folder) or an .xlsx copy. It is parsed by `payer-rules.js` and written to the visible, editable **Payer Credential Rules** sheet (`tblPayerCredRules`). Every refresh (⟳) re-reads the sheet, so edits made in Excel count; **Re-read the sheet** does it on demand. A re-import replaces the sheet. The rules table is never committed (this repo is public): tests and the demo use made-up payers only.
@@ -199,7 +214,7 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 | File | Role |
 |---|---|
 | `core.js` | Pure logic: header detection, name/date parsing, routing, auto payer matching, exports, CSV. Shared with tests. |
-| `rules.js` | Pure clinic rules (R5-R10): flags and pills, Review rows, clinic sheet and email, payer evidence. Loads after `core.js` (R9 uses `core.reverifyCheck`). |
+| `rules.js` | Pure clinic rules (R5-R10): flags and pills, Review rows, clinic sheet and email, payer evidence; the Clinic Eligibility file (v0.14: `clinicPack`, `clinicUnpack`, `clinicDerive`, `workRows`, `mergeClinicWork`). Loads after `core.js` (R9 uses `core.reverifyCheck`). Copied byte-identical into the Clinic Template Tool with `core.js`. |
 | `payer-rules.js` | Pure esketamine payer credential rules (read the sheet/CSV, match a payer, check credential × ESK step, Besse). Byte-identical copy shared with the Clinic Template Tool and ESK Tracker repos: change all three together. Loads before `core.js`. |
 | `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts), and a small reader (`readWorkbook`) for the fee schedule upload. |
 | `fees.js` | Pure fee estimate logic (v0.11, a test, Off by default): fee schedule parsing, location / payer matching, estimate math, made-up demo schedule. Loads after `core.js`. |

@@ -345,7 +345,9 @@ a.link { padding: 7px 0; }
 .conf.ok { color: var(--ok); }
 .conf.mid { color: var(--verify); }
 .conf.low { color: var(--warn); }
-table.clinicfiles td.acts { white-space: nowrap; text-align: right; }
+table.clinicfiles tr.cf-loc td { border-bottom: 0; padding-bottom: 0; }
+table.clinicfiles td.acts { text-align: right; }
+table.clinicfiles td.acts button { white-space: nowrap; margin: 2px 0 2px 2px; }
 table.clinicfiles .hi, .clinicfiles .hi { color: var(--alert); font-weight: 600; }
 textarea.copybox { width: 100%; font: 12px/1.45 ui-monospace, Consolas, monospace; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 6px; margin: 4px 0 6px; }
 #tbl td.pillc, table.prep .pills { white-space: normal; }

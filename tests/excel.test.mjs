@@ -33,6 +33,11 @@ const RL = createRequire(import.meta.url)('../rules.js');
 const credRules = (n, tag) => Array.from({ length: n }, (_, i) => ({ Payer: `${tag} Payer ${Math.floor(i / 2)}`, State: i % 4 < 2 ? '' : 'WA', Credential: i % 2 ? 'MD' : 'NP',
   'Besse Approved': ['Yes', 'No', ''][i % 3], 'NP Fully Approved': i % 2 ? 'N/A' : 'No', 'Esketamine First Treatment': 'No', 'Esketamine Start': 'Yes', 'Esketamine Observation': 'Yes',
   'Match Names': `${tag} payer ${Math.floor(i / 2)}`, Notes: i % 5 ? '' : 'synthetic note' }));
+// v0.14 Clinic Notes / Clinic Payer Notes from returned Clinic Eligibility files. Made-up MRNs and payers.
+const clinicNotes = (n, tag) => Array.from({ length: n }, (_, i) => ({ MRN: `00900${i}`, Location: `${tag} Clinic`, Note: `${tag} note ${i}`, By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z` }));
+const clinicPayerNotes = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'NextGen Payer': `${tag} Payer ${i}`, Location: `${tag} Clinic`, 'Card Says': `${tag} PPO ${i}`,
+  Note: i % 3 ? '' : 'new card', By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z` }));
+const clinicApplied = (n, tag) => Array.from({ length: n }, (_, i) => ({ Location: `${tag} Clinic`, Kind: 'Task done', Key: `00900${i}|Fix member ID in NextGen`, When: `2026-10-22T1${i % 10}:00:00.000Z` }));
 
 // ---------- happy path ----------
 
@@ -383,6 +388,9 @@ const CASES = {
   refs: { write: (X, rows) => X.writeSoharRefs(C.SOHAR_REF_COLS, rows), read: (X) => X.readSoharRefs(), cols: C.SOHAR_REF_COLS, make: refs, sheet: 'Sohar Refs', hidden: true },
   requests: { write: (X, rows) => X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, rows), read: (X) => X.readReverifyRequests(), cols: C.REVERIFY_REQUEST_COLS, make: requests, sheet: 'Re-verify Requests', hidden: true },
   credRules: { write: (X, rows) => X.writePayerCredRules(PR.HEADERS, rows), read: (X) => X.readPayerCredRules(), cols: PR.HEADERS, make: credRules, sheet: 'Payer Credential Rules', hidden: false },
+  clinicNotes: { write: (X, rows) => X.writeClinicNotes(RL.CLINIC_NOTE_COLS, rows), read: (X) => X.readClinicNotes(), cols: RL.CLINIC_NOTE_COLS, make: clinicNotes, sheet: 'Clinic Notes', hidden: false },
+  clinicPayerNotes: { write: (X, rows) => X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, rows), read: (X) => X.readClinicPayerNotes(), cols: RL.CLINIC_PAYER_NOTE_COLS, make: clinicPayerNotes, sheet: 'Clinic Payer Notes', hidden: false },
+  clinicApplied: { write: (X, rows) => X.writeClinicWorkApplied(RL.CLINIC_APPLIED_COLS, rows), read: (X) => X.readClinicWorkApplied(), cols: RL.CLINIC_APPLIED_COLS, make: clinicApplied, sheet: 'Clinic Work Applied', hidden: true },
 };
 const KNOBS = { op: 'failAtOp', sync: 'failAtSync', kill: 'killAfterSync' };
 const short = (v) => (v instanceof Error ? `Error: ${v.message}` : Array.isArray(v) ? `${v.length} rows` : inspect(v));
@@ -441,7 +449,8 @@ test('fail-safe: reopening the pane after any failure recovers or keeps the old 
 });
 // Payer learning tables (v0.10): the ledger grows past one chunk; the log and the rollup are rewritten from fewer rows.
 // Sohar Refs grows past one chunk (append-only); Re-verify Requests shrinks when requests are dropped.
-for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2], ['credRules', 6, 40]]) {
+for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2], ['credRules', 6, 40],
+  ['clinicNotes', 4, 1100], ['clinicPayerNotes', 30, 2], ['clinicApplied', 4, 1100]]) {
   test(`fail-safe: ${CASES[kase].sheet} survives a failure at every op, a failed sync, and Excel closing`, async () => {
     await sweep(kase, 'op', nOld, nNew);
     await sweep(kase, 'sync', nOld, nNew);
@@ -735,4 +744,29 @@ test('Payer Credential Rules: missing sheet reads [] (rule silent); import write
   assert.deepEqual(sig(RL.payerRulesFrom(await X.readPayerCredRules())), sig(rules));
   await X.writePayerCredRules(PR.HEADERS, RL.payerRuleRows(rules.slice(0, 1)));
   assert.equal((await X.readPayerCredRules()).length, 1, 'a re-import replaces every row');
+});
+
+test('v0.14 Clinic Notes and Clinic Payer Notes: missing reads []; mergeClinicWork rows save visible, read back as text and merge again', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  assert.deepEqual(await X.readClinicNotes(), []);
+  assert.deepEqual(await X.readClinicPayerNotes(), []);
+  const W = (Kind, Key, Value, Note, When) => ({ Kind, Key, MRN: Kind === 'Note' ? Key : '', LASFIR: '', Value, Note, By: 'Front desk', When });
+  const ctx = (notes, payerNotes) => ({ location: 'Synthetic Bay', requests: [], tasks: [], sentDone: [], notes, payerNotes });
+  const first = RL.mergeClinicWork([W('Note', '0090001', '', 'Card on Monday', '2026-10-22T17:00:00.000Z'),
+    W('Payer note', 'Zenith CA', 'Zenith CA PPO 0012', 'new group', '2026-10-22T17:01:00.000Z')], ctx([], []));
+  await X.writeClinicNotes(RL.CLINIC_NOTE_COLS, first.notes);
+  await X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, first.payerNotes);
+  assert.equal(m.sheetVisibility('Clinic Notes'), 'Visible');
+  assert.equal(m.sheetVisibility('Clinic Payer Notes'), 'Visible');
+  assert.equal(m.activeSheet(), 'Import', 'neither activates');
+  assert.deepEqual(await X.readClinicNotes(), first.notes);
+  assert.equal((await X.readClinicNotes())[0].MRN, '0090001', 'leading zeros kept');
+  assert.deepEqual(await X.readClinicPayerNotes(), first.payerNotes);
+  // A later file: an older note loses, a newer blank one clears the payer note.
+  const second = RL.mergeClinicWork([W('Note', '0090001', '', 'stale', '2026-10-21T09:00:00.000Z'), W('Payer note', 'zenith ca', '', '', '2026-10-23T09:00:00.000Z')],
+    ctx(await X.readClinicNotes(), await X.readClinicPayerNotes()));
+  await X.writeClinicNotes(RL.CLINIC_NOTE_COLS, second.notes);
+  await X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, second.payerNotes);
+  assert.deepEqual((await X.readClinicNotes()).map((r) => r.Note), ['Card on Monday']);
+  assert.deepEqual(await X.readClinicPayerNotes(), []);
 });
