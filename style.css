@@ -230,6 +230,9 @@ table.prep tr.q-clr td:first-child { box-shadow: inset 3px 0 var(--ok); }
 #tasksTbl td.wide { min-width: 320px; }
 #tasksTbl td.mid { min-width: 150px; }
 #tasksTbl tr.done td, .tasklist li.done { color: var(--muted); text-decoration: line-through; }
+/* The clinic's done note stays readable on a done task (inline-block: an ancestor's line-through does not reach it). */
+#tasksTbl tr.done td.cnote, .tasklist .cnote { text-decoration: none; color: var(--ink); }
+.tasklist .cnote { display: inline-block; font-style: italic; }
 #tasksTbl input[type="checkbox"], .tasklist input { width: 16px; height: 16px; }
 .tasklist { margin: 0; padding-left: 0; list-style: none; display: grid; gap: 6px; font-size: 12.5px; }
 .cols2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px 24px; }

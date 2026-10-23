@@ -4,6 +4,7 @@ Hard rules:
 - `core.js`, `rules.js` and `xlsx.js` stay free of Office.js and DOM. Logic changes go there, with a test in `tests/`.
 - Extra patient data travels on the non-column `x` property, never as new template columns.
 - Add-in sheets are written only through `writeAddinTable` (fail-safe stage-and-swap). A new add-in table goes in `OWNED` in `excel.js`. Never write an add-in table in place, and never let formulas reference those sheets (each save replaces the sheet). Changes to save/read code must keep `tests/excel.test.mjs` green, including the failure sweeps.
+- The one exception is a flow-owned table: `Clinic Work Inbox` (`tblClinicWorkInbox`, `excel.js` `INBOX`). A Power Automate flow appends to it, so the add-in never rewrites, swaps, sorts, clears or trims it (a stage-and-swap would race the flow and drop rows). It is not in `OWNED`. The add-in only creates it once (`createClinicInbox`, header only, fail-safe) and reads it (`readClinicInbox`). `tests/excel.test.mjs` runs every mutating export against a workbook holding it and fails if one touches it; keep new write paths in that list. Build guide: `docs/clinic-inbox-flow.md`.
 - Synthetic data only in tests, fixtures, demo mode, and commits. No real names, MRNs, member IDs, or exports.
 - Never add a network call. `connect-src 'none'` in `index.html` is deliberate; the only remote script is Office.js.
 - `VERIFICATION_COLS` and `DISCOVERY_COLS` match the Sohar CSV templates exactly, in order. Do not rename or reorder.

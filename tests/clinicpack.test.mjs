@@ -100,7 +100,7 @@ async function roundTrip(pack) {
 }
 // Compare without the stripped fields and the clinic-only extras; the guarantor's name is taken out of core's Action text.
 const STRIPPED = ['Last Name', 'First Name', 'DOB'];
-const EXTRA = ['LASFIR', 'Source', 'doneBy', 'clinic'];
+const EXTRA = ['LASFIR', 'Source', 'doneBy', 'clinic', 'clinicNote'];
 const norm = (list) => list.map((r) => Object.fromEntries(Object.keys(r).filter((k) => !EXTRA.includes(k))
   .map((k) => [k, STRIPPED.includes(k) ? '' : typeof r[k] === 'string' ? r[k].replace(' (Parentisson, Guardia)', '') : r[k]])));
 const byTaskKey = (a, b) => a['Task Key'].localeCompare(b['Task Key']);
@@ -154,6 +154,8 @@ test('clinicPack: only the clinic\'s patients, sheets in order, hidden SE tables
   assert.deepEqual(JSON.parse(info.Settings), { locationState: LOCSTATE }, 'only settings that differ from the defaults');
   assert.ok(tables['Read Me'].slice(1).some((r) => /Home > Clinic Template Tool/.test(r[0])));
   assert.ok(tables['Read Me'].slice(1).some((r) => /OneDrive or Teams/.test(r[0])));
+  assert.ok(tables['Read Me'].slice(1).some((r) => /your clinic's folder in the Clinic Eligibility library/.test(r[0]) && /do not need to send the file back/.test(r[0])));
+  assert.ok(tables['Read Me'].slice(1).some((r) => /^If the file is not in the library.*send it back/.test(r[0])), 'sending it back stays as the fallback');
   assert.throws(() => R.clinicPack('All', src), /one location/);
   // No payer rules: no rules sheet.
   const { wb: wb2 } = await roundTrip(R.clinicPack(LOC, { ...src, payerRuleRows: [] }));
@@ -239,6 +241,27 @@ test('clinicDerive: Clinic Work overrides Re-verify anyway, task Done and notes;
   assert.equal(R.clinicDerive(se, dup, TODAY).tasks.find((x) => x['Task Key'] === benefitsKey).Done, '');
 });
 
+test('clinicDerive: each task carries its Clinic Work done note; a note saved unticked leaves Done as the file has it', async () => {
+  const { src, fixKey } = admin();
+  const se = R.clinicUnpack((await roundTrip(R.clinicPack(LOC, src))).tables);
+  const ben = R.clinicDerive(se, [], TODAY).tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  assert.ok(R.clinicDerive(se, [], TODAY).tasks.every((t) => t.clinicNote === ''));
+  const at = new Date(Date.UTC(2026, 9, 22, 17));
+  let work = R.workRows([], [
+    { Kind: 'Task done', Key: ben, MRN: '900001', Value: 'Yes', Note: 'called patient, new card scanned', By: 'Front desk' },
+    { Kind: 'Task done', Key: fixKey, MRN: '900002', Note: 'asked for a photo of the card', By: 'Front desk' },
+  ], at);
+  let d = R.clinicDerive(se, work, TODAY);
+  const t = (k) => d.tasks.find((x) => x['Task Key'] === k);
+  assert.deepEqual([t(ben).Done, t(ben).doneBy, t(ben).clinicNote], ['Yes', 'clinic', 'called patient, new card scanned']);
+  assert.deepEqual([t(fixKey).Done, t(fixKey).doneBy, t(fixKey).clinicNote], ['x', 'admin', 'asked for a photo of the card']);
+  assert.equal(d.counts.taskNotes, 2);
+  // Unticking keeps the note.
+  work = R.workRows(work, { Kind: 'Task done', Key: ben, MRN: '900001', Value: 'No', By: 'Front desk' }, at);
+  d = R.clinicDerive(se, work, TODAY);
+  assert.deepEqual([t(ben).Done, t(ben).clinicNote], ['', 'called patient, new card scanned']);
+});
+
 test('mergeClinicWork: requests, Done (No only clears clinic-set Done), notes and payer notes; last row per Kind + Key wins', () => {
   const W = (Kind, Key, Value, When, o) => ({ Kind, Key, MRN: '', LASFIR: '', Value, Note: '', By: 'Front desk', When, ...(o || {}) });
   const work = [
@@ -265,7 +288,7 @@ test('mergeClinicWork: requests, Done (No only clears clinic-set Done), notes an
     // B: the clinic's Done from an earlier file. C, D: the admin's own Done. E: the admin marked it Done (pane, "Yes") after the export.
     tasks: [{ 'Task Key': 'A|Update benefits in NextGen', Done: '' }, { 'Task Key': 'B|Fix name in NextGen', Done: 'Yes (clinic San Rafael)' },
       { 'Task Key': 'C|Fix member ID in NextGen', Done: 'x' }, { 'Task Key': 'D|Add insurance in NextGen', Done: 'Yes' },
-      { 'Task Key': 'E|Fix member ID in NextGen', Done: 'Yes' }],
+      { 'Task Key': 'E|Fix member ID in NextGen', Done: 'Yes' }].map((t) => ({ ...t, 'Next Location': 'san rafael' })), // any case
     notes: [{ MRN: '900002', Location: 'San Rafael', Note: 'Admin copy', By: 'Clinic file San Rafael', When: '2026-10-23T08:00:00Z' }],
     payerNotes: [], now: TODAY,
   };
@@ -279,8 +302,9 @@ test('mergeClinicWork: requests, Done (No only clears clinic-set Done), notes an
   assert.deepEqual(m.payerNotes, [{ 'NextGen Payer': 'Cigna', Location: 'San Rafael', 'Card Says': 'Cigna Open Access Plus', Note: 'New cards', By: 'Front desk', When: '2026-10-22T17:12:00Z' }]);
   assert.deepEqual(Object.keys(m.notes[0]), R.CLINIC_NOTE_COLS);
   assert.deepEqual(Object.keys(m.payerNotes[0]), R.CLINIC_PAYER_NOTE_COLS);
-  assert.deepEqual(m.counts, { reverifyAdded: 1, reverifyRemoved: 1, doneSet: 1, doneCleared: 1, notes: 1, payerNotes: 1, skipped: 1, old: 0, applied: 11 });
-  assert.deepEqual(m.applied.find((r) => r.Kind === 'Payer note'), { Location: 'San Rafael', Kind: 'Payer note', Key: 'Cigna', When: '2026-10-22T17:12:00Z' });
+  assert.deepEqual(m.counts, { reverifyAdded: 1, reverifyRemoved: 1, doneSet: 1, doneCleared: 1, doneNotes: 0, tasksChanged: 2, notes: 1, payerNotes: 1, skipped: 1, otherClinic: 0, old: 0, applied: 11 });
+  assert.deepEqual(m.applied.find((r) => r.Kind === 'Payer note'), { Location: 'San Rafael', Kind: 'Payer note', Key: 'Cigna', When: '2026-10-22T17:12:00Z', Value: '' });
+  assert.deepEqual(m.applied.filter((r) => r.Kind === 'Task done').map((r) => r.Value), ['Yes', 'No', 'No', 'No', 'No', 'Yes'], 'the tick acted on');
   assert.deepEqual(Object.keys(m.applied[0]), R.CLINIC_APPLIED_COLS);
   // The sheet as XL.readWorkbook gives it (a grid, header first) merges the same; a newer blank note removes the row.
   const grid = [R.CLINIC_WORK_COLS, ...work.map((r) => R.CLINIC_WORK_COLS.map((c) => r[c]))];
@@ -293,7 +317,7 @@ test('mergeClinicWork: the same file sent again changes nothing; only newer rows
   const W = (Kind, Key, Value, When) => ({ Kind, Key, MRN: '', LASFIR: '', Value, Note: '', By: 'Front desk', When });
   const KEY = '900001|Fix member ID in NextGen';
   const fileA = [W('Task done', KEY, 'Yes', '2026-10-20T17:00:00Z'), W('Re-verify anyway', '900001', 'On', '2026-10-20T17:01:00Z')];
-  const ctx = { location: 'San Rafael', requests: [], tasks: [{ 'Task Key': KEY, Done: '' }], notes: [], payerNotes: [], applied: [], now: TODAY };
+  const ctx = { location: 'San Rafael', requests: [], tasks: [{ 'Task Key': KEY, Done: '', 'Next Location': 'San Rafael' }], notes: [], payerNotes: [], applied: [], now: TODAY };
   const first = R.mergeClinicWork(fileA, ctx);
   assert.deepEqual([...first.done], [[KEY, 'Yes (clinic San Rafael)']]);
   assert.equal(first.requests.length, 1);
@@ -304,8 +328,12 @@ test('mergeClinicWork: the same file sent again changes nothing; only newer rows
   assert.deepEqual(again.requests, [], 'the cancelled request is not added again');
   assert.deepEqual(again.notes.map((r) => r.Note), ['Card Monday'], 'the new row applies');
   assert.deepEqual([again.counts.old, again.counts.applied, again.counts.doneSet, again.counts.reverifyAdded], [2, 1, 0, 0]);
-  // A newer tick for the same task applies; another location's ledger does not block this one.
-  const later = R.mergeClinicWork([W('Task done', KEY, 'Yes', '2026-10-22T10:00:00Z')], { ...ctx, applied: again.applied });
+  // A newer row that still says Yes (the clinic only edited the done note) leaves the admin's reopened task open; the note applies.
+  const noteEdit = R.mergeClinicWork([{ ...W('Task done', KEY, 'Yes', '2026-10-22T09:00:00Z'), Note: 'new card scanned' }], { ...ctx, applied: again.applied });
+  assert.deepEqual([[...noteEdit.done], noteEdit.doneNotes.size, noteEdit.counts.applied], [[], 1, 1]);
+  // The clinic unticks and ticks again: each new tick applies; another location's ledger does not block this one.
+  const off = R.mergeClinicWork([W('Task done', KEY, 'No', '2026-10-22T09:30:00Z')], { ...ctx, applied: noteEdit.applied });
+  const later = R.mergeClinicWork([W('Task done', KEY, 'Yes', '2026-10-22T10:00:00Z')], { ...ctx, applied: off.applied });
   assert.deepEqual([...later.done], [[KEY, 'Yes (clinic San Rafael)']]);
   const elsewhere = R.mergeClinicWork(fileA, { ...ctx, location: 'Walnut Creek', applied: first.applied });
   assert.equal(elsewhere.counts.old, 0);

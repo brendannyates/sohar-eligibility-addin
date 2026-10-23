@@ -545,6 +545,59 @@
   const readClinicWorkApplied = () => readOwned('tblClinicWorkApplied'); // rules.CLINIC_APPLIED_COLS
   const writeClinicWorkApplied = (cols, rows) => writeAddinTable('Clinic Work Applied', 'tblClinicWorkApplied', cols, rows, false); // hidden: OWNED
 
+  // ---------- the Clinic Work Inbox: flow-owned ----------
+  // A Power Automate flow appends each clinic file's new Clinic Work rows here (rules.INBOX_COLS). The one table the
+  // add-in never rewrites: not in OWNED, never swapped, sorted, cleared or trimmed, because a stage-and-swap would race
+  // the flow and drop the rows it added meanwhile. The add-in creates it once (header only) and reads it; that is all.
+  const INBOX = { sheet: 'Clinic Work Inbox', table: 'tblClinicWorkInbox' };
+  /** Inbox rows as objects, or null when the table is not there yet (the pane then offers to set it up). */
+  async function readClinicInbox() {
+    if (!(await tableExists(INBOX.table))) return null;
+    return readTable(INBOX.table);
+  }
+  /**
+   * Create the inbox once: a visible sheet with the header row only, every column text ('@') so MRNs keep their leading
+   * zeros and When stays ISO text. Fail-safe: built on a hidden staging sheet under a staging table name, and named for
+   * real (sheet, then table, last) only when complete, so the flow can never find a half-made table. A failure leaves at
+   * most the hidden staging sheet, which the next try removes or finishes. Returns true when it made (or finished) the
+   * table, false when it was already there (it is then left exactly as it is).
+   */
+  async function createClinicInbox(cols) {
+    const failed = (s) => (e) => { e.message = `Could not set up the clinic inbox (${s}): ${e.message}. Nothing else in the workbook changed; try again.`; throw e; };
+    return run(async (ctx) => {
+      const wb = ctx.workbook;
+      const real = wb.tables.getItemOrNullObject(INBOX.table), stg = wb.tables.getItemOrNullObject(STG(INBOX.table));
+      const ws = wb.worksheets.getItemOrNullObject(INBOX.sheet), stage = wb.worksheets.getItemOrNullObject(STAGE_SHEET(INBOX.table));
+      real.load('isNullObject'); stg.load('isNullObject'); ws.load('isNullObject,id'); stage.load('isNullObject');
+      await ctx.sync().catch(failed('checking the workbook'));
+      if (!real.isNullObject) return false;
+      let home = null;
+      if (!stg.isNullObject) { home = stg.worksheet; home.load('id'); await ctx.sync().catch(failed('checking the workbook')); }
+      // A sheet with the inbox name that is not this setup's own (cut off after the sheet rename) belongs to someone.
+      if (!ws.isNullObject && !(home && home.id === ws.id)) {
+        throw new Error(`Could not set up the clinic inbox: this workbook already has a sheet named "${INBOX.sheet}" without the ${INBOX.table} table. Rename or delete that sheet, then set up the inbox again. Nothing was changed.`);
+      }
+      if (!home) {
+        if (!stage.isNullObject) wb.worksheets.getItem(STAGE_SHEET(INBOX.table)).delete(); // an earlier try cut off before its table
+        const s = wb.worksheets.add(STAGE_SHEET(INBOX.table));
+        s.visibility = Excel.SheetVisibility.hidden;
+        const rg = s.getRangeByIndexes(0, 0, 2, cols.length);
+        rg.numberFormat = [cols.map(() => '@'), cols.map(() => '@')];
+        rg.values = [cols, cols.map(() => '')];
+        s.tables.add(rg, true).name = STG(INBOX.table);
+        await ctx.sync().catch(failed('making the table'));
+        home = s;
+      }
+      home.visibility = Excel.SheetVisibility.visible;
+      home.name = INBOX.sheet;
+      wb.tables.getItem(STG(INBOX.table)).name = INBOX.table; // last: the flow only ever sees a complete table
+      await ctx.sync().catch(failed('naming the table'));
+      try { home.freezePanes.freezeRows(1); wb.tables.getItem(INBOX.table).getRange().format.autofitColumns(); await ctx.sync(); }
+      catch (e) { console.warn('clinic inbox formatting skipped', e); } // cosmetic only
+      return true;
+    });
+  }
+
   // Fee estimates (v0.11): read / write by short name (FEE_TABLES). Missing table = nothing saved yet (readOwned).
   function feeTable(kind) {
     const t = FEE_TABLES[kind];
@@ -793,6 +846,6 @@
     readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, writePayerMetrics,
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
-    writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
+    INBOX, readClinicInbox, createClinicInbox, writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

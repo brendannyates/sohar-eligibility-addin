@@ -53,9 +53,14 @@
     if (!d) return '';
     return `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}/${d.getUTCFullYear()}`;
   }
-  /** Local calendar day of a Date (or now) as a UTC-midnight Date, comparable with parseDate output. */
+  /**
+   * Local calendar day of a Date (or now) as a UTC-midnight Date, comparable with parseDate output. A Date already at UTC
+   * midnight is a day value (parseDate, or dayOf itself) and is kept, as core.dayOf does: converting it again west of UTC
+   * gave the day before, so yesterday's visit still counted as upcoming.
+   */
   function dayOf(d) {
     const x = d instanceof Date && !isNaN(d) ? d : new Date();
+    if (x.getUTCHours() === 0 && x.getUTCMinutes() === 0 && x.getUTCSeconds() === 0 && x.getUTCMilliseconds() === 0) return new Date(x.getTime());
     return new Date(Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()));
   }
   function localDate(d) {
@@ -108,17 +113,16 @@
   function xOf(p) { return (p && p.x && typeof p.x === 'object') ? p.x : {}; }
   const INACTIVE = /cancel|no\s*show|resched|deleted/i;
 
-  /** Upcoming appointments (date >= today), soonest first. Falls back to Next Appt / Next Event. */
-  function upcoming(p, today) {
+  /** Upcoming appointments (date >= day, a dayOf / parseDate day value), soonest first. Falls back to Next Appt / Next Event. */
+  function upcoming(p, day) {
     const x = xOf(p);
-    const t = dayOf(today);
     let list = Array.isArray(x.appointments) ? x.appointments.slice() : [];
     if (!list.length && p && str(p['Next Appt'])) {
       list = [{ date: p['Next Appt'], event: p['Next Event'], loc: x.location, rendering: x.rendering, authCd: x.authCd, authCdLstEnc: x.authCdLstEnc }];
     }
     return list
       .map((a) => Object.assign({}, a || {}, { _d: parseDate(a && a.date) }))
-      .filter((a) => a._d && a._d >= t && !INACTIVE.test(str(a.status)))
+      .filter((a) => a._d && a._d >= day && !INACTIVE.test(str(a.status)))
       .sort((a, b) => a._d - b._d || minutes(a.time) - minutes(b.time));
   }
   function apptAuth(a, x) {
@@ -691,8 +695,9 @@
   const CLINIC_NOTE_COLS = ['MRN', 'Location', 'Note', 'By', 'When'];
   const CLINIC_PAYER_NOTE_COLS = ['NextGen Payer', 'Location', 'Card Says', 'Note', 'By', 'When'];
   // Clinic Work rows already brought back (newest When per Location + Kind + Key), so a file sent again changes nothing.
-  // Kept 120 days by the row's When; an older file sent again is applied again.
-  const CLINIC_APPLIED_COLS = ['Location', 'Kind', 'Key', 'When'];
+  // Kept 120 days by the row's When; an older file sent again is applied again. Value: the Task done tick (Yes/No) last acted
+  // on, so a later note-only edit (which carries the old tick along) never redoes a Done the admin has changed since.
+  const CLINIC_APPLIED_COLS = ['Location', 'Kind', 'Key', 'When', 'Value'];
   const APPLIED_DAYS = 120;
   // Done set from a returned file. Marked, so a later clinic No clears only the clinic's own Done, never the admin's "Yes".
   const clinicDoneMark = (loc) => `Yes (clinic${str(loc) ? ` ${str(loc)}` : ''})`;
@@ -707,6 +712,17 @@
   const isOn = (v) => /^(on|yes|y|true|1|x)$/i.test(str(v));
   const workKind = (k) => Object.keys(WORK_KINDS).find((n) => low(WORK_KINDS[n]) === low(k)) || '';
   const workId = (kind, key) => `${kind}|${kind === 'payer' ? low(key) : str(key)}`;
+  const whenAt = (v) => Date.parse(str(v)); // a Clinic Work When (ISO) as ms; NaN when blank or unreadable
+  /** NextGen Tasks Clinic Note from a Task done row: "called patient, new card scanned (Front desk, San Rafael, 10/23)". */
+  function doneNote(r, loc) {
+    const t = new Date(whenAt(r.When));
+    const md = isNaN(t) ? '' : `${t.getMonth() + 1}/${t.getDate()}`;
+    const tail = [str(r.By), str(loc), md].filter(Boolean).join(', ');
+    return `${str(r.Note)}${tail ? ` (${tail})` : ''}`;
+  }
+  // The master workbook's Clinic Work Inbox: the Power Automate flow appends each clinic file's new Clinic Work rows with
+  // the file's Location, name and the time it copied them. Flow-owned: Sohar creates it once and reads it, never rewrites it.
+  const INBOX_COLS = ['Location'].concat(CLINIC_WORK_COLS, ['File', 'Received']);
 
   /** Table rows as objects: objects pass through; an array grid (XL.readWorkbook) takes its first non-empty row as the header. */
   function tableObjects(rows) {
@@ -838,9 +854,10 @@
       'It lists the patients whose next visit is at this clinic: their Sohar insurance results, benefits and what to do before the visit.',
       'To work the list, open Home > Clinic Template Tool. The pane shows Eligibility, Benefits and Payers.',
       'Patients show as LASFIR (first three letters of the last name, then of the first name) and MRN. The file has no patient names or dates of birth.',
-      'Tick tasks done, ask for a re-verify, or add a note in the pane. Your changes are saved on the Clinic Work sheet. Do not edit the hidden sheets.',
-      'This file has PHI (MRNs, insurance and appointments). Keep it in MHS OneDrive or Teams only.',
-      'When you are done, save the file and send it back to the admin through OneDrive or Teams. The admin brings your changes into Sohar.',
+      'Tick tasks done (with a short note if it helps), ask for a re-verify, or add a note in the pane. Your changes are saved on the Clinic Work sheet. Do not edit the hidden sheets.',
+      'This file has PHI (MRNs, insurance and appointments). Keep it in your clinic\'s folder in the Clinic Eligibility library, MHS OneDrive or Teams only.',
+      'Save the file in your clinic\'s folder in the Clinic Eligibility library. Excel on the web saves your changes on its own and the admin picks them up from there: you do not need to send the file back.',
+      'If the file is not in the library, or the admin asks for it, save it and send it back to the admin through OneDrive or Teams. The admin brings your changes into Sohar.',
     ];
     const sheets = [
       { name: SE_SHEETS.readMe, table: 'tblSERead', columns: ['Read Me'], rows: readMe.map((t) => ({ 'Read Me': t })), colWidths: [110] },
@@ -910,7 +927,8 @@
   /**
    * The clinic's view of an unpacked file at `now`: {rows (clinicRows + LASFIR), review (flag rows, then build review rows,
    * CLINIC_REVIEW_COLS + LASFIR + Source), flags (Map), benefits ({rows, pending}, benefitsView for the clinic's patients),
-   * tasks (buildTasks with Done from SE Done then Clinic Work; clinic: true on patient-facing types; doneBy), payers, notes
+   * tasks (buildTasks with Done from SE Done then Clinic Work; clinic: true on patient-facing types; doneBy; clinicNote, the
+   * Note on the task's Clinic Work "Task done" row), payers, notes
    * (Map MRN -> Clinic Work note), counts}. Clinic Work overrides Re-verify anyway, task Done and notes.
    */
   function clinicDerive(pack, work, now) {
@@ -952,10 +970,11 @@
       const k = str(t['Task Key']), was = sent.get(k) || '', cw = get('done', k);
       // SE Done holds the admin's Done, or a clinic tick brought back earlier (clinicDoneMark), which the clinic can still undo.
       const admin = isClinicDone(was) ? '' : was;
-      const clinicDone = !admin && (cw ? isOn(cw.Value) : !!was);
-      // Clinic No only undoes the clinic's own tick; the admin's Done stays.
+      // A blank Value is a note saved with the box never ticked here: Done stays as the file has it.
+      const clinicDone = !admin && (cw && cw.Value ? isOn(cw.Value) : !!was);
+      // Clinic No only undoes the clinic's own tick; the admin's Done stays. clinicNote: the clinic's own note (Clinic Work).
       return Object.assign(t, { Done: admin || (clinicDone ? was || 'Yes' : ''), doneBy: admin ? 'admin' : clinicDone ? 'clinic' : '',
-        clinic: CLINIC_TASK_TYPES.includes(t.Task), LASFIR: tags.get(who(t)) || '' });
+        clinic: CLINIC_TASK_TYPES.includes(t.Task), LASFIR: tags.get(who(t)) || '', clinicNote: cw ? cw.Note : '' });
     });
     const notes = new Map();
     for (const r of w.values()) if (r.kind === 'note' && r.Note && byKey.has(r.Key)) notes.set(r.Key, { Note: r.Note, By: r.By, When: r.When });
@@ -979,7 +998,7 @@
     const counts = {
       patients: rows.length, flagged: rows.filter((r) => r.Pills).length, review: review.length, high: review.filter((r) => r.Severity === 'High').length,
       tasks: tasks.length, openTasks: open.length, clinicTasks: open.filter((t) => t.clinic).length,
-      reverifyAnyway: rows.filter((r) => r['Re-verify Anyway']).length, notes: notes.size, payerNotes: payers.filter((p) => p.note).length, benefits: benefits.rows.length,
+      reverifyAnyway: rows.filter((r) => r['Re-verify Anyway']).length, notes: notes.size, taskNotes: tasks.filter((t) => t.clinicNote).length, payerNotes: payers.filter((p) => p.note).length, benefits: benefits.rows.length,
     };
     return { rows, review, flags, benefits, tasks, payers, notes, counts };
   }
@@ -987,7 +1006,8 @@
   /**
    * Clinic Work after a change (or a list of them): the row with the same Kind + Key is replaced and the new one goes last,
    * with When stamped (ISO; change.When or `when` or now) and By. change: {Kind, Key, MRN, LASFIR, Value, Note, By}.
-   * Returns rows as objects by CLINIC_WORK_COLS (other rows kept as they are, in order).
+   * A change that leaves out Value or Note keeps the earlier row's (ticking a task keeps its done note, saving the note keeps
+   * the tick). Returns rows as objects by CLINIC_WORK_COLS (other rows kept as they are, in order).
    */
   function workRows(work, change, when) {
     let rows = tableObjects(work).map((r) => Object.fromEntries(CLINIC_WORK_COLS.map((c) => [c, str(r[c])])));
@@ -997,8 +1017,11 @@
       if (!kind) throw new Error(`Clinic Work: "${str(ch.Kind)}" is not one of ${Object.values(WORK_KINDS).join(', ')}.`);
       if (!key) throw new Error(`Clinic Work: a ${WORK_KINDS[kind]} row needs a Key.`);
       const id = workId(kind, key);
+      const prev = rows.find((r) => workId(workKind(r.Kind), r.Key) === id) || {};
       rows = rows.filter((r) => workId(workKind(r.Kind), r.Key) !== id);
-      rows.push(Object.assign(Object.fromEntries(CLINIC_WORK_COLS.map((c) => [c, str(ch[c])])), { Kind: WORK_KINDS[kind], Key: key, When: str(ch.When) || stamp }));
+      const row = Object.fromEntries(CLINIC_WORK_COLS.map((c) => [c, str(ch[c])]));
+      for (const c of ['Value', 'Note']) if (ch[c] === undefined && prev[c]) row[c] = prev[c];
+      rows.push(Object.assign(row, { Kind: WORK_KINDS[kind], Key: key, When: str(ch.When) || stamp }));
     }
     return rows;
   }
@@ -1007,43 +1030,62 @@
    * Admin: a returned file's Clinic Work applied to the admin tables (pure; the caller writes them). ctx: {location,
    * requests (Re-verify Requests rows), tasks (NextGen Tasks rows, read fresh from the sheet), notes (Clinic Notes),
    * payerNotes (Clinic Payer Notes), applied (Clinic Work Applied rows), now}. Rows not newer than the last one brought back
-   * for the same Location + Kind + Key are left out (the same file sent again). Re-verify anyway: core.mergeClinicRequests,
-   * By "Clinic file <Location>". Task done Yes: Done "Yes (clinic <Location>)" on an open task; No clears Done only when it is
-   * that clinic mark (an admin "Yes" or "x" stays). Notes and payer notes: newest When per MRN (payer) + Location wins; a
-   * blank newest note removes the row. Returns {requests, done: Map(Task Key -> mark|''), notes, payerNotes, applied, counts}.
+   * for the same Location + Kind + Key, or older than APPLIED_DAYS, are left out (counts.old: the same file sent again).
+   * Re-verify anyway: core.mergeClinicRequests, By "Clinic file <Location>". Task done Yes: Done "Yes (clinic <Location>)" on
+   * an open task; No clears Done only when it is that clinic mark (an admin "Yes" or "x" stays); a blank Value leaves Done,
+   * and so does a Value the ledger says was already acted on (a note edit carries the tick along; the admin may have
+   * reopened the task since). Task done rows apply only to tasks whose Next Location is the file's (counts.otherClinic).
+   * A Task done row's Note goes to doneNotes (for the task's Clinic Note) whatever the Value; a blank Note changes nothing.
+   * Notes and payer notes: newest When per MRN (payer) + Location wins; a blank newest note removes the row. Returns
+   * {requests, done: Map(Task Key -> mark|''), doneNotes: Map(Task Key -> 'note (By, Location, M/D)'), notes, payerNotes,
+   * applied, counts}. counts.applied is every row newer than the ledger; clinicChanges(counts) is how many changed something
+   * (counts.tasksChanged: Task done rows that changed Done or the note).
    */
   function mergeClinicWork(work, ctx) {
     const c = ctx || {};
     const loc = str(c.location);
     const now = c.now instanceof Date && !isNaN(c.now) ? c.now : new Date();
-    const counts = { reverifyAdded: 0, reverifyRemoved: 0, doneSet: 0, doneCleared: 0, notes: 0, payerNotes: 0, skipped: 0, old: 0, applied: 0 };
+    const counts = { reverifyAdded: 0, reverifyRemoved: 0, doneSet: 0, doneCleared: 0, doneNotes: 0, tasksChanged: 0, notes: 0, payerNotes: 0, skipped: 0, otherClinic: 0, old: 0, applied: 0 };
     const seenId = (l, kind, key) => `${low(l)}|${workId(kind, key)}`;
+    const tick = (v) => (isOn(v) ? 'Yes' : str(v) ? 'No' : '');
     const seen = new Map();
     for (const r of tableObjects(c.applied)) {
       const kind = workKind(r.Kind), key = str(r.Key);
-      if (kind && key) seen.set(seenId(r.Location, kind, key), { Location: str(r.Location), Kind: WORK_KINDS[kind], Key: key, When: str(r.When) });
+      if (kind && key) seen.set(seenId(r.Location, kind, key), { Location: str(r.Location), Kind: WORK_KINDS[kind], Key: key, When: str(r.When), Value: tick(r.Value) });
     }
-    const w = [];
+    const keepFrom = new Date(now.getTime() - APPLIED_DAYS * 864e5).toISOString();
+    const w = [], acted = new Map(); // Task done row -> the tick acted on last time ('' when never)
     for (const r of lastWork(work).values()) {
       const id = seenId(loc, r.kind, r.Key), prev = seen.get(id);
-      if (prev && r.When <= prev.When) { counts.old++; continue; }
-      seen.set(id, { Location: loc, Kind: r.Kind, Key: r.Key, When: r.When });
+      // Older than the ledger keeps: it was brought back before (or is too old to act on), so trimming never re-applies it.
+      if (whenAt(r.When) < whenAt(keepFrom) || (prev && r.When <= prev.When)) { counts.old++; continue; }
+      const was = prev ? prev.Value : '';
+      seen.set(id, { Location: loc, Kind: r.Kind, Key: r.Key, When: r.When, Value: r.kind === 'done' ? tick(r.Value) || was : '' });
+      if (r.kind === 'done') acted.set(r, was);
       w.push(r);
     }
     counts.applied = w.length;
-    const keepFrom = new Date(now.getTime() - APPLIED_DAYS * 864e5).toISOString();
     const applied = [...seen.values()].filter((r) => r.When >= keepFrom);
     const of = (kind) => w.filter((r) => r.kind === kind);
     const m = C.mergeClinicRequests(c.requests || [], of('reverify').map((r) => ({ 'MRN': r.Key, 'Re-verify Anyway': isOn(r.Value) ? 'On' : 'Off', 'Requested': r.When })),
       `Clinic file${loc ? ` ${loc}` : ''}`);
     counts.reverifyAdded = m.added; counts.reverifyRemoved = m.removed;
-    const cur = new Map(tableObjects(c.tasks).map((t) => [str(t['Task Key']), str(t.Done)]));
-    const done = new Map();
+    const cur = new Map(tableObjects(c.tasks).map((t) => [str(t['Task Key']), t]));
+    const done = new Map(), doneNotes = new Map();
     for (const r of of('done')) {
       if (!cur.has(r.Key)) { counts.skipped++; continue; } // the task is gone (fixed, or the visit passed)
-      const d = cur.get(r.Key);
-      if (isOn(r.Value)) { if (!d) { done.set(r.Key, clinicDoneMark(loc)); counts.doneSet++; } }
-      else if (isClinicDone(d)) { done.set(r.Key, ''); counts.doneCleared++; }
+      const t = cur.get(r.Key), d = str(t.Done);
+      // Only the clinic of the task's next visit (the one its file was made for) can tick it; a row typed for another
+      // clinic's patient is left out. A file for every location ('' or All) can tick any task.
+      if (!allLocations(loc) && !sameLoc(t['Next Location'], loc)) { counts.otherClinic++; continue; }
+      // A blank Value is a note only (saved with the box never ticked): Done stays. So is a tick already acted on: the
+      // clinic only edited the note, and Done may have been changed on NextGen Tasks since.
+      const v = tick(r.Value), fresh = v !== acted.get(r);
+      if (fresh && v === 'Yes' && !d) { done.set(r.Key, clinicDoneMark(loc)); counts.doneSet++; }
+      else if (fresh && v === 'No' && isClinicDone(d)) { done.set(r.Key, ''); counts.doneCleared++; }
+      // A blank note never erases the one already on NextGen Tasks.
+      if (r.Note) { doneNotes.set(r.Key, doneNote(r, loc)); counts.doneNotes++; }
+      if (done.has(r.Key) || r.Note) counts.tasksChanged++; // a tick and its note are one change
     }
     const upsert = (prev, cols, list, idOf, toRow) => {
       const map = new Map();
@@ -1052,8 +1094,7 @@
       for (const r of list) {
         const o = toRow(r), id = idOf(o), old = map.get(id);
         if (old && str(old.When) > o.When) continue; // a newer note is already there
-        n++;
-        if (str(o.Note) || str(o['Card Says'])) map.set(id, o); else map.delete(id);
+        if (str(o.Note) || str(o['Card Says'])) { map.set(id, o); n++; } else if (map.delete(id)) n++; // a blank with nothing to remove changes nothing
       }
       return { rows: [...map.values()], n };
     };
@@ -1062,7 +1103,36 @@
     const payerNotes = upsert(c.payerNotes, CLINIC_PAYER_NOTE_COLS, of('payer'), (o) => `${low(o['NextGen Payer'])}|${low(o.Location)}`,
       (r) => ({ 'NextGen Payer': r.Key, 'Location': loc, 'Card Says': r.Value, 'Note': r.Note, 'By': r.By, 'When': r.When }));
     counts.notes = notes.n; counts.payerNotes = payerNotes.n;
-    return { requests: m.rows, done, notes: notes.rows, payerNotes: payerNotes.rows, applied, counts };
+    return { requests: m.rows, done, doneNotes, notes: notes.rows, payerNotes: payerNotes.rows, applied, counts };
+  }
+  /** How many Clinic Work rows changed something in mergeClinicWork's counts (a tick already acted on, or a blank note over none, did not). */
+  const clinicChanges = (n) => ['reverifyAdded', 'reverifyRemoved', 'tasksChanged', 'notes', 'payerNotes']
+    .reduce((k, c) => k + (Number(n && n[c]) || 0), 0);
+
+  /**
+   * Admin: the Clinic Work Inbox (tblClinicWorkInbox, appended by the Power Automate flow, INBOX_COLS) -> Map(Location ->
+   * Clinic Work rows), each Location in the order first seen and its rows oldest When first (so the newest per Kind + Key wins
+   * in mergeClinicWork). Rows with a blank Location, Kind, Key or When, an unknown Kind, or older than APPLIED_DAYS are left
+   * out; map.counts = {rows, blank, unknown, old}. Apply with mergeClinicWork per Location, threading requests, tasks,
+   * notes, payerNotes and applied: the ledger makes a re-read or a row delivered twice (inbox and file) apply once.
+   */
+  function inboxWork(rows, now) {
+    const at = now instanceof Date && !isNaN(now) ? now : new Date();
+    const keepFrom = at.getTime() - APPLIED_DAYS * 864e5;
+    const out = new Map(), names = new Map();
+    const counts = { rows: 0, blank: 0, unknown: 0, old: 0 };
+    for (const r of tableObjects(rows)) {
+      const loc = str(r.Location);
+      if (!loc || !str(r.Kind) || !str(r.Key) || !str(r.When)) { counts.blank++; continue; }
+      if (!workKind(r.Kind)) { counts.unknown++; continue; }
+      if (whenAt(r.When) < keepFrom) { counts.old++; continue; }
+      if (!names.has(low(loc))) { names.set(low(loc), loc); out.set(loc, []); }
+      out.get(names.get(low(loc))).push(Object.fromEntries(CLINIC_WORK_COLS.map((c) => [c, str(r[c])])));
+      counts.rows++;
+    }
+    for (const list of out.values()) list.sort((a, b) => (whenAt(a.When) || 0) - (whenAt(b.When) || 0));
+    out.counts = counts;
+    return out;
   }
 
   return {
@@ -1073,6 +1143,6 @@
     patientFlags, allFlags, reviewRows, clinicRows, clinicReviewRows, clinicEmail, payerEvidence, evidenceSummary,
     bestResult, lasfir, collapseFlags,
     CTT_EXTENSION, SE_SHEETS, CLINIC_WORK_COLS, CLINIC_NOTE_COLS, CLINIC_PAYER_NOTE_COLS, CLINIC_APPLIED_COLS, CLINIC_TASK_TYPES,
-    clinicPack, clinicUnpack, clinicDerive, workRows, mergeClinicWork, tableObjects,
+    clinicPack, clinicUnpack, clinicDerive, workRows, mergeClinicWork, clinicChanges, tableObjects, INBOX_COLS, inboxWork, APPLIED_DAYS,
   };
 });
