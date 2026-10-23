@@ -53,9 +53,14 @@
     if (!d) return '';
     return `${String(d.getUTCMonth() + 1).padStart(2, '0')}/${String(d.getUTCDate()).padStart(2, '0')}/${d.getUTCFullYear()}`;
   }
-  /** Local calendar day of a Date (or now) as a UTC-midnight Date, comparable with parseDate output. */
+  /**
+   * Local calendar day of a Date (or now) as a UTC-midnight Date, comparable with parseDate output. A Date already at UTC
+   * midnight is a day value (parseDate, or dayOf itself) and is kept, as core.dayOf does: converting it again west of UTC
+   * gave the day before, so yesterday's visit still counted as upcoming.
+   */
   function dayOf(d) {
     const x = d instanceof Date && !isNaN(d) ? d : new Date();
+    if (x.getUTCHours() === 0 && x.getUTCMinutes() === 0 && x.getUTCSeconds() === 0 && x.getUTCMilliseconds() === 0) return new Date(x.getTime());
     return new Date(Date.UTC(x.getFullYear(), x.getMonth(), x.getDate()));
   }
   function localDate(d) {
@@ -108,17 +113,16 @@
   function xOf(p) { return (p && p.x && typeof p.x === 'object') ? p.x : {}; }
   const INACTIVE = /cancel|no\s*show|resched|deleted/i;
 
-  /** Upcoming appointments (date >= today), soonest first. Falls back to Next Appt / Next Event. */
-  function upcoming(p, today) {
+  /** Upcoming appointments (date >= day, a dayOf / parseDate day value), soonest first. Falls back to Next Appt / Next Event. */
+  function upcoming(p, day) {
     const x = xOf(p);
-    const t = dayOf(today);
     let list = Array.isArray(x.appointments) ? x.appointments.slice() : [];
     if (!list.length && p && str(p['Next Appt'])) {
       list = [{ date: p['Next Appt'], event: p['Next Event'], loc: x.location, rendering: x.rendering, authCd: x.authCd, authCdLstEnc: x.authCdLstEnc }];
     }
     return list
       .map((a) => Object.assign({}, a || {}, { _d: parseDate(a && a.date) }))
-      .filter((a) => a._d && a._d >= t && !INACTIVE.test(str(a.status)))
+      .filter((a) => a._d && a._d >= day && !INACTIVE.test(str(a.status)))
       .sort((a, b) => a._d - b._d || minutes(a.time) - minutes(b.time));
   }
   function apptAuth(a, x) {
@@ -677,6 +681,485 @@
     return rows.map((v) => Object.fromEntries(head.map((h, i) => [h, v[i] == null ? '' : v[i]])));
   }
 
+  // ---------- Clinic Eligibility file (v0.14): central Sohar -> the clinic's Clinic Template Tool (CTT) ----------
+  // The file carries data only: the clinic's patients, Sohar results, build review, payer learnings and Done marks, minus
+  // patient and guarantor names and DOBs (LASFIR added). CTT re-derives rows, flags, benefits and tasks with this same
+  // rules.js and core.js (byte-identical copies) and sends the clinic's edits back on the Clinic Work sheet.
+  const CTT_EXTENSION = { id: 'cf213823-6d83-43e7-b7c9-37666b4d7c3d', version: '1.0.0.1' }; // CTT's installed Id / version
+  const SE_KIND = 'Clinic Eligibility', SE_FORMAT = '1';
+  const SE_SHEETS = { readMe: 'Read Me', work: 'Clinic Work', info: 'SE Info', patients: 'SE Patients', results: 'SE Results', review: 'SE Review',
+    payers: 'SE Payers', done: 'SE Done', rules: 'Payer Credential Rules' };
+  const CLINIC_WORK_COLS = ['Kind', 'Key', 'MRN', 'LASFIR', 'Value', 'Note', 'By', 'When'];
+  const WORK_KINDS = { reverify: 'Re-verify anyway', done: 'Task done', note: 'Note', payer: 'Payer note' };
+  // Admin-side tables filled from returned files (newest per MRN or payer + Location wins).
+  const CLINIC_NOTE_COLS = ['MRN', 'Location', 'Note', 'By', 'When'];
+  const CLINIC_PAYER_NOTE_COLS = ['NextGen Payer', 'Location', 'Card Says', 'Note', 'By', 'When'];
+  // Clinic Work rows already brought back (newest When per Location + Kind + Key), so a file sent again changes nothing.
+  // Kept 120 days by the row's When; an older file sent again is applied again. Value: the Task done tick (Yes/No) last acted
+  // on, so a later note-only edit (which carries the old tick along) never redoes a Done the admin has changed since.
+  const CLINIC_APPLIED_COLS = ['Location', 'Kind', 'Key', 'When', 'Value'];
+  const APPLIED_DAYS = 120;
+  // Done set from a returned file. Marked, so a later clinic No clears only the clinic's own Done, never the admin's "Yes".
+  const clinicDoneMark = (loc) => `Yes (clinic${str(loc) ? ` ${str(loc)}` : ''})`;
+  const isClinicDone = (v) => /^yes \(clinic\b[^)]*\)$/i.test(str(v));
+  // Tasks the clinic can do with the patient (the rest stay with the admin).
+  const CLINIC_TASK_TYPES = ['Add insurance in NextGen', 'Update insurance in NextGen', 'Fix member ID in NextGen', 'Fix name in NextGen',
+    'Update benefits in NextGen', 'Confirm self-pay or get card'];
+  const CELL_MAX = 32000; // Excel holds 32,767 characters a cell, and xlsx.js cuts a longer one silently
+  // Never in the file. Subscriber First / Last / DOB are the guarantor when "Use guarantor as subscriber" is on.
+  const PHI_COLS = ['Last Name', 'First Name', 'DOB', 'Zip', 'Subscriber First', 'Subscriber Last', 'Subscriber DOB'];
+  const SE_DEFAULTS = { sfhpProviders: [], reverifyDays: 7, reverifyNewMonth: false, approachingPct: 0.2, locationState: {}, defaultState: '' };
+  const isOn = (v) => /^(on|yes|y|true|1|x)$/i.test(str(v));
+  const workKind = (k) => Object.keys(WORK_KINDS).find((n) => low(WORK_KINDS[n]) === low(k)) || '';
+  const workId = (kind, key) => `${kind}|${kind === 'payer' ? low(key) : str(key)}`;
+  const whenAt = (v) => Date.parse(str(v)); // a Clinic Work When (ISO) as ms; NaN when blank or unreadable
+  /** NextGen Tasks Clinic Note from a Task done row: "called patient, new card scanned (Front desk, San Rafael, 10/23)". */
+  function doneNote(r, loc) {
+    const t = new Date(whenAt(r.When));
+    const md = isNaN(t) ? '' : `${t.getMonth() + 1}/${t.getDate()}`;
+    const tail = [str(r.By), str(loc), md].filter(Boolean).join(', ');
+    return `${str(r.Note)}${tail ? ` (${tail})` : ''}`;
+  }
+  // The master workbook's Clinic Work Inbox: the Power Automate flow appends each clinic file's new Clinic Work rows with
+  // the file's Location, name and the time it copied them. Flow-owned: Sohar creates it once and reads it, never rewrites it.
+  const INBOX_COLS = ['Location'].concat(CLINIC_WORK_COLS, ['File', 'Received']);
+
+  /** Table rows as objects: objects pass through; an array grid (XL.readWorkbook) takes its first non-empty row as the header. */
+  function tableObjects(rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    const first = list.find((r) => r != null);
+    if (!Array.isArray(first)) return list.filter((r) => r && typeof r === 'object');
+    const [head, ...body] = list.filter((r) => Array.isArray(r) && Array.from(r).some((v) => str(v) !== ''));
+    const h = Array.from(head || [], str);
+    return body.map((r) => Object.fromEntries(h.map((k, i) => [k, r[i] == null ? '' : r[i]]).filter(([k]) => k)));
+  }
+
+  // "Last, First" and "First Last" as whole words (and either in brackets, dropped whole) for one person; null when a part
+  // is blank. Whole words: patient "Le, Ed" must not hit provider "Cole, Edward MD".
+  const reEsc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  function nameRe(last, first) {
+    const l = reEsc(str(last)), f = reEsc(str(first));
+    if (!l || !f) return null;
+    const both = `(?<!\\p{L})(?:${l},\\s*${f}|${f}\\s+${l})(?!\\p{L})`;
+    return new RegExp(`\\s*\\(\\s*${both}\\s*\\)|${both}`, 'giu');
+  }
+  // Only free text can quote a name. Structured fields (provider, location, payer, member ID, x) feed the derivation as is.
+  const SCRUB_COLS = ['Action', 'Detail', 'Fix', 'Notes', 'Route Reason', 'Flags'];
+  // Core's guarantor Action quotes "(Last, First)"; either part can be blank (a one-word Guar Name), so it goes whatever it holds.
+  const GUAR_QUOTE = /(Found through the guarantor)\s*\([^()]*\)/g;
+  /** The free-text fields of r with the names in res ([[regex, replacement]]) and core's guarantor quote taken out. */
+  const scrubText = (s, res) => res.reduce((t, [re, word]) => t.replace(re, (m) => (m.trim()[0] === '(' ? '' : word)), s.replace(GUAR_QUOTE, '$1'));
+  // A typed note can name the patient by one name alone or quote the DOB, so the SE Done Clinic Note gets more than the
+  // full-name scrub: each name, and each part of one ("Smith-Jones", "De la Cruz"), as a whole word, and the DOB written
+  // as M/D/YY(YY) with / - or ., as YYYY-MM-DD, or with the month's name. Over-scrubbing a word ("Will") beats a leak.
+  function wordRes(last, first, word) {
+    const parts = [last, first].map(str).flatMap((n) => [n].concat(n.split(/[\s-]+/))).filter((n) => n.replace(/[^\p{L}]/gu, '').length >= 2);
+    return [...new Set(parts.map(low))].sort((a, b) => b.length - a.length)
+      .map((n) => [new RegExp(`(?<!\\p{L})${reEsc(n)}(?!\\p{L})`, 'giu'), word]);
+  }
+  const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
+  function dobRes(dob) {
+    const d = parseDate(dob);
+    if (!d) return [];
+    const y = d.getUTCFullYear(), m = d.getUTCMonth() + 1, day = d.getUTCDate();
+    const n0 = (v) => `0?${v}`, yr = `(?:${y}|${String(y).slice(2)})`;
+    const mon = `${MONTHS[m - 1].slice(0, 3)}${MONTHS[m - 1].slice(3) ? `(?:${MONTHS[m - 1].slice(3)})?` : ''}\\.?`;
+    const forms = [`${n0(m)}([/.-])${n0(day)}\\1${yr}`, `${y}-0?${m}-0?${day}`, `${mon}\\s+${n0(day)}(?:st|nd|rd|th)?,?\\s+${y}`, `${n0(day)}\\s+${mon},?\\s+${y}`];
+    return [[new RegExp(`(?<![\\d/.-])(?:${forms.join('|')})(?![\\d/-])`, 'gi'), '[date removed]']];
+  }
+  function scrub(r, res) {
+    const o = Object.assign({}, r);
+    for (const k of SCRUB_COLS) if (typeof o[k] === 'string') o[k] = scrubText(o[k], res);
+    return o;
+  }
+  function stripRecord(r, res, tag) {
+    const o = {};
+    for (const k of Object.keys(r || {})) if (k !== 'x' && !PHI_COLS.includes(k)) o[k] = r[k];
+    o.LASFIR = tag;
+    return scrub(o, res);
+  }
+
+  /** JSON for one Record cell. Too long: past appointments cut to the last 5 (future ones kept); still too long: an error. */
+  function recordCell(rec, loc, runDay) {
+    let s = JSON.stringify(rec);
+    const appts = rec.x && Array.isArray(rec.x.appointments) ? rec.x.appointments : null;
+    if (s.length >= CELL_MAX && appts) {
+      const day = (a) => parseDate(a && a.date);
+      const past = appts.filter((a) => day(a) && day(a) < runDay).sort((a, b) => day(a) - day(b));
+      const keep = new Set(past.slice(-5));
+      s = JSON.stringify(Object.assign({}, rec, { x: Object.assign({}, rec.x, { appointments: appts.filter((a) => !past.includes(a) || keep.has(a)) }) }));
+    }
+    if (s.length >= CELL_MAX) {
+      throw new Error(`Clinic file for ${loc}: ${C.idLabel(rec) || 'a record'} has too much data for one Excel cell (${s.length.toLocaleString('en-US')} characters; the limit is ${CELL_MAX.toLocaleString('en-US')}), even with past appointments cut to the last 5. The file was not made.`);
+    }
+    return s;
+  }
+
+  /** Rules / benefits settings that differ from the defaults (Config Re-verify days, SFHP providers, ...). */
+  function seSettings(cfg) {
+    const c = cfg || {};
+    const v = {
+      sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? +c.reverifyDays : 7,
+      reverifyNewMonth: !!(c.reverifyNewMonth != null ? c.reverifyNewMonth : c.reverify && c.reverify.newMonth),
+      approachingPct: c.approachingPct != null ? +c.approachingPct : 0.2, locationState: c.locationState || {}, defaultState: str(c.defaultState),
+    };
+    const out = {};
+    for (const k of Object.keys(SE_DEFAULTS)) if (JSON.stringify(v[k]) !== JSON.stringify(SE_DEFAULTS[k])) out[k] = v[k];
+    return out;
+  }
+
+  /**
+   * The Clinic Eligibility workbook for one location, as an XL.buildWorkbook spec plus {meta, name, counts}.
+   * src: {patients (in-scope, after the skip window), results (merged Sohar Results), review (build review), learningRows,
+   * metricRows, tasks (NextGen Tasks rows with Done), cfg, payerRuleRows, runAt, version}. Clinic = clinicSet membership
+   * (next visit at loc on runAt); unmatched and no-identifier results stay with the admin.
+   */
+  function clinicPack(loc, src) {
+    const s = src || {};
+    const location = str(loc);
+    if (allLocations(location)) throw new Error('Choose one location: a Clinic Template Tool file is for one clinic.');
+    const runAt = s.runAt instanceof Date && !isNaN(s.runAt) ? s.runAt : new Date();
+    const runDay = dayOf(runAt), runDate = fmtDate(runDay);
+    const set = clinicSet(location, s.patients, s.results, runAt);
+    const keys = new Set(set.map((e) => e.per));
+    const patients = [], results = [], carried = new Set();
+    const scrubs = new Map();
+    for (const { p, per, rows } of set) {
+      const x = xOf(p), g = x.guarantor;
+      const tag = lasfir(p['Last Name'], p['First Name']);
+      const res = [[nameRe(p['Last Name'], p['First Name']), tag], [g ? nameRe(g.lastName, g.firstName) : null, 'the guarantor']].filter((e) => e[0]);
+      const noteRes = res.concat(wordRes(p['Last Name'], p['First Name'], tag), g ? wordRes(g.lastName, g.firstName, 'the guarantor') : [],
+        dobRes(p.DOB), g ? dobRes(g.dob) : []);
+      scrubs.set(per, { res, tag, noteRes });
+      const rec = stripRecord(p, res, tag);
+      const xs = Object.assign({}, x);
+      delete xs.guarantor; delete xs.guarZip;
+      rec.x = xs;
+      patients.push({ Key: per, Record: recordCell(rec, location, runDay) });
+      for (const r of rows) {
+        const rr = stripRecord(r, res, tag);
+        rr.key = per; // the patient key travels on the record (results carry it as a non-column)
+        results.push({ Key: per, Record: recordCell(rr, location, runDay) });
+      }
+      for (const name of [p['Primary Payer'], p['Secondary Payer'] || x.secPayer]) if (str(name)) carried.add(low(name));
+    }
+    const review = (s.review || []).filter((r) => r && keys.has(str(r.MRN))).map((r) => {
+      const { res, tag } = scrubs.get(str(r.MRN));
+      const o = {};
+      for (const k of C.REVIEW_COLS) o[k] = r[k] == null ? '' : r[k];
+      // The build's name items quote the raw report name.
+      if (/^name /i.test(str(o.Issue))) o.Detail = 'Not shown in the clinic file (patient name).';
+      o.LASFIR = tag;
+      return { Key: str(r.MRN), Record: recordCell(scrub(o, res), location, runDay) };
+    });
+    const payers = new Map();
+    const addPayer = (r, part) => {
+      const k = low(r && r['NextGen Payer']);
+      if (!k || !carried.has(k)) return;
+      if (!payers.has(k)) payers.set(k, { 'NextGen Payer': str(r['NextGen Payer']), learning: null, metrics: null });
+      payers.get(k)[part] = r;
+    };
+    for (const r of s.learningRows || []) addPayer(r, 'learning');
+    for (const r of s.metricRows || []) addPayer(r, 'metrics');
+    // Done, and the Clinic Note the admin holds (the clinic's done note as brought back, or one typed on NextGen Tasks), so the
+    // clinic sees its note arrived. A note typed by hand can quote the patient, so names (whole or one alone) and DOBs go.
+    const done = (s.tasks || []).filter(Boolean).map((t) => [t, scrubs.get(keyOf(t)) || scrubs.get(str(t['Task Key']).split('|')[0])])
+      .filter(([t, sc]) => sc && (str(t.Done) || str(t['Clinic Note'])))
+      .map(([t, sc]) => ({ 'Task Key': str(t['Task Key']), 'Done': str(t.Done), 'Clinic Note': scrubText(str(t['Clinic Note']), sc.noteRes) }));
+    const ruleRows = (s.payerRuleRows || []).filter(Boolean);
+    const settings = seSettings(s.cfg);
+    const meta = { Kind: SE_KIND, Location: location, 'Run Date': runDate, 'Run At': runAt.toISOString(), 'Sohar Version': str(s.version), Format: SE_FORMAT,
+      Settings: JSON.stringify(settings) };
+    const readMe = [
+      `Clinic Eligibility file for ${location}, made ${runDate} by the central Sohar Eligibility admin.`,
+      'It lists the patients whose next visit is at this clinic: their Sohar insurance results, benefits and what to do before the visit.',
+      'To work the list, open Home > Clinic Template Tool. The pane shows Eligibility, Benefits and Payers.',
+      'Patients show as LASFIR (first three letters of the last name, then of the first name) and MRN. The file has no patient names or dates of birth.',
+      'Tick tasks done (with a short note if it helps), ask for a re-verify, or add a note in the pane. Your changes are saved on the Clinic Work sheet. Do not edit the hidden sheets.',
+      'This file has PHI (MRNs, insurance and appointments). Keep it in your clinic\'s folder in the Clinic Eligibility library, MHS OneDrive or Teams only.',
+      'Save the file in your clinic\'s folder in the Clinic Eligibility library. Excel on the web saves your changes on its own and the admin picks them up from there: you do not need to send the file back.',
+      'If the file is not in the library, or the admin asks for it, save it and send it back to the admin through OneDrive or Teams. The admin brings your changes into Sohar.',
+    ];
+    const sheets = [
+      { name: SE_SHEETS.readMe, table: 'tblSERead', columns: ['Read Me'], rows: readMe.map((t) => ({ 'Read Me': t })), colWidths: [110] },
+      { name: SE_SHEETS.work, table: 'tblClinicWork', columns: CLINIC_WORK_COLS, rows: [], textColumns: CLINIC_WORK_COLS },
+      { name: SE_SHEETS.info, table: 'tblSEInfo', columns: ['Setting', 'Value'], rows: Object.entries(meta).map(([k, v]) => ({ Setting: k, Value: v })), hidden: true },
+      { name: SE_SHEETS.patients, table: 'tblSEPatients', columns: ['Key', 'Record'], rows: patients, hidden: true },
+      { name: SE_SHEETS.results, table: 'tblSEResults', columns: ['Key', 'Record'], rows: results, hidden: true },
+      { name: SE_SHEETS.review, table: 'tblSEReview', columns: ['Key', 'Record'], rows: review, hidden: true },
+      { name: SE_SHEETS.payers, table: 'tblSEPayers', columns: ['Key', 'Record'],
+        rows: [...payers].map(([k, v]) => ({ Key: k, Record: recordCell(v, location, runDay) })), hidden: true },
+      { name: SE_SHEETS.done, table: 'tblSEDone', columns: ['Task Key', 'Done', 'Clinic Note'], rows: done, hidden: true },
+    ];
+    if (ruleRows.length) sheets.push({ name: SE_SHEETS.rules, table: 'tblPayerCredRules', columns: PR ? PR.HEADERS : Object.keys(ruleRows[0]), rows: ruleRows, hidden: true });
+    return {
+      meta, sheets, webExtension: Object.assign({}, CTT_EXTENSION), now: runAt,
+      name: `Clinic Eligibility - ${location.replace(/[\\/:*?"<>|]/g, '-')} ${localDate(runAt)}.xlsx`,
+      counts: { patients: patients.length, results: results.length, review: review.length, payers: payers.size, done: done.length, rules: ruleRows.length },
+    };
+  }
+
+  /**
+   * A Clinic Eligibility file's tables ({sheet name: rows}, rows as objects or an XL.readWorkbook grid) -> {meta, settings,
+   * patients, results, review, payers, done, payerRules}. Optional sheets may be missing. Not a Clinic Eligibility file, or
+   * a format this code does not read: a readable error.
+   */
+  function clinicUnpack(tables) {
+    const t = tables || {};
+    const find = (name) => { const k = Object.keys(t).find((n) => low(n) === low(name)); return k ? tableObjects(t[k]) : []; };
+    const info = find(SE_SHEETS.info);
+    if (!info.length) throw new Error('This is not a Clinic Eligibility file: it has no SE Info sheet. Ask the admin for a new file.');
+    const meta = {};
+    for (const r of info) if (str(r.Setting)) meta[str(r.Setting)] = str(r.Value);
+    if (meta.Kind !== SE_KIND) throw new Error(`This file is ${meta.Kind ? `a "${meta.Kind}" file` : 'not marked'}, not a Clinic Eligibility file. Ask the admin for a new file.`);
+    if (meta.Format !== SE_FORMAT) throw new Error(`This Clinic Eligibility file is format ${meta.Format || '(blank)'}; this add-in reads format ${SE_FORMAT}. Close and reopen the pane to update it, or ask the admin for a new file.`);
+    const json = (sheet, text, i) => {
+      try { return JSON.parse(text); } catch (e) { throw new Error(`The ${sheet} sheet, row ${i + 2}, cannot be read (${e.message}). Ask the admin for a new file.`); }
+    };
+    const records = (sheet) => find(sheet).map((r, i) => (str(r.Record) ? json(sheet, str(r.Record), i) : null)).filter((r) => r && typeof r === 'object');
+    const blank = Object.fromEntries(PHI_COLS.map((c) => [c, '']));
+    const settings = Object.assign(JSON.parse(JSON.stringify(SE_DEFAULTS)), meta.Settings ? json(SE_SHEETS.info, meta.Settings, info.findIndex((r) => str(r.Setting) === 'Settings')) : {});
+    delete meta.Settings;
+    return {
+      meta, settings,
+      // The stripped columns come back blank, so the rules see the same shape as admin rows.
+      patients: records(SE_SHEETS.patients).map((p) => Object.assign({}, blank, p)),
+      results: records(SE_SHEETS.results).map((r) => Object.assign({}, blank, r)),
+      review: records(SE_SHEETS.review),
+      payers: records(SE_SHEETS.payers),
+      // Clinic Note: files made before it was added have no such column (still Format 1), so it reads blank.
+      done: find(SE_SHEETS.done).map((r) => ({ 'Task Key': str(r['Task Key']), 'Done': str(r.Done), 'Clinic Note': str(r['Clinic Note']) })).filter((r) => r['Task Key']),
+      payerRules: payerRulesFrom(find(SE_SHEETS.rules)),
+    };
+  }
+
+  /** Clinic Work rows -> Map(kind|key -> row); the last row for each Kind + Key wins. Unknown kinds and blank keys are dropped. */
+  function lastWork(work) {
+    const m = new Map();
+    for (const r of tableObjects(work)) {
+      const kind = workKind(r.Kind), key = str(r.Key);
+      if (!kind || !key) continue;
+      const id = workId(kind, key);
+      m.delete(id);
+      m.set(id, Object.assign({ kind }, ...CLINIC_WORK_COLS.map((c) => ({ [c]: str(r[c]) })), { Kind: WORK_KINDS[kind] }));
+    }
+    return m;
+  }
+
+  /**
+   * The clinic's view of an unpacked file at `now`: {rows (clinicRows + LASFIR), review (flag rows, then build review rows,
+   * CLINIC_REVIEW_COLS + LASFIR + Source), flags (Map), benefits ({rows, pending}, benefitsView for the clinic's patients),
+   * tasks (buildTasks with Done from SE Done then Clinic Work; clinic: true on patient-facing types; doneBy; clinicNote, the
+   * Note on the task's Clinic Work "Task done" row; sentNote and Clinic Note, the admin's Clinic Note from SE Done), payers, notes
+   * (Map MRN -> Clinic Work note), counts}. Clinic Work overrides Re-verify anyway, task Done and notes.
+   */
+  function clinicDerive(pack, work, now) {
+    const pk = pack || {};
+    const today = now instanceof Date && !isNaN(now) ? now : new Date();
+    const st = Object.assign({}, SE_DEFAULTS, pk.settings || {});
+    const loc = str(pk.meta && pk.meta.Location);
+    const w = lastWork(work);
+    const get = (kind, key) => w.get(workId(kind, key));
+    const patients = (pk.patients || []).map((p) => {
+      const r = get('reverify', keyOf(p));
+      return r ? Object.assign({}, p, { x: Object.assign({}, xOf(p), { reverifyRequested: isOn(r.Value) }) }) : p;
+    });
+    const results = pk.results || [];
+    const tags = new Map(patients.map((p) => [keyOf(p), str(p.LASFIR)]));
+    const cfg = { today, sfhpProviders: st.sfhpProviders, reverifyDays: st.reverifyDays, reverifyNewMonth: !!st.reverifyNewMonth,
+      payerRules: pk.payerRules || [], locationState: st.locationState };
+    const all = allFlags(patients, results, cfg);
+    const rows = clinicRows(loc, patients, results, all, today);
+    const byKey = new Map();
+    for (const r of rows) { r.LASFIR = tags.get(r.key) || ''; byKey.set(r.key, r); }
+    // A patient whose visits here have all passed since the export drops out of everything.
+    const flags = new Map([...all].filter(([k]) => byKey.has(k)));
+    const review = clinicReviewRows(loc, patients, results, flags, today).map((r) => Object.assign(r, { LASFIR: tags.get(r.MRN) || '', Source: 'Flag' }))
+      .concat((pk.review || []).filter((r) => byKey.has(str(r.MRN))).map((r) => {
+        const c = byKey.get(str(r.MRN));
+        return { 'Appt Date': c['Next Appt'], 'Severity': str(r.Severity), 'Pill': '', 'Issue': str(r.Issue), 'MRN': str(r.MRN), 'Last Name': '', 'First Name': '',
+          'Event': c['Next Event'], 'Rendering': c['Next Provider'], 'Location': c.Location, 'Detail': str(r.Detail), 'Fix': str(r.Fix), 'Link': '',
+          'Run Date': c['Run Date'], LASFIR: c.LASFIR, Source: 'Build' };
+      }));
+    const pers = new Map(rows.map((r) => [r['Per Nbr'], r.LASFIR]));
+    const view = C.benefitsView(results);
+    const benefits = { rows: view.rows.filter((b) => pers.has(str(b['Per Nbr']))).map((b) => Object.assign(b, { LASFIR: pers.get(str(b['Per Nbr'])) })),
+      pending: (view.pending || []).filter((r) => pers.has(str(r['Per Nbr']))) };
+    const sent = new Map((pk.done || []).map((d) => [str(d['Task Key']), str(d.Done)]).filter((e) => e[0] && e[1]));
+    const sentNotes = new Map((pk.done || []).map((d) => [str(d['Task Key']), str(d['Clinic Note'])]).filter((e) => e[0] && e[1]));
+    // A Task Key starts with the patient key (the MRN column can differ for a shared MRN).
+    const who = (t) => str(t['Task Key']).split('|')[0];
+    const tasks = C.buildTasks(results).filter((t) => byKey.has(who(t))).map((t) => {
+      const k = str(t['Task Key']), was = sent.get(k) || '', cw = get('done', k);
+      // SE Done holds the admin's Done, or a clinic tick brought back earlier (clinicDoneMark), which the clinic can still undo.
+      const admin = isClinicDone(was) ? '' : was;
+      // A blank Value is a note saved with the box never ticked here: Done stays as the file has it.
+      const clinicDone = !admin && (cw && cw.Value ? isOn(cw.Value) : !!was);
+      // Clinic No only undoes the clinic's own tick; the admin's Done stays. clinicNote: the clinic's own note (Clinic Work).
+      // sentNote: the Clinic Note the admin had when the file was made ('note (By, Location, M/D)'), whatever the clinic edits.
+      const sentNote = sentNotes.get(k) || '';
+      return Object.assign(t, { Done: admin || (clinicDone ? was || 'Yes' : ''), 'Clinic Note': sentNote, doneBy: admin ? 'admin' : clinicDone ? 'clinic' : '',
+        clinic: CLINIC_TASK_TYPES.includes(t.Task), LASFIR: tags.get(who(t)) || '', clinicNote: cw ? cw.Note : '', sentNote });
+    });
+    const notes = new Map();
+    for (const r of w.values()) if (r.kind === 'note' && r.Note && byKey.has(r.Key)) notes.set(r.Key, { Note: r.Note, By: r.By, When: r.When });
+    const carried = new Map();
+    for (const p of patients) {
+      if (!byKey.has(keyOf(p))) continue;
+      for (const name of [p['Primary Payer'], p['Secondary Payer'] || xOf(p).secPayer]) {
+        const k = low(name);
+        if (!k || isSelfPay(name)) continue;
+        if (!carried.has(k)) carried.set(k, { payer: str(name), keys: new Set() });
+        carried.get(k).keys.add(keyOf(p));
+      }
+    }
+    const recs = new Map((pk.payers || []).map((r) => [low(r['NextGen Payer']), r]));
+    const payers = [...carried].map(([k, c]) => {
+      const rec = recs.get(k) || {}, n = get('payer', c.payer);
+      return { key: k, payer: c.payer, patients: c.keys.size, learning: rec.learning || null, metrics: rec.metrics || null,
+        note: n ? { cardSays: n.Value, note: n.Note, by: n.By, when: n.When } : null };
+    }).sort((a, b) => b.patients - a.patients || a.payer.localeCompare(b.payer));
+    const open = tasks.filter((t) => !t.Done);
+    const counts = {
+      patients: rows.length, flagged: rows.filter((r) => r.Pills).length, review: review.length, high: review.filter((r) => r.Severity === 'High').length,
+      tasks: tasks.length, openTasks: open.length, clinicTasks: open.filter((t) => t.clinic).length,
+      reverifyAnyway: rows.filter((r) => r['Re-verify Anyway']).length, notes: notes.size, taskNotes: tasks.filter((t) => t.clinicNote).length, sentNotes: tasks.filter((t) => t.sentNote).length, payerNotes: payers.filter((p) => p.note).length, benefits: benefits.rows.length,
+    };
+    return { rows, review, flags, benefits, tasks, payers, notes, counts };
+  }
+
+  /**
+   * Clinic Work after a change (or a list of them): the row with the same Kind + Key is replaced and the new one goes last,
+   * with When stamped (ISO; change.When or `when` or now) and By. change: {Kind, Key, MRN, LASFIR, Value, Note, By}.
+   * A change that leaves out Value or Note keeps the earlier row's (ticking a task keeps its done note, saving the note keeps
+   * the tick). Returns rows as objects by CLINIC_WORK_COLS (other rows kept as they are, in order).
+   */
+  function workRows(work, change, when) {
+    let rows = tableObjects(work).map((r) => Object.fromEntries(CLINIC_WORK_COLS.map((c) => [c, str(r[c])])));
+    const stamp = (when instanceof Date && !isNaN(when) ? when : new Date()).toISOString();
+    for (const ch of (Array.isArray(change) ? change : [change]).filter(Boolean)) {
+      const kind = workKind(ch.Kind), key = str(ch.Key);
+      if (!kind) throw new Error(`Clinic Work: "${str(ch.Kind)}" is not one of ${Object.values(WORK_KINDS).join(', ')}.`);
+      if (!key) throw new Error(`Clinic Work: a ${WORK_KINDS[kind]} row needs a Key.`);
+      const id = workId(kind, key);
+      const prev = rows.find((r) => workId(workKind(r.Kind), r.Key) === id) || {};
+      rows = rows.filter((r) => workId(workKind(r.Kind), r.Key) !== id);
+      const row = Object.fromEntries(CLINIC_WORK_COLS.map((c) => [c, str(ch[c])]));
+      for (const c of ['Value', 'Note']) if (ch[c] === undefined && prev[c]) row[c] = prev[c];
+      rows.push(Object.assign(row, { Kind: WORK_KINDS[kind], Key: key, When: str(ch.When) || stamp }));
+    }
+    return rows;
+  }
+
+  /**
+   * Admin: a returned file's Clinic Work applied to the admin tables (pure; the caller writes them). ctx: {location,
+   * requests (Re-verify Requests rows), tasks (NextGen Tasks rows, read fresh from the sheet), notes (Clinic Notes),
+   * payerNotes (Clinic Payer Notes), applied (Clinic Work Applied rows), now}. Rows not newer than the last one brought back
+   * for the same Location + Kind + Key, or older than APPLIED_DAYS, are left out (counts.old: the same file sent again).
+   * Re-verify anyway: core.mergeClinicRequests, By "Clinic file <Location>". Task done Yes: Done "Yes (clinic <Location>)" on
+   * an open task; No clears Done only when it is that clinic mark (an admin "Yes" or "x" stays); a blank Value leaves Done,
+   * and so does a Value the ledger says was already acted on (a note edit carries the tick along; the admin may have
+   * reopened the task since). Task done rows apply only to tasks whose Next Location is the file's (counts.otherClinic).
+   * A Task done row's Note goes to doneNotes (for the task's Clinic Note) whatever the Value; a blank Note changes nothing.
+   * Notes and payer notes: newest When per MRN (payer) + Location wins; a blank newest note removes the row. Returns
+   * {requests, done: Map(Task Key -> mark|''), doneNotes: Map(Task Key -> 'note (By, Location, M/D)'), notes, payerNotes,
+   * applied, counts}. counts.applied is every row newer than the ledger; clinicChanges(counts) is how many changed something
+   * (counts.tasksChanged: Task done rows that changed Done or the note).
+   */
+  function mergeClinicWork(work, ctx) {
+    const c = ctx || {};
+    const loc = str(c.location);
+    const now = c.now instanceof Date && !isNaN(c.now) ? c.now : new Date();
+    const counts = { reverifyAdded: 0, reverifyRemoved: 0, doneSet: 0, doneCleared: 0, doneNotes: 0, tasksChanged: 0, notes: 0, payerNotes: 0, skipped: 0, otherClinic: 0, old: 0, applied: 0 };
+    const seenId = (l, kind, key) => `${low(l)}|${workId(kind, key)}`;
+    const tick = (v) => (isOn(v) ? 'Yes' : str(v) ? 'No' : '');
+    const seen = new Map();
+    for (const r of tableObjects(c.applied)) {
+      const kind = workKind(r.Kind), key = str(r.Key);
+      if (kind && key) seen.set(seenId(r.Location, kind, key), { Location: str(r.Location), Kind: WORK_KINDS[kind], Key: key, When: str(r.When), Value: tick(r.Value) });
+    }
+    const keepFrom = new Date(now.getTime() - APPLIED_DAYS * 864e5).toISOString();
+    const w = [], acted = new Map(); // Task done row -> the tick acted on last time ('' when never)
+    for (const r of lastWork(work).values()) {
+      const id = seenId(loc, r.kind, r.Key), prev = seen.get(id);
+      // Older than the ledger keeps: it was brought back before (or is too old to act on), so trimming never re-applies it.
+      if (whenAt(r.When) < whenAt(keepFrom) || (prev && r.When <= prev.When)) { counts.old++; continue; }
+      const was = prev ? prev.Value : '';
+      seen.set(id, { Location: loc, Kind: r.Kind, Key: r.Key, When: r.When, Value: r.kind === 'done' ? tick(r.Value) || was : '' });
+      if (r.kind === 'done') acted.set(r, was);
+      w.push(r);
+    }
+    counts.applied = w.length;
+    const applied = [...seen.values()].filter((r) => r.When >= keepFrom);
+    const of = (kind) => w.filter((r) => r.kind === kind);
+    const m = C.mergeClinicRequests(c.requests || [], of('reverify').map((r) => ({ 'MRN': r.Key, 'Re-verify Anyway': isOn(r.Value) ? 'On' : 'Off', 'Requested': r.When })),
+      `Clinic file${loc ? ` ${loc}` : ''}`);
+    counts.reverifyAdded = m.added; counts.reverifyRemoved = m.removed;
+    const cur = new Map(tableObjects(c.tasks).map((t) => [str(t['Task Key']), t]));
+    const done = new Map(), doneNotes = new Map();
+    for (const r of of('done')) {
+      if (!cur.has(r.Key)) { counts.skipped++; continue; } // the task is gone (fixed, or the visit passed)
+      const t = cur.get(r.Key), d = str(t.Done);
+      // Only the clinic of the task's next visit (the one its file was made for) can tick it; a row typed for another
+      // clinic's patient is left out. A file for every location ('' or All) can tick any task.
+      if (!allLocations(loc) && !sameLoc(t['Next Location'], loc)) { counts.otherClinic++; continue; }
+      // A blank Value is a note only (saved with the box never ticked): Done stays. So is a tick already acted on: the
+      // clinic only edited the note, and Done may have been changed on NextGen Tasks since.
+      const v = tick(r.Value), fresh = v !== acted.get(r);
+      if (fresh && v === 'Yes' && !d) { done.set(r.Key, clinicDoneMark(loc)); counts.doneSet++; }
+      else if (fresh && v === 'No' && isClinicDone(d)) { done.set(r.Key, ''); counts.doneCleared++; }
+      // A blank note never erases the one already on NextGen Tasks.
+      if (r.Note) { doneNotes.set(r.Key, doneNote(r, loc)); counts.doneNotes++; }
+      if (done.has(r.Key) || r.Note) counts.tasksChanged++; // a tick and its note are one change
+    }
+    const upsert = (prev, cols, list, idOf, toRow) => {
+      const map = new Map();
+      for (const r of tableObjects(prev)) { const o = Object.fromEntries(cols.map((k) => [k, str(r[k])])); map.set(idOf(o), o); }
+      let n = 0;
+      for (const r of list) {
+        const o = toRow(r), id = idOf(o), old = map.get(id);
+        if (old && str(old.When) > o.When) continue; // a newer note is already there
+        if (str(o.Note) || str(o['Card Says'])) { map.set(id, o); n++; } else if (map.delete(id)) n++; // a blank with nothing to remove changes nothing
+      }
+      return { rows: [...map.values()], n };
+    };
+    const notes = upsert(c.notes, CLINIC_NOTE_COLS, of('note'), (o) => `${o.MRN}|${low(o.Location)}`,
+      (r) => ({ 'MRN': r.Key, 'Location': loc, 'Note': r.Note || r.Value, 'By': r.By, 'When': r.When }));
+    const payerNotes = upsert(c.payerNotes, CLINIC_PAYER_NOTE_COLS, of('payer'), (o) => `${low(o['NextGen Payer'])}|${low(o.Location)}`,
+      (r) => ({ 'NextGen Payer': r.Key, 'Location': loc, 'Card Says': r.Value, 'Note': r.Note, 'By': r.By, 'When': r.When }));
+    counts.notes = notes.n; counts.payerNotes = payerNotes.n;
+    return { requests: m.rows, done, doneNotes, notes: notes.rows, payerNotes: payerNotes.rows, applied, counts };
+  }
+  /** How many Clinic Work rows changed something in mergeClinicWork's counts (a tick already acted on, or a blank note over none, did not). */
+  const clinicChanges = (n) => ['reverifyAdded', 'reverifyRemoved', 'tasksChanged', 'notes', 'payerNotes']
+    .reduce((k, c) => k + (Number(n && n[c]) || 0), 0);
+
+  /**
+   * Admin: the Clinic Work Inbox (tblClinicWorkInbox, appended by the Power Automate flow, INBOX_COLS) -> Map(Location ->
+   * Clinic Work rows), each Location in the order first seen and its rows oldest When first (so the newest per Kind + Key wins
+   * in mergeClinicWork). Rows with a blank Location, Kind, Key or When, an unknown Kind, or older than APPLIED_DAYS are left
+   * out; map.counts = {rows, blank, unknown, old}. Apply with mergeClinicWork per Location, threading requests, tasks,
+   * notes, payerNotes and applied: the ledger makes a re-read or a row delivered twice (inbox and file) apply once.
+   */
+  function inboxWork(rows, now) {
+    const at = now instanceof Date && !isNaN(now) ? now : new Date();
+    const keepFrom = at.getTime() - APPLIED_DAYS * 864e5;
+    const out = new Map(), names = new Map();
+    const counts = { rows: 0, blank: 0, unknown: 0, old: 0 };
+    for (const r of tableObjects(rows)) {
+      const loc = str(r.Location);
+      if (!loc || !str(r.Kind) || !str(r.Key) || !str(r.When)) { counts.blank++; continue; }
+      if (!workKind(r.Kind)) { counts.unknown++; continue; }
+      if (whenAt(r.When) < keepFrom) { counts.old++; continue; }
+      if (!names.has(low(loc))) { names.set(low(loc), loc); out.set(loc, []); }
+      out.get(names.get(low(loc))).push(Object.fromEntries(CLINIC_WORK_COLS.map((c) => [c, str(r[c])])));
+      counts.rows++;
+    }
+    for (const list of out.values()) list.sort((a, b) => (whenAt(a.When) || 0) - (whenAt(b.When) || 0));
+    out.counts = counts;
+    return out;
+  }
+
   return {
     payerRuleRows,
     REVERIFY_URL, PILLS, CLINIC_COLS, CLINIC_REVIEW_COLS, CLINIC_REQUEST_COLS, PAYER_EVIDENCE_COLS,
@@ -684,5 +1167,7 @@
     payerRulesFrom,
     patientFlags, allFlags, reviewRows, clinicRows, clinicReviewRows, clinicEmail, payerEvidence, evidenceSummary,
     bestResult, lasfir, collapseFlags,
+    CTT_EXTENSION, SE_SHEETS, CLINIC_WORK_COLS, CLINIC_NOTE_COLS, CLINIC_PAYER_NOTE_COLS, CLINIC_APPLIED_COLS, CLINIC_TASK_TYPES,
+    clinicPack, clinicUnpack, clinicDerive, workRows, mergeClinicWork, clinicChanges, tableObjects, INBOX_COLS, inboxWork, APPLIED_DAYS,
   };
 });

@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.13.0';
+  const VERSION = '0.14.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -18,7 +18,9 @@
     fees: null,
     // v0.12: Per Nbr -> patient key (MRN) from the last build, for converting rows saved before v0.12; skip window
     // lists; guarantor requests (active Map) and candidates; payer tests; metrics; guarantor themes.
-    perToKey: new Map(), skipped: [], requestedAnyway: [], guarantorActive: new Map(), guarantorCandidates: [], payerTests: [], metrics: null, themes: null };
+    perToKey: new Map(), skipped: [], requestedAnyway: [], guarantorActive: new Map(), guarantorCandidates: [], payerTests: [], metrics: null, themes: null,
+    // v0.14: Clinic Notes / Clinic Payer Notes rows brought back from Clinic Eligibility files.
+    clinicNotes: [], clinicPayerNotes: [] };
   const $ = (id) => document.getElementById(id);
 
   // ---------- boot ----------
@@ -77,13 +79,14 @@
     try {
       const rows = await X.readImportRows();
       const det = C.detectHeader(rows);
-      if (!det || det.missing.length || det.dataEnd <= det.headerRow + 1) return;
+      if (!det || det.missing.length || det.dataEnd <= det.headerRow + 1) { await loadInbox(); return; }
       setStatus('Loading what is already in this workbook…', '');
       await loadConfig();
       await refreshAll();
     } catch (e) {
       console.error(e);
       setStatus(`Opened, but loading stopped: ${e.message}`, 'bad');
+      await loadInbox(); // its own errors stay in its box
     }
   }
 
@@ -91,8 +94,9 @@
   async function refreshAll() {
     if (state.fees) state.fees.loaded = false; // fee estimates (On only): pick up edits made on the fee sheets
     await loadPayerRules(); // esketamine payer credential rules: pick up edits made on the sheet
+    await loadClinicNotes();
     await scan();
-    if ($('btnBuild').disabled) return;
+    if ($('btnBuild').disabled) { await loadInbox(); return; }
     await build({ deferRules: true });
     const saved = await X.readUploads();
     let did = 'patient list and Sohar imports built';
@@ -108,6 +112,7 @@
       note('resultsResult', 'The Sohar Results sheet has results from an earlier version of this add-in, but the Sohar files themselves were not saved in this workbook. Drop the Sohar outputs here again so follow-ups and benefits are current.', 'warn');
     }
     await refreshRules();
+    await loadInbox(); // after the tasks are built: its count is a dry run of the merge against them
     const last = saved.map((s) => String(s.Uploaded || '')).sort().pop();
     await stampUpdated(`${did}${last ? `. Last Sohar upload ${fmtStamp(new Date(last))}` : ''}`);
   }
@@ -205,9 +210,19 @@
       else if (b && b.id === 'btnGuarNo') { $('guarBox').hidden = true; state.guarantorDismissed = true; }
     });
     dropZone('dropClinicBack', 'fileClinicBack', (files) => guard(() => bringBackClinicFiles(files), 'clinicFilesNote'));
+    $('inboxBox').addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      // loadInbox redraws the box and the pressed button with it: put focus where the result is (or the new button).
+      const refocus = (id) => () => { const el = $(id) || $('clinicFilesNote'); if (el) el.focus(); };
+      if (b.id === 'btnInboxApply') guard(applyInbox, 'clinicFilesNote').then(refocus('clinicFilesNote'));
+      else if (b.id === 'btnInboxSetup') guard(setupInbox, 'clinicFilesNote').then(refocus('clinicFilesNote'));
+      else if (b.id === 'btnInboxCheck') guard(loadInbox, 'clinicFilesNote').then(refocus('btnInboxCheck'));
+      else if (b.dataset.goto) X.activate(b.dataset.goto);
+    });
     dropZone('dropCred', 'fileCred', (files) => guard(() => uploadPayerRules(files), 'credStatus'));
     $('btnCredRefresh').addEventListener('click', () => guard(async () => { await loadPayerRules(); await refreshRules(); renderCredStatus(); }, 'credStatus'));
-    $('learnBox').addEventListener('click', (e) => { const b = e.target.closest('[data-goto]'); if (b) X.activate(b.dataset.goto); });
+    ['learnBox', 'clinicNotesBox', 'payerNotesBox'].forEach((id) => $(id).addEventListener('click', (e) => { const b = e.target.closest('[data-goto]'); if (b) X.activate(b.dataset.goto); }));
     $('btnDlVer').addEventListener('click', () => guard(() => download('verification'), 'preflight'));
     $('btnDlDisc').addEventListener('click', () => guard(() => download('discovery'), 'preflight'));
     dropZone('dropReport', 'fileImport', (files) => guard(() => uploadImport(files), 'scanResult'));
@@ -220,7 +235,7 @@
     $('btnDlVerFail').addEventListener('click', () => guard(downloadVerifyFailed, 'resultsResult'));
     $('btnDlFinal').addEventListener('click', () => guard(downloadTrackerFile, 'benBox'));
     $('btnClearSaved').addEventListener('click', () => guard(clearSaved, 'resultsResult'));
-    $('btnDlTasks').addEventListener('click',() => guard(async () => saveCSV(C.fileName('tasks'), C.TASK_COLS, await currentTasks(), 'resultsResult'), 'resultsResult'));
+    $('btnDlTasks').addEventListener('click',() => guard(async () => saveCSV(C.fileName('tasks'), C.TASK_COLS, await currentTasks(), 'resultsResult', { safe: true }), 'resultsResult'));
     $('btnFull').addEventListener('click', () => guard(() => openFull(), 'resultsResult'));
     $('btnIr').addEventListener('click', () => $('fileIr').click());
     $('fileIr').addEventListener('change', (e) => guard(() => uploadIr(e.target), 'irResult'));
@@ -755,24 +770,154 @@
     setCurrent(2);
   }
 
-  /** Clinic files sent back: their Clinic Requests ticks are merged into the Re-verify Requests, then rebuild. */
+  /**
+   * Clinic files sent back. A Clinic Eligibility file (Clinic Template Tool) has Clinic Work: rules.mergeClinicWork applies
+   * its re-verify ticks, tasks done, notes and payer notes. An older Sohar clinic file has Clinic Requests: its ticks go into
+   * the Re-verify Requests. Every file is read before anything is saved, so a bad file leaves the workbook as it was.
+   */
   async function bringBackClinicFiles(files) {
-    let added = 0, removed = 0, read = 0;
-    for (const f of files) {
-      if (!/\.xls[xm]$/i.test(f.name)) throw new Error(`${f.name} is not a clinic file (.xlsx).`);
-      const wb = await XL.readWorkbook(new Uint8Array(await f.arrayBuffer()));
-      const sheet = wb.sheets.find((x) => /^clinic requests$/i.test(x.name));
-      const info = wb.sheets.find((x) => /^clinic info$/i.test(x.name));
-      if (!sheet) throw new Error(`${f.name} has no Clinic Requests sheet. Use a clinic file saved by this version of the add-in.`);
-      const [hdr, ...body] = sheet.rows.filter((r) => (r || []).some((v) => v !== '' && v != null));
-      const rows = body.map((r) => Object.fromEntries((hdr || []).map((h, j) => [String(h).trim(), r[j] == null ? '' : String(r[j])])));
-      const loc = info && info.rows[1] ? String(info.rows[1][(info.rows[0] || []).indexOf('Location')] || '') : '';
-      const m = C.mergeClinicRequests(await X.readReverifyRequests(), rows, `Clinic file${loc ? ` ${loc}` : ''}`);
-      await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, m.rows);
-      added += m.added; removed += m.removed; read++;
+    const sheetOf = (wb, name) => wb.sheets.find((x) => x.name.trim().toLowerCase() === name.toLowerCase());
+    const s = clinicMerge(await X.readReverifyRequests());
+    try {
+      for (const f of files) {
+        if (!/\.xls[xm]$/i.test(f.name)) throw new Error(`${f.name} is not a clinic file (.xlsx).`);
+        const wb = await XL.readWorkbook(new Uint8Array(await f.arrayBuffer()));
+        const work = sheetOf(wb, R.SE_SHEETS.work), sheet = sheetOf(wb, 'Clinic Requests');
+        if (work) {
+          const info = {};
+          for (const r of R.tableObjects((sheetOf(wb, R.SE_SHEETS.info) || {}).rows)) info[String(r.Setting ?? '').trim()] = String(r.Value ?? '').trim();
+          if (info.Kind !== 'Clinic Eligibility') throw new Error(`${f.name} has a Clinic Work sheet but no Clinic Eligibility info (hidden SE Info sheet).`);
+          await mergeClinicRows(s, work.rows, info.Location);
+        } else if (sheet) {
+          const info = sheetOf(wb, 'Clinic Info');
+          const [hdr, ...body] = sheet.rows.filter((r) => (r || []).some((v) => v !== '' && v != null));
+          const rows = body.map((r) => Object.fromEntries((hdr || []).map((h, j) => [String(h).trim(), r[j] == null ? '' : String(r[j])])));
+          const loc = info && info.rows[1] ? String(info.rows[1][(info.rows[0] || []).indexOf('Location')] || '') : '';
+          const m = C.mergeClinicRequests(s.requests, rows, `Clinic file${loc ? ` ${loc}` : ''}`);
+          s.requests = m.rows; s.n.reverifyAdded += m.added; s.n.reverifyRemoved += m.removed;
+          if (m.added || m.removed) s.changed.add('requests');
+        } else throw new Error(`${f.name} has no Clinic Work or Clinic Requests sheet. Use a file saved by the Clinic Template Tool or by this add-in.`);
+        s.n.read++;
+      }
+    } catch (e) { throw new Error(`${e.message} Nothing from these files was saved.`); }
+    await saveClinicMerge(s);
+    note('clinicFilesNote', bringBackSummary(s.n), 'ok');
+  }
+
+  /**
+   * Clinic Work rows applied to the admin tables, shared by returned files and the clinic inbox: start with clinicMerge,
+   * fold in each location's rows with mergeClinicRows (pure, nothing saved), then saveClinicMerge writes what changed.
+   */
+  function clinicMerge(requests) {
+    return { requests, tasks: null, notes: null, payerNotes: null, applied: null, changed: new Set(), // tasks... read with the first Clinic Work rows
+      n: { read: 0, reverifyAdded: 0, reverifyRemoved: 0, doneSet: 0, doneCleared: 0, doneNotes: 0, tasksChanged: 0, notes: 0, payerNotes: 0, skipped: 0, otherClinic: 0, old: 0, applied: 0, locations: 0 } };
+  }
+  // What the admin is told about: changes that take effect, and ticks that were skipped. A row that changes nothing
+  // (a tick already acted on, a blank note over none) is only filed in the brought-back ledger.
+  const clinicNews = (n) => R.clinicChanges(n) + n.skipped + n.otherClinic;
+  async function mergeClinicRows(s, rows, location) {
+    if (!s.tasks) { s.tasks = await liveTasks(); s.notes = await X.readClinicNotes(); s.payerNotes = await X.readClinicPayerNotes(); s.applied = await X.readClinicWorkApplied(); }
+    const m = R.mergeClinicWork(rows, { location, requests: s.requests, tasks: s.tasks, notes: s.notes, payerNotes: s.payerNotes, applied: s.applied, now: new Date() });
+    s.requests = m.requests; s.notes = m.notes; s.payerNotes = m.payerNotes; s.applied = m.applied;
+    // Applied location by location, so the next one sees these Done marks and notes.
+    if (m.done.size || m.doneNotes.size) {
+      s.tasks = s.tasks.map((t) => {
+        const k = String(t['Task Key']);
+        if (!m.done.has(k) && !m.doneNotes.has(k)) return t;
+        return { ...t, ...(m.done.has(k) ? { Done: m.done.get(k) } : {}), ...(m.doneNotes.has(k) ? { 'Clinic Note': m.doneNotes.get(k) } : {}) };
+      });
+      s.changed.add('tasks');
     }
+    for (const k of Object.keys(m.counts)) s.n[k] += m.counts[k];
+    if (m.counts.applied) s.n.locations++;
+    if (m.counts.reverifyAdded || m.counts.reverifyRemoved) s.changed.add('requests');
+    if (m.counts.notes) s.changed.add('notes');
+    if (m.counts.payerNotes) s.changed.add('payerNotes');
+    if (m.counts.applied) s.changed.add('applied');
+  }
+  async function saveClinicMerge(s) {
+    if (s.changed.has('requests')) await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, s.requests);
+    if (s.changed.has('tasks')) { await X.writeTasks(C.TASK_COLS, s.tasks); if (state.tasks) state.tasks = s.tasks; }
+    if (s.changed.has('notes')) { await X.writeClinicNotes(R.CLINIC_NOTE_COLS, s.notes); state.clinicNotes = s.notes; }
+    if (s.changed.has('payerNotes')) { await X.writeClinicPayerNotes(R.CLINIC_PAYER_NOTE_COLS, s.payerNotes); state.clinicPayerNotes = s.payerNotes; }
+    // Last: if a save above fails, the rows are not marked brought back and the next try applies them.
+    if (s.changed.has('applied')) await X.writeClinicWorkApplied(R.CLINIC_APPLIED_COLS, s.applied);
     await build();
-    note('clinicFilesNote', `${read} clinic file${read === 1 ? '' : 's'} read: ${added} re-verify request${added === 1 ? '' : 's'} added, ${removed} removed. Save the verification file again (step 2).`, 'ok');
+    renderClinicNotes();
+    await loadInbox();
+  }
+
+  /** "2 clinic files read. 3 re-verify requests added, 1 removed. 4 tasks marked done. ..." Zero counts are left out. head replaces the first sentence. */
+  function bringBackSummary(n, head) {
+    const s = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+    const parts = [];
+    if (n.reverifyAdded || n.reverifyRemoved) parts.push(`${s(n.reverifyAdded, 're-verify request', 're-verify requests')} added, ${n.reverifyRemoved} removed. Save the verification file again (step 2).`);
+    if (n.doneSet || n.doneCleared) parts.push(`${[n.doneSet ? `${s(n.doneSet, 'task', 'tasks')} marked done` : '', n.doneCleared ? `${s(n.doneCleared, 'task', 'tasks')} the clinic had marked done ${n.doneCleared === 1 ? 'is' : 'are'} open again` : ''].filter(Boolean).join('; ')} on NextGen Tasks.`);
+    if (n.doneNotes) parts.push(`${s(n.doneNotes, 'done note', 'done notes')} saved in the Clinic Note column on NextGen Tasks.`);
+    if (n.notes) parts.push(`${s(n.notes, 'patient note', 'patient notes')} saved on Clinic Notes.`);
+    if (n.payerNotes) parts.push(`${s(n.payerNotes, 'payer note', 'payer notes')} saved on Clinic Payer Notes (listed under Payer learning; check the card and fix the Payer Map yourself).`);
+    if (n.skipped) parts.push(`${s(n.skipped, 'task the clinic ticked is', 'tasks the clinic ticked are')} no longer on NextGen Tasks, so ${n.skipped === 1 ? 'it was' : 'they were'} skipped.`);
+    if (n.otherClinic) parts.push(`${s(n.otherClinic, 'task was', 'tasks were')} ticked in a clinic file for a patient whose next visit is at another clinic, so ${n.otherClinic === 1 ? 'it was' : 'they were'} skipped. Check with that clinic if it looks wrong.`);
+    if (n.old) parts.push(`${s(n.old, 'change was', 'changes were')} brought back before or ${n.old === 1 ? 'is' : 'are'} over ${R.APPLIED_DAYS} days old, so ${n.old === 1 ? 'it was' : 'they were'} skipped (your later edits stay).`);
+    return `${head || `${s(n.read, 'clinic file', 'clinic files')} read.`} ${parts.join(' ') || 'Nothing new in them.'}`;
+  }
+
+  // ---------- the clinic inbox (Clinic Work Inbox, filled by a Power Automate flow; docs/clinic-inbox-flow.md) ----------
+  /**
+   * The inbox read and merged as a dry run: {missing} when the table is not set up, else {s (a clinicMerge with every
+   * location folded in, nothing saved), skipped (blank or unknown rows), rows}. Apply saves that same s.
+   */
+  async function inboxPlan() {
+    const rows = await X.readClinicInbox();
+    if (rows == null) return { missing: true };
+    // The flow writes text into text columns; a When that Excel turned into a date serial anyway is read back as ISO.
+    const norm = rows.map((r) => (typeof r.When === 'number' ? { ...r, When: C.excelSerialToDate(r.When).toISOString() } : r));
+    const work = R.inboxWork(norm, new Date());
+    const s = clinicMerge(await X.readReverifyRequests());
+    for (const [loc, list] of work) await mergeClinicRows(s, list, loc);
+    return { s, rows: rows.length, skipped: work.counts.blank + work.counts.unknown };
+  }
+  /**
+   * New inbox rows that change nothing (a note edit that carries a tick already acted on, ticking a task already done) are
+   * filed in the brought-back ledger at once, so they are never counted as waiting and never act later (say, on a task the
+   * admin reopens). Returns true when it filed some. Only the ledger is written; a failed write is retried on the next read.
+   */
+  async function fileQuietRows(p) {
+    if (p.missing || !p.s.n.applied || clinicNews(p.s.n)) return false;
+    await X.writeClinicWorkApplied(R.CLINIC_APPLIED_COLS, p.s.applied);
+    return true;
+  }
+  async function loadInbox() {
+    const box = $('inboxBox');
+    if (!box) return;
+    let p;
+    const check = '<button class="link" id="btnInboxCheck">Check again</button>';
+    try { p = await inboxPlan(); await fileQuietRows(p).catch((e) => console.warn('Clinic inbox: unchanged rows not filed', e)); }
+    catch (e) { console.warn('Clinic inbox not read', e); box.innerHTML = `<p class="warn">Clinic inbox not read: ${esc(e.message)}</p><div class="actions">${check}</div>`; return; }
+    const s = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+    if (p.missing) {
+      box.innerHTML = `<p><b>Clinic inbox</b>: not set up. With it, a Power Automate flow copies each clinic's changes here when the clinic saves its file in the Clinic Eligibility library, so nobody sends files back.</p>
+        <div class="actions"><button class="small" id="btnInboxSetup">Set up the clinic inbox</button>${check}</div>`;
+      return;
+    }
+    const k = clinicNews(p.s.n);
+    box.innerHTML = `<p><b>Clinic inbox</b>: ${k ? `${s(k, 'new clinic change', 'new clinic changes')} waiting${p.s.n.locations > 1 ? ` from ${p.s.n.locations} clinics` : ''}.` : 'nothing new.'}${p.skipped ? ` <span class="hint">${s(p.skipped, 'row is', 'rows are')} blank or of a kind this version does not know, and ${p.skipped === 1 ? 'is' : 'are'} skipped.</span>` : ''}</p>
+      <div class="actions">${k ? '<button class="primary small" id="btnInboxApply">Apply clinic changes</button>' : ''}${check}<button class="link" data-goto="${esc(X.INBOX ? X.INBOX.sheet : 'Clinic Work Inbox')}">Clinic Work Inbox</button></div>`;
+  }
+  async function applyInbox() {
+    const p = await inboxPlan();
+    if (p.missing) throw new Error('Set up the clinic inbox first.');
+    const n = p.s.n, k = clinicNews(n), s = (x, one, many) => `${x} ${x === 1 ? one : many}`;
+    if (!k) { await loadInbox(); note('clinicFilesNote', 'Clinic inbox: nothing to change.', 'ok'); return; }
+    await saveClinicMerge(p.s);
+    // Rows applied earlier are "old" on every read of the inbox: not news here.
+    note('clinicFilesNote', bringBackSummary({ ...n, old: 0 }, `Clinic inbox: ${s(k, 'change', 'changes')} from ${s(n.locations, 'clinic', 'clinics')} applied.`), 'ok');
+  }
+  async function setupInbox() {
+    const made = await X.createClinicInbox(R.INBOX_COLS);
+    await loadInbox();
+    const t = X.INBOX || { sheet: 'Clinic Work Inbox', table: 'tblClinicWorkInbox' };
+    note('clinicFilesNote', `${made ? 'Clinic inbox set up.' : 'The clinic inbox was already set up.'} Give the Power Automate flow: this workbook, the sheet ${t.sheet} and the table ${t.table}. The flow adds rows and the add-in only reads them, so do not sort that sheet or type in it. Build steps: docs/clinic-inbox-flow.md in the add-in repo.`, 'ok');
   }
 
   // ---------- clinic rules (R5-R10): flags, Review sheet, payer evidence, clinic view ----------
@@ -1071,13 +1216,15 @@
     const rows = (state.clinic && state.clinic.rows) || [];
     const locs = [...new Set(rows.map((r) => String(r.Location || '').trim()).filter(Boolean))].sort();
     if (!locs.length) { box.innerHTML = '<p class="hint">No patients with an upcoming visit yet.</p>'; return; }
-    box.innerHTML = `<table class="watch clinicfiles"><thead><tr><th>Location</th><th>Patients</th><th>Flagged</th><th></th></tr></thead><tbody>${locs.map((l) => {
+    // The three buttons get their own row under each location so the table fits a 350 px pane.
+    box.innerHTML = `<table class="watch clinicfiles"><thead><tr><th>Location</th><th>Patients</th><th>Flagged</th></tr></thead><tbody>${locs.map((l) => {
       const rs = clinicRowsAt(l);
       const flagged = rs.filter((r) => splitList(r['Review Items'], '|').length).length;
-      return `<tr><td><b>${esc(l)}</b></td><td>${rs.length}</td><td>${flagged ? `<span class="hi">${flagged}</span>` : '0'}</td>
-        <td class="acts"><button class="small" data-cfile="${esc(l)}">Save clinic file</button> <button class="small" data-cemail="${esc(l)}">Copy email</button></td></tr>`;
+      return `<tr class="cf-loc"><td><b>${esc(l)}</b></td><td>${rs.length}</td><td>${flagged ? `<span class="hi">${flagged}</span>` : '0'}</td></tr>
+        <tr><td class="acts" colspan="3"><button class="small" data-cfile="${esc(l)}">Save clinic file</button> <button class="small" data-ctt="${esc(l)}">Clinic Template Tool file</button> <button class="small" data-cemail="${esc(l)}">Copy email</button></td></tr>`;
     }).join('')}</tbody></table>`;
     box.querySelectorAll('[data-cfile]').forEach((b) => b.addEventListener('click', () => guard(() => saveClinicFile(b.dataset.cfile), 'clinicFilesNote')));
+    box.querySelectorAll('[data-ctt]').forEach((b) => b.addEventListener('click', () => guard(() => saveCttFile(b.dataset.ctt), 'clinicFilesNote')));
     box.querySelectorAll('[data-cemail]').forEach((b) => b.addEventListener('click', () => guard(async () => {
       const l = b.dataset.cemail;
       const text = R.clinicEmail(l, clinicRowsAt(l), { runDate: runDateOf() });
@@ -1110,6 +1257,52 @@
     if (!state.clinic) throw new Error('Upload the NextGen report first.');
     const f = clinicWorkbook(loc);
     await saveBinary(f.name, f.bytes, XL.MIME, 'clinicFilesNote', `${f.count} patient${f.count === 1 ? '' : 's'}, ${f.flags} flag row${f.flags === 1 ? '' : 's'}`);
+  }
+
+  /**
+   * "Clinic Eligibility - <Location> YYYY-MM-DD.xlsx" (v0.14) for the Clinic Template Tool, which opens it and re-derives
+   * the list with the same rules.js. rules.clinicPack keeps only this clinic's patients and strips names and DOBs.
+   * SE Done takes Done and Clinic Note from NextGen Tasks as the sheet has them now (liveTasks), so a note brought back or
+   * typed after the upload reaches the clinic.
+   */
+  async function cttWorkbook(loc) {
+    const pack = R.clinicPack(loc, {
+      patients: inScopePatients(), results: state.results || [], review: state.review || [],
+      learningRows: C.payerLearningRows(state.learning || []), metricRows: state.metrics ? state.metrics.rows : [], tasks: await liveTasks(),
+      cfg: state.cfg, payerRuleRows: R.payerRuleRows(state.payerRules || []), runAt: new Date(), version: VERSION,
+    });
+    return { name: pack.name, bytes: XL.buildWorkbook(pack), counts: pack.counts };
+  }
+  async function saveCttFile(loc) {
+    if (!state.clinic) throw new Error('Upload the NextGen report first.');
+    const f = await cttWorkbook(loc), c = f.counts;
+    await saveBinary(f.name, f.bytes, XL.MIME, 'clinicFilesNote', `${c.patients} patient${c.patients === 1 ? '' : 's'}, ${c.results} Sohar result${c.results === 1 ? '' : 's'}, for the Clinic Template Tool; PHI: share through MHS OneDrive or Teams only`);
+  }
+
+  /** Admin: counts from returned Clinic Eligibility files, and the payer notes under Payer learning for a person to act on. */
+  async function loadClinicNotes() {
+    try { state.clinicNotes = await X.readClinicNotes(); state.clinicPayerNotes = await X.readClinicPayerNotes(); }
+    catch (e) { console.warn('Clinic Notes not read', e); }
+    renderClinicNotes();
+  }
+  function renderClinicNotes() {
+    const notes = state.clinicNotes || [], pn = state.clinicPayerNotes || [];
+    const box = $('clinicNotesBox'), pbox = $('payerNotesBox');
+    if (box) {
+      box.innerHTML = notes.length || pn.length ? `<p>From returned Clinic Template Tool files: ${notes.length} patient note${notes.length === 1 ? '' : 's'} and ${pn.length} payer note${pn.length === 1 ? '' : 's'}${pn.length ? ' (listed under Payer learning)' : ''}.</p>
+        <div class="actions">${notes.length ? '<button class="link" data-goto="Clinic Notes">Clinic Notes</button>' : ''}${pn.length ? '<button class="link" data-goto="Clinic Payer Notes">Clinic Payer Notes</button>' : ''}</div>` : '';
+    }
+    if (!pbox) return;
+    pbox.hidden = !pn.length;
+    if (!pn.length) { pbox.innerHTML = ''; return; }
+    const when = (w) => { const d = new Date(w); return isNaN(d) ? '' : C.localDate(d); };
+    const list = pn.slice().sort((a, b) => String(b.When || '').localeCompare(String(a.When || '')));
+    const top = list.slice(0, 12);
+    pbox.innerHTML = `<p><b>${pn.length} payer note${pn.length === 1 ? '' : 's'} from clinics.</b> What the clinic saw on the insurance card. Check each one, then fix the Payer Map or the patient's insurance in NextGen yourself; a note never changes the mapping.</p>
+      <table class="watch"><thead><tr><th>NextGen payer</th><th>Card says</th><th>From</th></tr></thead><tbody>${top.map((r) => `<tr>
+        <td>${esc(r['NextGen Payer'])}</td><td>${esc(r['Card Says'])}${r.Note ? `<br><span class="hint">${esc(r.Note)}</span>` : ''}</td><td>${esc(r.Location)}<br><span class="hint">${esc([r.By, when(r.When)].filter(Boolean).join(' · '))}</span></td></tr>`).join('')}</tbody></table>
+      ${list.length > top.length ? `<p class="hint">${list.length - top.length} more on the sheet.</p>` : ''}
+      <div class="actions"><button class="link" data-goto="Clinic Payer Notes">Clinic Payer Notes sheet</button></div>`;
   }
 
   function renderEvidence() {
@@ -1300,7 +1493,7 @@
     }
 
     const q = res.counts.byQueue, c = res.counts;
-    const open = tasks.filter((t) => !t.Done).length;
+    const open = tasks.filter((t) => !t.Done).length, noted = tasks.filter((t) => String(t['Clinic Note'] || '').trim()).length;
     const kinds = { verification: res.results.filter((r) => r['Sent As'] === 'Verification').length, discovery: res.results.filter((r) => r['Sent As'] === 'Discovery').length, waiting: dv.length };
     const html = `
         <p>${c.matched} Sohar result${c.matched === 1 ? '' : 's'} matched to patients${c.notReturned ? `; ${c.notReturned} upcoming patient${c.notReturned === 1 ? ' was' : 's were'} not in the Sohar files` : ''}.</p>
@@ -1311,6 +1504,7 @@
           <div class="count clr"><div class="n">${q.Clear || 0}</div><div class="l">clear</div></div>
         </div>
         ${open ? `<p><b>${open} NextGen fix${open === 1 ? '' : 'es'}</b> to make before visits (NextGen Tasks sheet).</p>` : ''}
+        ${noted ? `<p class="hint">${noted} task${noted === 1 ? ' has a note' : 's have notes'} (Clinic Note column on NextGen Tasks, and in full screen). The clinic sees these notes in its next file, so keep names and dates of birth out of any you type.</p>` : ''}
         ${noIds ? `<p class="warn"><b>${noIds} Sohar result${noIds === 1 ? ' has' : 's have'} no patient identifiers</b> (no id, member ID or name): likely an export anomaly or a check run outside the batch. Open the Sohar link on those rows (Match = No identifiers); one item is on the Review sheet.</p>` : ''}
         ${acc.unknownFiles.length ? `<p class="warn">Skipped (not a Sohar output): ${acc.unknownFiles.map(esc).join(', ')}</p>` : ''}`;
     await renderBenefits(res.results, cfg, kinds);
@@ -1635,6 +1829,18 @@
     if (state.demo) return [];
     return X.readTasks();
   }
+  /**
+   * Tasks with Done and Clinic Note as the NextGen Tasks sheet has them now: a Done or note typed on the sheet after the
+   * upload is not in state.tasks, and a bring-back or inbox save would otherwise put the old value back.
+   */
+  async function liveTasks() {
+    const tasks = (await currentTasks()) || [];
+    if (!state.tasks || state.demo) return tasks;
+    const cell = (t, c) => String(t[c] ?? '').trim();
+    const sheet = new Map(((await X.readTasks()) || []).map((t) => [String(t['Task Key']), t]));
+    state.tasks = tasks.map((t) => { const s = sheet.get(String(t['Task Key'])); return s ? { ...t, Done: cell(s, 'Done'), 'Clinic Note': cell(s, 'Clinic Note') } : t; });
+    return state.tasks;
+  }
 
   async function copyAdminMessage(mode) {
     const rows = await currentResults();
@@ -1744,6 +1950,10 @@
     } else if (m.type === 'clinic-file') {
       await saveClinicFile(m.location);
       await sendToDialog({ type: 'notice', ok: true, text: `Clinic file for ${m.location} saved to Downloads (Excel on the web: see the pane for "Save in a new tab").` });
+    } else if (m.type === 'ctt-file') {
+      // clinicPack throws a readable error (one record too big for a cell): show it in the window too.
+      try { await saveCttFile(m.location); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
+      await sendToDialog({ type: 'notice', ok: true, text: `Clinic Template Tool file for ${m.location} saved to Downloads (Excel on the web: see the pane for "Save in a new tab"). It has PHI: share it through MHS OneDrive or Teams only.` });
     } else if (m.type === 'guarantor-resubmit') {
       await resubmitGuarantors();
       await sendToDialog({ ...(await payload('upload')), notice: { ok: true, text: 'Guarantors added to the discovery file. Save it again on this tab.' } });
@@ -1772,8 +1982,8 @@
     return msg;
   }
 
-  async function saveCSV(name, cols, rows, boxId) {
-    const csv = C.toCSV(cols, rows);
+  async function saveCSV(name, cols, rows, boxId, opts) {
+    const csv = C.toCSV(cols, rows, opts);
     downloadNow(name, csv);
     const msg = `Saved ${name} (${rows.length} row${rows.length === 1 ? '' : 's'}) to your Downloads folder.`;
     if (!boxId) return msg;
@@ -2025,6 +2235,22 @@
     let mapLog = [], soharRefs = [], reverifyRequests = [];
     // v0.12 tables, in memory. Fischer's guarantor search was asked for earlier and found Blue Shield (Via guarantor).
     let guarantorRequests = [{ MRN: '800116', Requested: iso(-3), Reason: 'Discovery found nothing', By: 'demo' }], payerTests = [], metricHistory = [], clinicRequests = [];
+    // A made-up payer note, so the Payer learning list shows in the demo.
+    let clinicNotes = [], clinicApplied = [], clinicPayerNotes = [{ 'NextGen Payer': 'Zephyr Health', Location: 'San Rafael', 'Card Says': 'Zephyr Health PPO, group 0000', Note: 'Card shows a new plan name', By: 'demo', When: iso(-1) }];
+    // The clinic inbox (the flow fills it in a real workbook): two made-up rows, made on first read against the demo's own
+    // tasks so they apply: a task done with a note, and a patient note. ?noinbox starts without it (shows the set-up button).
+    let inbox = /[?&]noinbox\b/.test(location.search) ? null : undefined;
+    const inboxFirstRead = () => {
+      const t = (state.tasks || []).find((x) => !x.Done && x['Next Location']);
+      if (!t) return [];
+      const at = (h) => new Date(Date.now() - h * 36e5).toISOString(), file = (l) => `Clinic Eligibility - ${l} ${C.localDate(new Date())}.xlsx`;
+      return [
+        { Location: t['Next Location'], Kind: 'Task done', Key: t['Task Key'], MRN: t.MRN, LASFIR: C.lasfir(t['Last Name'], t['First Name']), Value: 'Yes',
+          Note: 'Called the patient, new card scanned', By: 'Front desk', When: at(3), File: file(t['Next Location']), Received: at(2.9) },
+        { Location: 'San Rafael', Kind: 'Note', Key: '800104', MRN: '800104', LASFIR: C.lasfir('Haddad', 'Mira'), Value: '',
+          Note: 'Bringing the new Kaiser card on Monday', By: 'Front desk', When: at(2), File: file('San Rafael'), Received: at(1.9) },
+      ];
+    };
     // Fee estimates demo: ?fees=1 turns them on with a made-up fee schedule (fees.js DEMO_WORKBOOK), in memory.
     const feesDemo = /[?&]fees=1\b/.test(location.search) && !!F;
     const feeStore = {};
@@ -2063,6 +2289,12 @@
       async writePayerMapping() {}, async readPayerMapping() { return []; }, async writePayerMetrics() {}, async writeGuarantorThemes() {},
       async readPayerMetricHistory() { return metricHistory; }, async writePayerMetricHistory(c, r) { metricHistory = r; },
       async readClinicRequests() { return clinicRequests; }, async writeClinicRequests(c, r) { clinicRequests = r; },
+      async readClinicNotes() { return clinicNotes; }, async writeClinicNotes(c, r) { clinicNotes = r; },
+      async readClinicPayerNotes() { return clinicPayerNotes; }, async writeClinicPayerNotes(c, r) { clinicPayerNotes = r; },
+      async readClinicWorkApplied() { return clinicApplied; }, async writeClinicWorkApplied(c, r) { clinicApplied = r; },
+      INBOX: { sheet: 'Clinic Work Inbox', table: 'tblClinicWorkInbox' },
+      async readClinicInbox() { if (inbox === undefined) { const r = inboxFirstRead(); if (r.length) inbox = r; return r; } return inbox; },
+      async createClinicInbox() { if (inbox) return false; inbox = []; return true; },
       async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', payerTests: C.payerTestConfig({ 'Payer tests': /[?&]tests=1\b/.test(location.search) ? 'On' : 'Off' }), mrnSince: '', learning: C.learningConfig({}), fees: F ? F.feeConfig({ 'Fee estimates': feesDemo ? 'On' : 'Off' }) : { on: false } }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },

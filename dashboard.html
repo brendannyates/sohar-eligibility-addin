@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar eligibility, full screen</title>
-  <link rel="stylesheet" href="style.css?v=0.13.0">
+  <link rel="stylesheet" href="style.css?v=0.14.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
@@ -142,7 +142,7 @@
       <p class="hint">Ticking Done writes "Yes" to the NextGen Tasks sheet. Done marks stay when results are uploaded again.</p>
       <div class="tablewrap">
         <table id="tasksTbl">
-          <thead><tr><th>Done</th><th>Due by</th><th>Location</th><th>Patient</th><th>MRN</th><th>Result</th><th>Task</th><th>Details</th><th>Choose in NextGen</th><th>Link</th></tr></thead>
+          <thead><tr><th>Done</th><th>Due by</th><th>Location</th><th>Patient</th><th>MRN</th><th>Result</th><th>Task</th><th>Details</th><th>Clinic note</th><th>Choose in NextGen</th><th>Link</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -170,8 +170,9 @@
         <button class="primary alt" data-csave="flags">Save clinic flags (CSV)</button>
         <button class="primary alt" data-csave="skipped">Save skipped list (CSV)</button>
         <button class="primary" id="btnCFile">Save clinic file (.xlsx)</button>
+        <button class="primary" id="btnCttFile">Clinic Template Tool file (.xlsx)</button>
       </div>
-      <p class="hint">The lists follow the filters above. Clinic files contain PHI: share them only through MHS OneDrive or Teams. Clinics tick <b>Re-verify anyway</b> in their file or on the Clinic tab; bring their files back in the pane (Clinic files and emails).</p>
+      <p class="hint">The lists follow the filters above. Clinic files and Clinic Template Tool files contain PHI: share them only through MHS OneDrive or Teams. The Clinic Template Tool file shows patients as LASFIR and MRN; the clinic marks tasks done and adds notes in it, then sends it back. Clinics tick <b>Re-verify anyway</b> in their file or on the Clinic tab; bring their files back in the pane (Clinic files and emails).</p>
       <div class="tablewrap">
         <table id="cTbl">
           <thead><tr><th>Next appt</th><th>Location</th><th>Patient</th><th>MRN</th><th>Visit</th><th>Payer</th><th>Sohar</th><th>Flags</th><th>Skip window</th><th>Benefits</th></tr></thead>
@@ -260,10 +261,10 @@
     <section id="detail" class="detail" hidden aria-live="polite"></section>
   </main>
 
-  <script src="payer-rules.js?v=0.13.0"></script>
-  <script src="core.js?v=0.13.0"></script>
-  <script src="rules.js?v=0.13.0"></script>
-  <script src="fees.js?v=0.13.0"></script>
-  <script src="dashboard.js?v=0.13.0"></script>
+  <script src="payer-rules.js?v=0.14.0"></script>
+  <script src="core.js?v=0.14.0"></script>
+  <script src="rules.js?v=0.14.0"></script>
+  <script src="fees.js?v=0.14.0"></script>
+  <script src="dashboard.js?v=0.14.0"></script>
 </body>
 </html>

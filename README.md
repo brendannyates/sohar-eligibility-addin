@@ -102,6 +102,29 @@ On the mapping sheets, change the value column and the add-in keeps it (the row 
 
 **Demo:** `npm run serve`, then `http://localhost:8080/?fees=1` (made-up fee schedule; `dashboard.html?fees=1#benefits` for the window on its own).
 
+### Clinic Eligibility file for the Clinic Template Tool (v0.14)
+
+Central Sohar does every Sohar import, export, discovery and verification; a clinic works its own list in the Clinic Template Tool (CTT). Admin tab > **Clinic files and emails** has a **Clinic Template Tool file** button per location, next to **Save clinic file** (full screen: Clinic lists, pick a clinic). It saves `Clinic Eligibility - <Location> YYYY-MM-DD.xlsx` to Downloads (save-tab fallback on the web), built by `rules.clinicPack` from this workbook's state and written with `xlsx.js`:
+
+- Only patients whose next visit is at that location (`rules.clinicSet`). Unmatched and no-identifier results stay with the admin.
+- No patient or guarantor names, DOBs or guarantor ZIP: every record has `LASFIR` instead, and names are scrubbed (whole words) from the free-text fields (Action, Detail, Fix, Notes, Route Reason, Flags); provider, location and payer fields are left as they are so the clinic's derivation matches yours. Member IDs stay (staff fix them).
+- Sheets: visible `Read Me` and `Clinic Work` (empty), hidden `SE Info` (Kind `Clinic Eligibility`, Location, run date, version, Format 1, non-default settings), `SE Patients`, `SE Results`, `SE Review`, `SE Payers` (learning + metrics for the clinic's payers), `SE Done` (`Task Key`, `Done`, `Clinic Note`: each of the clinic's tasks with a Done mark or a Clinic Note, read fresh from NextGen Tasks; a note can be typed by hand, so besides the full-name scrub each of the patient's and guarantor's names alone (whole words) becomes the LASFIR or "the guarantor" and their DOBs (M/D/YY or YYYY, with / - or ., YYYY-MM-DD, or the month's name) become "[date removed]"; CTT shows it under the task so the clinic sees you have it; files made before the column read as blank notes), and `Payer Credential Rules` when the sheet has rows. Never `tblClinicMeta`, so this add-in does not take the file over. The web-extension parts carry CTT's Id, so CTT opens with it.
+- A record too big for one Excel cell has its past appointments cut to the last 5; if it is still too big, the file is not made and the message names the MRN.
+
+CTT carries byte-identical copies of `core.js`, `rules.js` and `payer-rules.js` and re-derives the rows, flags, benefits and tasks itself (`rules.clinicUnpack`, `rules.clinicDerive`). The clinic's changes go on `Clinic Work` (`Kind`, `Key`, `MRN`, `LASFIR`, `Value`, `Note`, `By`, `When`; last row per Kind + Key wins).
+
+**Bringing it back:** drop the saved file on **Bring back clinic files** (old `Sohar Clinic` files with `Clinic Requests` still work). `rules.mergeClinicWork` applies the four kinds: `Re-verify anyway` On/Off -> Re-verify Requests (`By` = `Clinic file <Location>`); `Task done` Yes/No -> Done on NextGen Tasks, read fresh from the sheet so Done marks you typed there stay (a clinic Yes writes `Yes (clinic <Location>)`; No only reopens a task with that mark, never your own `Yes` or `x`); `Note` -> visible **Clinic Notes** sheet (`tblClinicNotes`: MRN, Location, Note, By, When); `Payer note` -> visible **Clinic Payer Notes** sheet (`tblClinicPayerNotes`: NextGen Payer, Location, Card Says, Note, By, When). Newest note per MRN (payer) + Location wins; a newer blank note removes it. Payer notes are listed under **Payer learning** for a person to act on and never change the Payer Map. A tick counts only for a task whose Next Location is the file's location; a tick sent for another clinic's patient is skipped and said so. The hidden **Clinic Work Applied** sheet (`tblClinicWorkApplied`: Location, Kind, Key, When, Value; kept 120 days) remembers the newest row brought back per Location + Kind + Key, and for `Task done` the tick (Yes/No) last acted on. So the same file sent again changes nothing, and a tick you have since undone is not re-applied, even when the clinic later edits that task's done note (which carries its old tick along): Done changes only when the clinic's tick itself changes. If the clinic unticks and ticks again between two applies, that also counts as no change. Every file is read before anything is saved, so one bad file leaves the workbook as it was. The note says what changed in plain words, then the pane rebuilds.
+
+**Done notes:** a clinic can add a short note when it ticks a task done ("called patient, new card scanned"); it rides on the `Task done` row's `Note`. It lands in **Clinic Note**, the last column of NextGen Tasks, as `note (By, Location, M/D)`. A No with a note still saves the note; a blank note never erases one; a `Task done` row with a blank Value is a note only and leaves Done as it is. Rebuilds keep Clinic Note like Done (`core.keepDone`), and a note you type on the sheet is read fresh before a bring-back or inbox save (`liveTasks`). Full screen shows it in the NextGen tasks table and on the patient card; the task CSVs end with it. The task CSVs put a `'` before any cell that starts with `=`, `+`, `-`, `@`, a tab or a return, so Excel opens a typed note as text, never as a formula (`core.toCSV(cols, rows, { safe: true })`; the Sohar and tracker files are left exactly as they are).
+
+**Clinic inbox (central files, no sending back):** clinic files live in the **Clinic Eligibility** SharePoint library, one folder per clinic. A Power Automate flow copies each saved file's new Clinic Work rows into the visible **Clinic Work Inbox** sheet (`tblClinicWorkInbox`: `rules.INBOX_COLS` = Location, the 8 Clinic Work columns, File, Received) in this workbook. Admin tab > Clinic files and emails:
+- **Set up the clinic inbox** (only when the table is missing) creates the sheet once, header only, every column text, and says what to give the flow.
+- Otherwise the line says "N new clinic changes waiting" (a dry run of the merge) with **Apply clinic changes**, which goes through the same merge, writes and summary as Bring back clinic files (`rules.inboxWork` groups the rows by Location, then `mergeClinicWork` per Location; the Clinic Work Applied ledger makes a re-read, a duplicate row, or the same row also brought back in a file apply once). N counts rows that change something, plus skipped ticks (`rules.clinicChanges`); new rows that change nothing (a blank note, a tick already acted on) are filed in the ledger quietly and never counted. **Check again** re-reads the inbox without a rebuild (the line does not update by itself).
+- The flow owns that table: the add-in never rewrites, sorts or trims it (a stage-and-swap would race the flow). You can delete rows older than 120 days by hand.
+- Build steps, limits and what is not yet confirmed: [docs/clinic-inbox-flow.md](docs/clinic-inbox-flow.md). Open item: confirm with compliance that Power Automate and SharePoint are covered by MHS's Microsoft BAA before real data. Demo mode has an inbox with two made-up rows (`?noinbox` starts without one).
+
+The file has PHI (MRNs, insurance, appointments): MHS OneDrive, Teams or the Clinic Eligibility library only.
+
 ### Esketamine payer rules (v0.13)
 
 Admin tab > **Esketamine payer rules**: drop `Payer Credential Rules.csv` (OneDrive, Add-In Manifests folder) or an .xlsx copy. It is parsed by `payer-rules.js` and written to the visible, editable **Payer Credential Rules** sheet (`tblPayerCredRules`). Every refresh (⟳) re-reads the sheet, so edits made in Excel count; **Re-read the sheet** does it on demand. A re-import replaces the sheet. The rules table is never committed (this repo is public): tests and the demo use made-up payers only.
@@ -199,18 +222,19 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 | File | Role |
 |---|---|
 | `core.js` | Pure logic: header detection, name/date parsing, routing, auto payer matching, exports, CSV. Shared with tests. |
-| `rules.js` | Pure clinic rules (R5-R10): flags and pills, Review rows, clinic sheet and email, payer evidence. Loads after `core.js` (R9 uses `core.reverifyCheck`). |
+| `rules.js` | Pure clinic rules (R5-R10): flags and pills, Review rows, clinic sheet and email, payer evidence; the Clinic Eligibility file (v0.14: `clinicPack`, `clinicUnpack`, `clinicDerive`, `workRows`, `mergeClinicWork`). Loads after `core.js` (R9 uses `core.reverifyCheck`). Copied byte-identical into the Clinic Template Tool with `core.js`. |
 | `payer-rules.js` | Pure esketamine payer credential rules (read the sheet/CSV, match a payer, check credential × ESK step, Besse). Byte-identical copy shared with the Clinic Template Tool and ESK Tracker repos: change all three together. Loads before `core.js`. |
 | `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts), and a small reader (`readWorkbook`) for the fee schedule upload. |
 | `fees.js` | Pure fee estimate logic (v0.11, a test, Off by default): fee schedule parsing, location / payer matching, estimate math, made-up demo schedule. Loads after `core.js`. |
 | `save.html`, `save.js` | Fallback save tab for Excel on the web; takes CSV text or base64 (.xlsx). |
-| `excel.js` | Everything that reads or writes the workbook. Table names must match the template. |
+| `excel.js` | Everything that reads or writes the workbook. Table names must match the template. The Clinic Work Inbox is the one table it only creates and reads (flow-owned). |
 | `app.js` | Pane behaviour, step flow, payer mapping UI, uploads, downloads, demo mode. |
 | `dashboard.html`, `dashboard.js` | Full-screen window (Office dialog): prep, worklist, NextGen tasks, messages, upload and save. |
 | `index.html`, `style.css` | Pane markup and styles. |
 | `manifest.xml` | Ribbon button and host URL. |
 | `tests/*.test.mjs` | `node --test` suite. `tests/excel.test.mjs` runs the real `excel.js` against `tests/helpers/excel-mock.mjs` (a model of the Excel API with failure injection) and sweeps every save through a failure at every step. |
 | `scripts/serve.mjs` | Static server for demo mode. |
+| `docs/clinic-inbox-flow.md` | Build guide for the Power Automate flow that fills the Clinic Work Inbox (no URLs, tenant names or patient data). |
 
 ## Template contract
 

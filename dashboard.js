@@ -193,7 +193,7 @@
     $('tasksTbl').querySelector('tbody').innerHTML = ts.map((t) => `<tr class="${open(t) ? '' : 'done'}">
       <td><input type="checkbox" data-task="${esc(t['Task Key'])}" ${open(t) ? '' : 'checked'} aria-label="Done: ${esc(t.Task)} for ${esc(name(t))}"></td>
       ${cell([t['Due By'], t['Next Time']].filter(Boolean).join(' '))}${cell(t['Next Location'])}${cell(name(t))}${cell(idText(t))}${cell(t['Result Type'])}
-      ${cell(t.Task, 'mid')}${cell(t.Details, 'wide')}${cell(t['Choose in NextGen'], 'mid')}<td>${link(t['Sohar Link'])}</td></tr>`).join('');
+      ${cell(t.Task, 'mid')}${cell(t.Details, 'wide')}${cell(t['Clinic Note'], 'mid cnote')}${cell(t['Choose in NextGen'], 'mid')}<td>${link(t['Sohar Link'])}</td></tr>`).join('');
   }
 
   function renderMessage() {
@@ -217,7 +217,7 @@
         <button class="small" id="btnHide">Close</button></div>
       <div class="dgrid">
         ${grp('Upcoming visits', ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'Next Provider', 'Upcoming Appts', 'Upcoming Detail'])}
-        <div class="dgroup"><h3>NextGen tasks</h3>${its.length ? `<ul class="tasklist">${its.map((t) => `<li class="${open(t) ? '' : 'done'}"><label><input type="checkbox" data-task="${esc(t['Task Key'])}" ${open(t) ? '' : 'checked'}> <b>${esc(t.Task)}</b></label><br>${esc(t.Details)}</li>`).join('')}</ul>` : '<p class="hint">None</p>'}</div>
+        <div class="dgroup"><h3>NextGen tasks</h3>${its.length ? `<ul class="tasklist">${its.map((t) => `<li class="${open(t) ? '' : 'done'}"><label><input type="checkbox" data-task="${esc(t['Task Key'])}" ${open(t) ? '' : 'checked'}> <b>${esc(t.Task)}</b></label><br>${esc(t.Details)}${t['Clinic Note'] ? `<br><span class="cnote">Clinic: ${esc(t['Clinic Note'])}</span>` : ''}</li>`).join('')}</ul>` : '<p class="hint">None</p>'}</div>
         ${grp('Benefits (in-network)', ['Benefit Flag', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status', 'Coverage Level'])}
         ${grp('Coverage', ['Sent As', 'Searched As', 'Sohar Status', 'Action', 'Choose in NextGen', 'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Plan', 'Network', 'Coverage Start', 'Coverage End', 'Match', 'Sohar Date', 'Sohar Link'])}
         ${others.map((o) => grp(`Also: ${esc(o['Sent As'])} result`, ['Sohar Status', 'Action', 'Sohar Payer', 'Benefit Flag', 'Sohar Date'], o)).join('')}
@@ -354,8 +354,7 @@
     $('cLoc').value = locs.includes(keep) ? keep : '';
     const list = clinicFiltered();
     $('cShown').textContent = clinic ? `Showing ${list.length} of ${all.length}${clinic.runDate ? `, run ${clinic.runDate}` : ''}` : 'Upload the NextGen report in the pane first.';
-    $('btnCFile').disabled = !$('cLoc').value;
-    $('btnCFile').title = $('cLoc').value ? '' : 'Pick a clinic first';
+    for (const id of ['btnCFile', 'btnCttFile']) { $(id).disabled = !$('cLoc').value; $(id).title = $('cLoc').value ? '' : 'Pick a clinic first'; }
     $('cTbl').querySelector('tbody').innerHTML = list.map((r) => `<tr>
       ${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r.Location)}<td><b>${esc(name(r))}</b></td>${cell(idText(r))}
       <td>${esc(r['Next Event'])}<br><span class="hint">${esc(r['Next Provider'])}</span></td>
@@ -451,7 +450,7 @@
 
   // ---------- saving ----------
   function save(kind) {
-    let name, cols, data, extra = '';
+    let name, cols, data, extra = '', safe = false; // safe: typed notes, so guard against Excel formulas
     if (kind === 'verification' || kind === 'discovery') {
       if (!exportsData) { notice('No Sohar import built yet. Upload the NextGen report in the pane first.', false); return; }
       name = C.fileName(kind);
@@ -475,8 +474,8 @@
       const x = listFor(kind);
       if (!x.data.length) { notice('Nothing in this list.', false); return; }
       name = x.name; cols = x.cols; data = x.data;
-    } else if (kind === 'tasks') { name = C.fileName('tasks').replace('Tasks', 'Tasks (open)'); cols = C.TASK_COLS; data = tasks.filter(open); }
-    else if (kind === 'allTasks') { name = C.fileName('tasks'); cols = C.TASK_COLS; data = tasks; }
+    } else if (kind === 'tasks') { name = C.fileName('tasks').replace('Tasks', 'Tasks (open)'); cols = C.TASK_COLS; data = tasks.filter(open); safe = true; }
+    else if (kind === 'allTasks') { name = C.fileName('tasks'); cols = C.TASK_COLS; data = tasks; safe = true; }
     else if (kind === 'tracker') {
       const out = C.trackerExport(rows, new Date().toLocaleString());
       if (!out.rows.length) { notice('No verified patients yet. The tracker file needs at least one Sohar verification result.', false); return; }
@@ -489,7 +488,7 @@
       name = C.fileName('ir'); cols = C.IR_COLS; data = irRows;
     }
     else { name = C.fileName('worklist'); cols = C.RESULTS_COLS; data = filteredRows(); }
-    const csv = C.toCSV(cols, data);
+    const csv = C.toCSV(cols, data, { safe });
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const a = document.createElement('a');
     a.href = url; a.download = name;
@@ -529,6 +528,7 @@
   document.querySelectorAll('[data-csave]').forEach((b) => b.addEventListener('click', () => save({ list: 'clinicList', flags: 'clinicFlags', skipped: 'skipped' }[b.dataset.csave])));
   document.querySelectorAll('[data-lsave]').forEach((b) => b.addEventListener('click', () => save(b.dataset.lsave)));
   $('btnCFile').addEventListener('click', () => { if ($('cLoc').value) { notice(`Saving the clinic file for ${$('cLoc').value}…`, true); toPane({ type: 'clinic-file', location: $('cLoc').value }); } });
+  $('btnCttFile').addEventListener('click', () => { if ($('cLoc').value) { notice(`Saving the Clinic Template Tool file for ${$('cLoc').value}…`, true); toPane({ type: 'ctt-file', location: $('cLoc').value }); } });
   $('btnGuar').addEventListener('click', () => { notice('Adding guarantors to the discovery file…', true); toPane({ type: 'guarantor-resubmit' }); });
   $('fText').addEventListener('input', render);
   document.querySelectorAll('[data-queue]').forEach((b) => b.addEventListener('click', () => { $('fQueue').value = b.dataset.queue; $('fBen').value = ''; render(); }));
@@ -607,7 +607,9 @@
         .map(([id, nm, st], i) => ({ 'Test Id': `8${i}-T1`, MRN: `8${i}`, 'NextGen Payer': 'Blue Shield CA Blue Card', 'Candidate payerId': id, 'Candidate Payer': nm, Status: st })),
       themes: [{ Theme: 'Guarantor only', 'NextGen Payer': 'None on file', 'Found for patient': '—', 'Found for guarantor': 'Blue Shield of California', Patients: '1' }],
       rows: [], mapping: [{ id: '80101-M' }], payerTestRows: [] };
-    load({ results: res, tasks: C.buildTasks(res), exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees,
+    // One task the clinic ticked done with a note (Clinic Template Tool file or the clinic inbox), made up.
+    const demoTasks = C.buildTasks(res).map((t, i) => (i === 0 ? { ...t, Done: `Yes (clinic ${t['Next Location']})`, 'Clinic Note': `Called the patient, new card scanned (Front desk, ${t['Next Location']}, 10/19)` } : t));
+    load({ results: res, tasks: demoTasks, exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees,
       clinic: demoClinic, skipped: demoSkipped, skipCols: ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'], learning: demoLearning, guarantor: { count: 2, noDob: 1 } });
     if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
   }

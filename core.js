@@ -24,9 +24,10 @@
     'Sohar Ref', 'Sohar Link', 'Sohar Date', 'Discovery Follow-up', 'Searched As'];
   // Saved Sohar result records (hidden sheet), so a later upload adds to earlier ones instead of replacing them.
   const UPLOAD_COLS = ['Kind', 'Key', 'File', 'Uploaded', 'Record'];
-  // NextGen Tasks sheet (created by the add-in). Done survives rebuilds via Task Key.
+  // NextGen Tasks sheet (created by the add-in). Done and Clinic Note survive rebuilds via Task Key. Clinic Note (v0.14): the
+  // note a clinic left when it marked the task done in its Clinic Eligibility file. Add columns at the end only.
   const TASK_COLS = ['Done', 'Due By', 'Next Appt', 'Next Time', 'Next Location', 'Per Nbr', 'MRN', 'Last Name', 'First Name', 'Result Type',
-    'Task', 'Details', 'Choose in NextGen', 'Sohar Link', 'Sohar Ref', 'Task Key'];
+    'Task', 'Details', 'Choose in NextGen', 'Sohar Link', 'Sohar Ref', 'Task Key', 'Clinic Note'];
   // Benefits CSV for the TMS Tracker. Treat as a contract: add columns at the end only.
   const BENEFITS_EXPORT_COLS = ['Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB', 'Sohar Payer', 'Plan', 'Network', 'Coverage Level',
     'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status',
@@ -782,13 +783,20 @@
     return { verification, discovery, mapping, guarantorNoDob };
   }
 
-  function csvCell(v) {
-    const s = v == null ? '' : String(v);
+  function csvCell(v, safe) {
+    let s = v == null ? '' : String(v);
+    // Excel runs a cell that starts with = + - @ (or tab / CR) as a formula, quoted or not: a leading ' keeps it text.
+    if (safe && /^[=+\-@\t\r]/.test(s)) s = `'${s}`;
     return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   }
-  function toCSV(cols, rows) {
+  /**
+   * opts.safe: guard every cell against formula injection (lists with typed text, e.g. clinic done notes, opened in Excel).
+   * Off for the files Sohar and the TMS Tracker read, which must keep their values exactly.
+   */
+  function toCSV(cols, rows, opts) {
+    const safe = !!(opts && opts.safe);
     const lines = [cols.join(',')];
-    for (const r of rows) lines.push(cols.map((c) => csvCell(r[c])).join(','));
+    for (const r of rows) lines.push(cols.map((c) => csvCell(r[c], safe)).join(','));
     return lines.join('\r\n') + '\r\n';
   }
   /** RFC 4180 CSV -> 2D array of strings. Handles quotes, embedded newlines, CRLF and a UTF-8 BOM. */
@@ -1642,7 +1650,7 @@
       tasks.push({
         'Done': '', 'Due By': r['Next Appt'], 'Next Appt': r['Next Appt'], 'Next Time': r['Next Time'], 'Next Location': r['Next Location'],
         'Per Nbr': r['Per Nbr'], 'MRN': r.MRN, 'Last Name': r['Last Name'], 'First Name': r['First Name'], 'Result Type': r['Sent As'],
-        'Task': task, 'Details': details, 'Choose in NextGen': r['Choose in NextGen'] || '', 'Sohar Link': r['Sohar Link'], 'Sohar Ref': r['Sohar Ref'], 'Task Key': key,
+        'Task': task, 'Details': details, 'Choose in NextGen': r['Choose in NextGen'] || '', 'Sohar Link': r['Sohar Link'], 'Sohar Ref': r['Sohar Ref'], 'Task Key': key, 'Clinic Note': '',
       });
     };
     const benefitText = (r) => [
@@ -1713,18 +1721,23 @@
     return lines.join('\n').trim() + '\n';
   }
 
-  /** Carry Done marks over from the previous task table, matched on Task Key. */
+  /** Carry Done marks and Clinic Notes over from the previous task table, matched on Task Key (each column on its own). */
   // A task row saved before v0.12 has a Per Nbr Task Key; its MRN column gives the key it has now.
   function keepDone(tasks, previous) {
-    const done = new Map();
+    const kept = { 'Done': new Map(), 'Clinic Note': new Map() };
     for (const p of previous || []) {
-      const d = String(p['Done'] || '').trim();
-      if (!d) continue;
-      done.set(String(p['Task Key']), d);
       const now = taskKey(keyOf(p), p['Sohar Ref'], p.Task, /\|G$/.test(String(p['Task Key'])) ? 'Guarantor' : '');
-      if (!done.has(now)) done.set(now, d);
+      for (const col of Object.keys(kept)) {
+        const d = String(p[col] || '').trim();
+        if (!d) continue;
+        kept[col].set(String(p['Task Key']), d);
+        if (!kept[col].has(now)) kept[col].set(now, d);
+      }
     }
-    return tasks.map((t) => (done.has(t['Task Key']) ? { ...t, Done: done.get(t['Task Key']) } : t));
+    return tasks.map((t) => {
+      const k = t['Task Key'], has = Object.keys(kept).filter((col) => kept[col].has(k));
+      return has.length ? { ...t, ...Object.fromEntries(has.map((col) => [col, kept[col].get(k)])) } : t;
+    });
   }
 
   // ---------- pane <-> dialog messages ----------

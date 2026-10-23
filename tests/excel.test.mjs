@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isDeepStrictEqual, inspect } from 'node:util';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { createMock } from './helpers/excel-mock.mjs';
 const C = createRequire(import.meta.url)('../core.js');
 
@@ -33,6 +34,11 @@ const RL = createRequire(import.meta.url)('../rules.js');
 const credRules = (n, tag) => Array.from({ length: n }, (_, i) => ({ Payer: `${tag} Payer ${Math.floor(i / 2)}`, State: i % 4 < 2 ? '' : 'WA', Credential: i % 2 ? 'MD' : 'NP',
   'Besse Approved': ['Yes', 'No', ''][i % 3], 'NP Fully Approved': i % 2 ? 'N/A' : 'No', 'Esketamine First Treatment': 'No', 'Esketamine Start': 'Yes', 'Esketamine Observation': 'Yes',
   'Match Names': `${tag} payer ${Math.floor(i / 2)}`, Notes: i % 5 ? '' : 'synthetic note' }));
+// v0.14 Clinic Notes / Clinic Payer Notes from returned Clinic Eligibility files. Made-up MRNs and payers.
+const clinicNotes = (n, tag) => Array.from({ length: n }, (_, i) => ({ MRN: `00900${i}`, Location: `${tag} Clinic`, Note: `${tag} note ${i}`, By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z` }));
+const clinicPayerNotes = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'NextGen Payer': `${tag} Payer ${i}`, Location: `${tag} Clinic`, 'Card Says': `${tag} PPO ${i}`,
+  Note: i % 3 ? '' : 'new card', By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z` }));
+const clinicApplied = (n, tag) => Array.from({ length: n }, (_, i) => ({ Location: `${tag} Clinic`, Kind: 'Task done', Key: `00900${i}|Fix member ID in NextGen`, When: `2026-10-22T1${i % 10}:00:00.000Z` }));
 
 // ---------- happy path ----------
 
@@ -41,14 +47,14 @@ test('writeTasks creates the sheet and table; a rewrite replaces every row', asy
   assert.deepEqual(await X.readTasks(), []);
   await X.writeTasks(C.TASK_COLS, tasks(7, 'old'));
   assert.deepEqual(m.sheetNames(), ['Import', 'NextGen Tasks']);
-  assert.deepEqual(m.tableInfo('tblNextGenTasks'), { sheet: 'NextGen Tasks', address: 'A1:P8', rows: 7, cols: 16 });
+  assert.deepEqual(m.tableInfo('tblNextGenTasks'), { sheet: 'NextGen Tasks', address: 'A1:Q8', rows: 7, cols: 17 }); // v0.14: Clinic Note last
   assert.deepEqual(await X.readTasks(), expected(C.TASK_COLS, tasks(7, 'old')));
   assert.equal((await X.readTasks())[0].MRN, '0000', 'text format keeps leading zeros');
   assert.equal(m.frozenRows('NextGen Tasks'), 1);
   assert.equal(m.activeSheet(), 'Import', 'writeTasks does not activate');
   await X.writeTasks(C.TASK_COLS, tasks(3, 'new'));
   assert.deepEqual(await X.readTasks(), expected(C.TASK_COLS, tasks(3, 'new')));
-  assert.equal(m.usedAddress('NextGen Tasks'), 'A1:P4', 'no leftover rows from the longer old table');
+  assert.equal(m.usedAddress('NextGen Tasks'), 'A1:Q4', 'no leftover rows from the longer old table');
   assert.deepEqual(m.tableNames(), ['tblNextGenTasks']);
 });
 
@@ -383,6 +389,9 @@ const CASES = {
   refs: { write: (X, rows) => X.writeSoharRefs(C.SOHAR_REF_COLS, rows), read: (X) => X.readSoharRefs(), cols: C.SOHAR_REF_COLS, make: refs, sheet: 'Sohar Refs', hidden: true },
   requests: { write: (X, rows) => X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, rows), read: (X) => X.readReverifyRequests(), cols: C.REVERIFY_REQUEST_COLS, make: requests, sheet: 'Re-verify Requests', hidden: true },
   credRules: { write: (X, rows) => X.writePayerCredRules(PR.HEADERS, rows), read: (X) => X.readPayerCredRules(), cols: PR.HEADERS, make: credRules, sheet: 'Payer Credential Rules', hidden: false },
+  clinicNotes: { write: (X, rows) => X.writeClinicNotes(RL.CLINIC_NOTE_COLS, rows), read: (X) => X.readClinicNotes(), cols: RL.CLINIC_NOTE_COLS, make: clinicNotes, sheet: 'Clinic Notes', hidden: false },
+  clinicPayerNotes: { write: (X, rows) => X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, rows), read: (X) => X.readClinicPayerNotes(), cols: RL.CLINIC_PAYER_NOTE_COLS, make: clinicPayerNotes, sheet: 'Clinic Payer Notes', hidden: false },
+  clinicApplied: { write: (X, rows) => X.writeClinicWorkApplied(RL.CLINIC_APPLIED_COLS, rows), read: (X) => X.readClinicWorkApplied(), cols: RL.CLINIC_APPLIED_COLS, make: clinicApplied, sheet: 'Clinic Work Applied', hidden: true },
 };
 const KNOBS = { op: 'failAtOp', sync: 'failAtSync', kill: 'killAfterSync' };
 const short = (v) => (v instanceof Error ? `Error: ${v.message}` : Array.isArray(v) ? `${v.length} rows` : inspect(v));
@@ -441,7 +450,8 @@ test('fail-safe: reopening the pane after any failure recovers or keeps the old 
 });
 // Payer learning tables (v0.10): the ledger grows past one chunk; the log and the rollup are rewritten from fewer rows.
 // Sohar Refs grows past one chunk (append-only); Re-verify Requests shrinks when requests are dropped.
-for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2], ['credRules', 6, 40]]) {
+for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2], ['credRules', 6, 40],
+  ['clinicNotes', 4, 1100], ['clinicPayerNotes', 30, 2], ['clinicApplied', 4, 1100]]) {
   test(`fail-safe: ${CASES[kase].sheet} survives a failure at every op, a failed sync, and Excel closing`, async () => {
     await sweep(kase, 'op', nOld, nNew);
     await sweep(kase, 'sync', nOld, nNew);
@@ -735,4 +745,160 @@ test('Payer Credential Rules: missing sheet reads [] (rule silent); import write
   assert.deepEqual(sig(RL.payerRulesFrom(await X.readPayerCredRules())), sig(rules));
   await X.writePayerCredRules(PR.HEADERS, RL.payerRuleRows(rules.slice(0, 1)));
   assert.equal((await X.readPayerCredRules()).length, 1, 'a re-import replaces every row');
+});
+
+test('v0.14 Clinic Notes and Clinic Payer Notes: missing reads []; mergeClinicWork rows save visible, read back as text and merge again', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  assert.deepEqual(await X.readClinicNotes(), []);
+  assert.deepEqual(await X.readClinicPayerNotes(), []);
+  const W = (Kind, Key, Value, Note, When) => ({ Kind, Key, MRN: Kind === 'Note' ? Key : '', LASFIR: '', Value, Note, By: 'Front desk', When });
+  // A fixed now: mergeClinicWork skips rows older than APPLIED_DAYS, so new Date() would fail this test from February 2027.
+  const ctx = (notes, payerNotes) => ({ location: 'Synthetic Bay', requests: [], tasks: [], sentDone: [], notes, payerNotes, now: new Date('2026-10-23T12:00:00Z') });
+  const first = RL.mergeClinicWork([W('Note', '0090001', '', 'Card on Monday', '2026-10-22T17:00:00.000Z'),
+    W('Payer note', 'Zenith CA', 'Zenith CA PPO 0012', 'new group', '2026-10-22T17:01:00.000Z')], ctx([], []));
+  await X.writeClinicNotes(RL.CLINIC_NOTE_COLS, first.notes);
+  await X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, first.payerNotes);
+  assert.equal(m.sheetVisibility('Clinic Notes'), 'Visible');
+  assert.equal(m.sheetVisibility('Clinic Payer Notes'), 'Visible');
+  assert.equal(m.activeSheet(), 'Import', 'neither activates');
+  assert.deepEqual(await X.readClinicNotes(), first.notes);
+  assert.equal((await X.readClinicNotes())[0].MRN, '0090001', 'leading zeros kept');
+  assert.deepEqual(await X.readClinicPayerNotes(), first.payerNotes);
+  // A later file: an older note loses, a newer blank one clears the payer note.
+  const second = RL.mergeClinicWork([W('Note', '0090001', '', 'stale', '2026-10-21T09:00:00.000Z'), W('Payer note', 'zenith ca', '', '', '2026-10-23T09:00:00.000Z')],
+    ctx(await X.readClinicNotes(), await X.readClinicPayerNotes()));
+  await X.writeClinicNotes(RL.CLINIC_NOTE_COLS, second.notes);
+  await X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, second.payerNotes);
+  assert.deepEqual((await X.readClinicNotes()).map((r) => r.Note), ['Card on Monday']);
+  assert.deepEqual(await X.readClinicPayerNotes(), []);
+});
+
+// ---------- v0.14 Clinic Work Inbox: flow-owned, created once, only read ----------
+// The Power Automate flow appends rows (modelled here with rows.add, as the Excel connector's "Add a row into a table" does).
+const inboxRows = (n, tag) => Array.from({ length: n }, (_, i) => ({ Location: `${tag} Clinic`, Kind: i % 2 ? 'Note' : 'Task done', Key: i % 2 ? `00900${i}` : `00900${i}|Fix member ID in NextGen`,
+  MRN: `00900${i}`, LASFIR: 'SYNPAT', Value: i % 2 ? '' : 'Yes', Note: `${tag} note ${i}`, By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z`,
+  File: `Clinic Eligibility - ${tag} Clinic 2026-10-22.xlsx`, Received: '2026-10-22T20:00:00.000Z' }));
+async function flowAppends(m, rows) {
+  await m.Excel.run(async (ctx) => { ctx.workbook.tables.getItem('tblClinicWorkInbox').rows.add(null, rows.map((r) => RL.INBOX_COLS.map((c) => r[c]))); await ctx.sync(); });
+}
+const inboxSnapshot = (m) => ({ info: m.tableInfo('tblClinicWorkInbox'), rows: m.tableRows('tblClinicWorkInbox', true), vis: m.sheetVisibility('Clinic Work Inbox'),
+  fmts: m.numberFormats('Clinic Work Inbox', m.tableInfo('tblClinicWorkInbox').address) });
+
+test('Clinic Work Inbox: missing reads null; set up once makes a visible header-only text table; the flow\'s rows read back as text', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  assert.equal(await X.readClinicInbox(), null, 'missing: the pane offers to set it up');
+  assert.equal(await X.createClinicInbox(RL.INBOX_COLS), true);
+  assert.deepEqual(m.tableInfo('tblClinicWorkInbox'), { sheet: 'Clinic Work Inbox', address: 'A1:K2', rows: 1, cols: 11 });
+  assert.equal(m.sheetVisibility('Clinic Work Inbox'), 'Visible');
+  assert.deepEqual(m.values('Clinic Work Inbox', 'A1:K1'), [RL.INBOX_COLS]);
+  assert.deepEqual(m.numberFormats('Clinic Work Inbox', 'A1:K2'), [RL.INBOX_COLS.map(() => '@'), RL.INBOX_COLS.map(() => '@')]);
+  assert.deepEqual(m.sheetNames(), ['Import', 'Clinic Work Inbox'], 'no staging sheet left');
+  assert.equal(m.activeSheet(), 'Import', 'set up does not move you');
+  assert.deepEqual(await X.readClinicInbox(), [], 'header only reads as no rows');
+  await flowAppends(m, inboxRows(3, 'Synthetic'));
+  const got = await X.readClinicInbox();
+  assert.deepEqual(got, expected(RL.INBOX_COLS, inboxRows(3, 'Synthetic')));
+  assert.equal(got[0].MRN, '009000', 'appended rows take the text format: leading zeros kept');
+  assert.equal(got[0].When, '2026-10-22T10:00:00.000Z', 'When stays ISO text, not a date serial');
+  assert.equal(RL.inboxWork(got, new Date('2026-10-23T12:00:00Z')).get('Synthetic Clinic').length, 3, 'rules.inboxWork reads the rows as they come back');
+  const before = inboxSnapshot(m);
+  assert.equal(await X.createClinicInbox(RL.INBOX_COLS), false, 'already there');
+  assert.deepEqual(inboxSnapshot(m), before, 'a second set up leaves the table exactly as it is');
+});
+
+test('Clinic Work Inbox: set up refuses a sheet of yours with the same name and changes nothing', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  m.addSheet('Clinic Work Inbox', [['my notes']]);
+  await assert.rejects(X.createClinicInbox(RL.INBOX_COLS), /already has a sheet named "Clinic Work Inbox".*Nothing was changed/);
+  assert.deepEqual(m.sheetNames(), ['Import', 'Clinic Work Inbox']);
+  assert.deepEqual(m.values('Clinic Work Inbox', 'A1:A1'), [['my notes']]);
+  assert.deepEqual(m.tableNames(), []);
+});
+
+test('fail-safe: Clinic Work Inbox set up cut off at any op, sync or Excel close: no half-made table, nothing else changed, the next try finishes', async () => {
+  const seed = async (m) => { await m.SoharExcel.writeTasks(C.TASK_COLS, tasks(3, 'old')); };
+  const m0 = createMock(); await seed(m0);
+  const tasksBefore = await m0.SoharExcel.readTasks(), visibleBefore = m0.visibleSheets();
+  const bad = [];
+  for (const mode of ['op', 'sync', 'kill']) {
+    const probe = createMock(); await seed(probe); probe.inject();
+    await probe.SoharExcel.createClinicInbox(RL.INBOX_COLS);
+    const total = mode === 'op' ? probe.opCount() : probe.syncCount();
+    assert.ok(total > 2, `${mode}: ${total} points`);
+    for (let k = 1; k <= total; k++) {
+      const m = createMock(), X = m.SoharExcel; await seed(m);
+      m.inject({ [KNOBS[mode]]: k });
+      let resolved = true; try { await X.createClinicInbox(RL.INBOX_COLS); } catch (e) { resolved = false; }
+      m.inject();
+      const tag = `${KNOBS[mode]}=${k}`;
+      if (m.tableNames().includes('tblClinicWorkInbox')) {
+        // The real name only ever sits on a complete header-only table.
+        const t = m.tableInfo('tblClinicWorkInbox');
+        if (t.cols !== 11 || !isDeepStrictEqual(m.values(t.sheet, 'A1:K1'), [RL.INBOX_COLS])) bad.push(`${tag}: half-made inbox ${inspect(t)}`);
+      } else if (resolved) bad.push(`${tag}: resolved without a table`);
+      if (!isDeepStrictEqual(await X.readTasks(), tasksBefore)) bad.push(`${tag}: NextGen Tasks changed`);
+      const extra = m.visibleSheets().filter((s) => !visibleBefore.includes(s) && s !== 'Clinic Work Inbox' && !s.startsWith('~saving'));
+      if (extra.length) bad.push(`${tag}: new visible sheets ${extra}`);
+      try {
+        await X.createClinicInbox(RL.INBOX_COLS);
+        if (!isDeepStrictEqual(m.tableInfo('tblClinicWorkInbox'), { sheet: 'Clinic Work Inbox', address: 'A1:K2', rows: 1, cols: 11 })) bad.push(`${tag}: next try left ${inspect(m.tableInfo('tblClinicWorkInbox'))}`);
+        if (m.sheetVisibility('Clinic Work Inbox') !== 'Visible') bad.push(`${tag}: inbox hidden after the next try`);
+        if (m.sheetNames().some((s) => s.startsWith('~saving'))) bad.push(`${tag}: staging sheet left after the next try: ${m.sheetNames()}`);
+        if (m.tableNames().some((t) => /_stg$/.test(t))) bad.push(`${tag}: staging table left: ${m.tableNames()}`);
+        await flowAppends(m, inboxRows(2, 'After'));
+        if ((await X.readClinicInbox()).length !== 2) bad.push(`${tag}: the flow's rows did not read back`);
+      } catch (e) { bad.push(`${tag}: the next try threw ${e.message}`); }
+    }
+  }
+  assert.deepEqual(bad, []);
+});
+
+test('Clinic Work Inbox: no write path touches it (every mutating export run against a workbook holding it), and it is not OWNED', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  m.seedTable('Config', 'tblConfig', ['Setting', 'Value', 'What it does'], [{ Setting: 'Scope', Value: 'Upcoming', 'What it does': '' }]);
+  m.seedTable('Location', 'tblLocationState', ['Location', 'State'], [{ Location: 'Synthetic Clinic', State: 'CA' }]);
+  m.seedTable('Patients', 'tblPatients', ['Per Nbr', 'Zip'], [{ 'Per Nbr': '1', Zip: '02134' }]);
+  m.seedTable('Payer Map', 'tblPayerMap', ['NextGen Payer Name', 'Sohar payerId', 'Sohar payerName', 'Confidence', 'Action', 'Notes', 'Last reviewed'], [], { text: false });
+  m.registerXlsx('b64-report', [{ name: 'Report', rows: [['Per Nbr', 'Zip'], ['001', '02134']] }]);
+  await X.createClinicInbox(RL.INBOX_COLS);
+  await flowAppends(m, inboxRows(4, 'Synthetic'));
+  const before = inboxSnapshot(m);
+  const two = (cols) => [Object.fromEntries(cols.map((c) => [c, `${c} 1`])), Object.fromEntries(cols.map((c) => [c, `${c} 2`]))];
+  const calls = {
+    upsertPayerMap: () => X.upsertPayerMap({ nextgenPayerName: 'Plan Z', payerId: '01111', payerName: 'Z', confidence: 'Exact' }),
+    upsertPayerMapMany: () => X.upsertPayerMapMany([{ nextgenPayerName: 'Plan Y', payerId: '02222', payerName: 'Y', confidence: 'Exact' }]),
+    replaceTable: () => X.replaceTable('tblPatients', ['Per Nbr', 'Zip'], [{ 'Per Nbr': '0010', Zip: '01234' }]),
+    ensureConfigRows: () => X.ensureConfigRows(C.REVERIFY_CONFIG_ROWS),
+    setConfigValue: () => X.setConfigValue('Last updated', 'now'),
+    appendPayerMapLog: () => X.appendPayerMapLog(C.PAYER_MAP_LOG_COLS, mapLog(2, 'a')),
+    writeFee: () => X.writeFee('locations', ['Location'], [{ Location: 'Synthetic Clinic' }]),
+    writeTasks: () => X.writeTasks(C.TASK_COLS, tasks(3, 't')),
+    setTaskDone: () => X.setTaskDone('t Task Key 0', true),
+    writeImportRows: () => X.writeImportRows([['Per Nbr'], ['001']]),
+    importXlsx: () => X.importXlsx('b64-report'),
+    readXlsxRows: () => X.readXlsxRows('b64-report'),
+    recoverAll: () => X.recoverAll(),
+    activate: () => X.activate('Clinic Work Inbox'),
+    createClinicInbox: () => X.createClinicInbox(RL.INBOX_COLS),
+  };
+  // Every other write* export: a plain (cols, rows) table save.
+  for (const k of Object.keys(X)) if (/^write/.test(k) && !calls[k]) calls[k] = () => X[k](['Key', 'Record'], two(['Key', 'Record']));
+  // A new mutating export must be listed here (or be a write*) so this proof keeps covering every write path.
+  const mutating = Object.keys(X).filter((k) => typeof X[k] === 'function' && /^(write|upsert|replace|ensure|set|append|import|recover|activate|create|insert|delete|clear|add)/.test(k));
+  assert.deepEqual(mutating.filter((k) => !calls[k]), [], 'every mutating export is exercised');
+  assert.ok(mutating.length >= 35, `${mutating.length} write paths`);
+  const bad = [];
+  for (const [k, f] of Object.entries(calls)) {
+    try { await f(); } catch (e) { bad.push(`${k} threw ${e.message}`); continue; }
+    if (!isDeepStrictEqual(inboxSnapshot(m), before)) { bad.push(`${k} changed the inbox`); break; }
+  }
+  assert.deepEqual(bad, []);
+  assert.deepEqual(await X.readClinicInbox(), expected(RL.INBOX_COLS, inboxRows(4, 'Synthetic')));
+  // And by construction: the inbox is outside the stage-and-swap set, and only its two functions name it.
+  const src = readFileSync(new URL('../excel.js', import.meta.url), 'utf8');
+  const owned = src.slice(src.indexOf('const OWNED = {'), src.indexOf('};', src.indexOf('const OWNED = {')));
+  assert.doesNotMatch(owned, /Inbox/);
+  assert.deepEqual(src.match(/tblClinicWorkInbox/g), ['tblClinicWorkInbox'], 'the table name appears once, in INBOX');
+  const uses = [...src.matchAll(/INBOX\.(table|sheet)/g)].map((x) => src.lastIndexOf('async function', x.index)).map((i) => src.slice(i, src.indexOf('(', i)));
+  assert.deepEqual([...new Set(uses)], ['async function readClinicInbox', 'async function createClinicInbox']);
 });

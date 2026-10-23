@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.13.0">
+  <link rel="stylesheet" href="style.css?v=0.14.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -174,13 +174,16 @@
     <details class="more section" id="clinicSection" open>
       <summary>Clinic files and emails</summary>
       <p class="hint">One file per location for the clinic team: patients with an upcoming visit, benefits, flags and a re-verify link. Opening it in Excel shows the Clinic tab, where the clinic ticks <b>Re-verify anyway</b> for patients the skip window left out. The email summary uses LASFIR and MRN only.</p>
-      <p class="hint warn-text">Clinic files contain PHI. Share them only through MHS OneDrive or Teams with the clinic team; do not email them outside MHS.</p>
+      <p class="hint"><b>Clinic Template Tool file</b>: the same clinic's patients for the Clinic Template Tool, which opens it on its own. Patients show as LASFIR and MRN (no names or dates of birth). The clinic ticks tasks done (with a note if it wants), asks for a re-verify and adds patient or payer notes. Put the file in the clinic's folder in the Clinic Eligibility library: the clinic inbox below picks up its changes. Without the inbox, the clinic sends the file back.</p>
+      <p class="hint warn-text">Clinic files and Clinic Template Tool files contain PHI. Share them only through MHS OneDrive or Teams with the clinic team; do not email them outside MHS.</p>
       <div id="clinicFiles"><p class="hint">Shows after the NextGen report is loaded.</p></div>
       <input type="file" id="fileClinicBack" accept=".xlsx,.xlsm" multiple hidden>
       <div id="dropClinicBack" class="drop slim" tabindex="0" role="button" aria-label="Bring back clinic files">
-        Bring back clinic files: drop them here, or <u>choose files</u><br><span class="hint">their Re-verify anyway ticks go on the next verification file</span>
+        Bring back clinic files: drop them here, or <u>choose files</u><br><span class="hint">Re-verify anyway ticks go on the next verification file; tasks done, notes and payer notes are saved here</span>
       </div>
-      <div id="clinicFilesNote" class="result" hidden></div>
+      <div id="inboxBox" class="result"></div>
+      <div id="clinicFilesNote" class="result" role="status" aria-live="polite" tabindex="-1" hidden></div>
+      <div id="clinicNotesBox" class="result"></div>
     </details>
 
     <details class="more section" id="credSection">
@@ -201,6 +204,7 @@
       <summary>Payer learning</summary>
       <p class="hint">Appointments whose payer is unmapped or whose verification failed, by NextGen payer, with payer test results and guarantor search themes. Full screen has the whole list.</p>
       <div id="learnBox" class="result"><p class="hint">Shows after the NextGen report is loaded.</p></div>
+      <div id="payerNotesBox" class="result" hidden></div>
     </details>
 
     <details class="more section" id="evidenceSection">
@@ -246,12 +250,12 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.13.0"></script>
-  <script src="core.js?v=0.13.0"></script>
-  <script src="rules.js?v=0.13.0"></script>
-  <script src="fees.js?v=0.13.0"></script>
-  <script src="xlsx.js?v=0.13.0"></script>
-  <script src="excel.js?v=0.13.0"></script>
-  <script src="app.js?v=0.13.0"></script>
+  <script src="payer-rules.js?v=0.14.0"></script>
+  <script src="core.js?v=0.14.0"></script>
+  <script src="rules.js?v=0.14.0"></script>
+  <script src="fees.js?v=0.14.0"></script>
+  <script src="xlsx.js?v=0.14.0"></script>
+  <script src="excel.js?v=0.14.0"></script>
+  <script src="app.js?v=0.14.0"></script>
 </body>
 </html>
