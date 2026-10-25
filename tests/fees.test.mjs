@@ -61,7 +61,8 @@ test('config: Fee estimates is Off unless the row says On; toggle defaults from 
   assert.equal(F.feeConfig({ 'Fee estimates': 'yes' }).on, true);
   assert.deepEqual(F.feeConfig({}).defaults, { deductible: 'Applies', coinsurance: 'After deductible', copay: 'Added' });
   assert.deepEqual(F.feeConfig({ 'Estimate deductible': 'waived', 'Estimate coinsurance': 'before', 'Estimate copay': 'None' }).defaults, { deductible: 'Waived', coinsurance: 'Before deductible', copay: 'None' });
-  assert.deepEqual(F.FEE_CONFIG_ROWS.map((r) => [r.setting, r.value]), [['Fee estimates', 'Off'], ['Estimate deductible', 'Applies'], ['Estimate coinsurance', 'After deductible'], ['Estimate copay', 'Added']]);
+  assert.deepEqual(F.FEE_CONFIG_ROWS.map((r) => [r.setting, r.value]), [['Fee estimates', 'Off'], ['Estimate deductible', 'Applies'], ['Estimate coinsurance', 'After deductible'], ['Estimate copay', 'Added'],
+    ['BlueCard host CA', ''], ['BlueCard host TX', ''], ['Medicare without Medicare column', 'Flag'], ['Medicare payer column exceptions', '']]);
 });
 
 test('parse: visible tabs only; tabs with no MD / NP payer columns are skipped', () => {
@@ -682,4 +683,91 @@ test('fix: schedule and info saved from different uploads are flagged, and the o
   const app = readFileSync(new URL('../app.js', import.meta.url), 'utf8');
   assert.match(app, /tabSummary: F\.metaMatches\(f\.meta, f\.schedule\.length\) \? F\.readMeta\(f\.meta\)\.tabSummary : \[\]/);
   assert.match(app, /the fee schedule rates were replaced, but its info \(file name, upload date, tab summary\) was not saved/);
+});
+
+// v0.15: regional payer matching. Invented tabs, payers and rates; regions come from Config Location to State.
+test('v0.15: payerState, tabRegions and productOf', () => {
+  assert.equal(F.payerState('Blue Cross Blue Shield of Texas'), 'TX');
+  assert.equal(F.payerState('Blue Shield of California'), 'CA');
+  assert.equal(F.payerState('Acme Health of West Virginia'), 'WV', 'longest state name wins');
+  assert.equal(F.payerState('Acme Health'), '');
+  const locs = [{ 'NextGen Location': 'Harbor Point', 'Fee Tab': 'Bayview' }, { 'NextGen Location': 'Mill Street', 'Fee Tab': 'Bayview' },
+    { 'NextGen Location': 'Lone Ridge', 'Fee Tab': 'Ridge' }, { 'NextGen Location': 'Faraway', 'Fee Tab': '' }];
+  const rg = F.tabRegions(locs, { 'harbor point': 'ca', 'Lone Ridge': 'TX' });
+  assert.deepEqual(rg.get('Bayview'), { states: ['CA'], missing: ['Mill Street'] });
+  assert.deepEqual(rg.get('Ridge'), { states: ['TX'], missing: [] });
+  assert.equal(rg.has(''), false);
+  assert.equal(F.productOf('Acme BS MHSA'), 'mhsa');
+  assert.equal(F.productOf('Acme Medicare Advantage'), 'medicare');
+  assert.equal(F.productOf('Acme Health PPO'), '');
+});
+
+test('v0.15: matchFeePayerSohar blocks another state, keeps the product line, falls back to Sohar and group names', () => {
+  const cols = ['Blue Shield', 'BS MHSA', 'Acme Health', 'Acme Medicare'];
+  const ca = { states: ['CA'], missing: [] };
+  const tx = F.matchFeePayerSohar({ payer: 'Acme Health of Texas', soharName: 'Acme Health of Texas' }, cols, ca);
+  assert.equal(tx.feePayer, '');
+  assert.match(tx.note, /TX plan; this tab is CA/);
+  assert.equal(F.matchFeePayerSohar({ payer: 'Acme BS MHSA', soharName: 'Blue Shield of California', nextgen: 'Acme BS MHSA' }, cols, ca).feePayer, 'BS MHSA');
+  // NextGen name unknown to the fee schedule: Sohar's group payer name finds the column.
+  const g = F.matchFeePayerSohar({ payer: 'ZZ Unknown Plan', soharName: 'ZZ Unknown Plan', groupName: 'Acme Health' }, cols, ca);
+  assert.equal(g.feePayer, 'Acme Health');
+  assert.match(g.note, /matched on "Acme Health"/);
+  // A Medicare plan never takes a commercial column, whatever name matched.
+  assert.equal(F.matchFeePayerSohar({ payer: 'Acme Health', plan: 'Acme Medicare Advantage HMO' }, cols, ca).feePayer, 'Acme Medicare');
+  // Different coverage than NextGen: the NextGen name is not used.
+  assert.equal(F.matchFeePayerSohar({ payer: 'ZZ Other', nextgen: 'Acme Health', coverageDiffers: true }, cols, ca).feePayer, '');
+  // A tab with no Config region: a match is only Medium, with the fix in the note.
+  const none = F.matchFeePayerSohar({ payer: 'Acme Health' }, cols, { states: [], missing: ['Mill Street'] });
+  assert.deepEqual([none.feePayer, none.confidence], ['Acme Health', 'Medium']);
+  assert.match(none.note, /Add Mill Street to Config Location to State/);
+});
+
+test('v0.15: prepareEstimates keys product lines by the NextGen name, fills Sohar payerId and Region, honors a Sohar payerId manual row', () => {
+  const res = [
+    mk({ 'Per Nbr': '21', 'Next Appt': '11/02/2026', 'Next Event': 'TMS Treatment', 'Next Location': 'Harbor Point Clinic', 'Next Provider': 'Doe, Pat MD',
+      'Sohar Payer': 'Blue Shield of California', 'Sohar payerId': 'SBX1', 'NextGen Payer': 'BS 65 Senior', Copay: '0', Coinsurance: '20%', 'Deductible Remaining': '0', 'OOP Remaining': '100' }),
+    mk({ 'Per Nbr': '22', 'Next Appt': '11/02/2026', 'Next Event': 'TMS Treatment', 'Next Location': 'Harbor Point Clinic', 'Next Provider': 'Doe, Pat MD',
+      'Sohar Payer': 'Blue Cross Blue Shield of Texas', 'Sohar payerId': 'SBX2', 'NextGen Payer': 'BCBS TX', Copay: '0', Coinsurance: '20%', 'Deductible Remaining': '0', 'OOP Remaining': '100' }),
+  ];
+  const locationState = { 'Harbor Point Clinic': 'CA' };
+  const q = F.prepareEstimates({ results: res, scheduleRows: F.parseFeeSchedule(WB).rows, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', locationState });
+  const c21 = q.contexts[21], c22 = q.contexts[22];
+  assert.equal(c21.payerSource, 'NextGen (product line)');
+  assert.equal(c21.payer, 'BS 65 Senior');
+  assert.equal(c21.region, 'CA');
+  assert.equal(c22.ok, false, 'a Texas Blue plan never gets a California rate by name');
+  assert.ok(c22.flags.some((f) => /set Config "BlueCard host CA"/.test(f)), 'an out-of-state Blue plan waits for Config BlueCard host');
+  const row22 = q.payerRows.find((r) => r.Payer === 'Blue Cross Blue Shield of Texas');
+  assert.deepEqual([row22['Sohar payerId'], row22.Region, row22['Fee Payer']], ['SBX2', 'CA', '']);
+  assert.deepEqual(Object.keys(row22), F.FEE_PAYER_MAP_COLS, 'rows carry exactly the sheet columns');
+  // Staff map the Sohar payer itself (blank Payer): it applies whatever NextGen calls the plan.
+  const manual = { Payer: '', 'Sohar payerId': 'SBX2', 'Fee Tab': '', Region: '', 'Fee Payer': 'Kaiser', Confidence: '', Source: 'manual', 'Auto Match': '', Note: '' };
+  const q2 = F.prepareEstimates({ results: res, scheduleRows: F.parseFeeSchedule(WB).rows, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', locationState, payerMap: [manual] });
+  assert.equal(q2.contexts[22].feePayer, 'Kaiser');
+  assert.ok(q2.payerRows.some((r) => r.Payer === '' && r['Sohar payerId'] === 'SBX2'), 'the manual Sohar payerId row is kept');
+});
+
+test('v0.15: Config decides out-of-state Blue plans (BlueCard host) and Medicare plans with no Medicare column', () => {
+  const cols = ['Acme Blue', 'Blue Shield', 'Kaiser', 'Acme Health'];
+  const ca = { states: ['CA'], missing: [] };
+  const il = { payer: 'Blue Cross Blue Shield of Illinois', soharName: 'Blue Cross Blue Shield of Illinois' };
+  assert.match(F.matchFeePayerSohar(il, cols, ca, F.feeConfig({})).note, /set Config "BlueCard host CA"/);
+  const host = F.feeConfig({ 'BlueCard host CA': 'acme blue' });
+  assert.deepEqual(host.blueCardHosts, { CA: 'acme blue' });
+  const hit = F.matchFeePayerSohar(il, cols, ca, host);
+  assert.deepEqual([hit.feePayer, hit.confidence], ['Acme Blue', 'High']);
+  assert.match(F.matchFeePayerSohar(il, cols, ca, F.feeConfig({ 'BlueCard host CA': 'Nope' })).note, /not a column on this tab/);
+  // Not a Blue plan: another state is still blocked.
+  assert.equal(F.matchFeePayerSohar({ payer: 'Acme Health of Texas', soharName: 'Acme Health of Texas' }, cols, ca, host).feePayer, '');
+
+  const senior = { payer: 'Kaiser', plan: 'Kaiser Senior Advantage HMO' };
+  assert.equal(F.matchFeePayerSohar(senior, cols, ca, F.feeConfig({})).feePayer, '', 'default: flagged');
+  assert.match(F.matchFeePayerSohar(senior, cols, ca, F.feeConfig({})).note, /only Kaiser/);
+  const exc = F.matchFeePayerSohar(senior, cols, ca, F.feeConfig({ 'Medicare payer column exceptions': 'Kaiser; Other' }));
+  assert.equal(exc.feePayer, 'Kaiser');
+  assert.match(exc.note, /Medicare payer column exceptions/);
+  assert.equal(F.matchFeePayerSohar({ payer: 'Acme Health', plan: 'Medicare Advantage' }, cols, ca, F.feeConfig({ 'Medicare payer column exceptions': 'Kaiser' })).feePayer, '', 'exceptions are per column');
+  assert.equal(F.matchFeePayerSohar({ payer: 'Acme Health', plan: 'Medicare Advantage' }, cols, ca, F.feeConfig({ 'Medicare without Medicare column': 'Use payer column' })).feePayer, 'Acme Health');
+  for (const s of ['BlueCard host CA', 'BlueCard host TX', 'Medicare without Medicare column', 'Medicare payer column exceptions']) assert.ok(F.FEE_CONFIG_ROWS.some((r) => r.setting === s), s);
 });

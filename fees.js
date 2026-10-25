@@ -29,6 +29,10 @@
     { setting: 'Estimate deductible', value: 'Applies', what: 'Fee estimates, until staff change it for a fee payer: Applies or Waived.' },
     { setting: 'Estimate coinsurance', value: 'After deductible', what: 'Fee estimates, until staff change it for a fee payer: After deductible, Before deductible or None.' },
     { setting: 'Estimate copay', value: 'Added', what: 'Fee estimates, until staff change it for a fee payer: Added (only when Sohar returned a copay above $0) or None.' },
+    { setting: 'BlueCard host CA', value: '', what: 'Fee estimates: the fee column (as named on the CA fee tabs, e.g. Anthem or Blue Shield) for an out-of-state Blue Cross / Blue Shield plan seen at a CA clinic (BlueCard). Blank: flagged, no estimate. Add a row per state, e.g. BlueCard host TX.' },
+    { setting: 'BlueCard host TX', value: '', what: 'Fee estimates: the fee column on the TX fee tabs for an out-of-state Blue plan seen at a TX clinic. Blank: flagged, no estimate.' },
+    { setting: 'Medicare without Medicare column', value: 'Flag', what: 'Fee estimates: a Medicare plan whose payer has no Medicare column on the fee tab. Flag = no estimate, staff map it on Fee Payer Map. Use payer column = the payer\'s commercial column.' },
+    { setting: 'Medicare payer column exceptions', value: '', what: 'Fee estimates: fee payer columns (; separated, e.g. Kaiser) used for that payer\'s Medicare plans even when the row above says Flag.' },
   ];
   const TOGGLES = { deductible: ['Applies', 'Waived'], coinsurance: ['After deductible', 'Before deductible', 'None'], copay: ['Added', 'None'] };
   const TOGGLE_DEFAULTS = { deductible: 'Applies', coinsurance: 'After deductible', copay: 'Added' };
@@ -41,7 +45,12 @@
   /** Config {Setting: Value} -> {on, defaults}. Off unless the row says On / Yes / True. */
   function feeConfig(cfg) {
     const c = cfg || {};
+    const blueCardHosts = {};
+    for (const [k, v] of Object.entries(c)) { const m = /^bluecard host ([a-z]{2})$/i.exec(str(k)); if (m && str(v)) blueCardHosts[m[1].toUpperCase()] = str(v); }
     return {
+      blueCardHosts,
+      medicareFallback: /^use/i.test(str(c['Medicare without Medicare column'])) ? 'Use payer column' : 'Flag',
+      medicareExceptions: str(c['Medicare payer column exceptions']).split(/[;\n]/).map(str).filter(Boolean),
       on: /^(on|yes|y|true|1)$/i.test(str(c['Fee estimates'])),
       defaults: {
         deductible: pickToggle('deductible', c['Estimate deductible'], TOGGLE_DEFAULTS.deductible),
@@ -470,47 +479,152 @@
     return c.distinctive ? { feePayer: c.name, confidence: 'High', note: '' } : { feePayer: c.name, confidence: 'Medium', note: 'Matched on generic words only; check it' };
   }
 
-  const FEE_PAYER_MAP_COLS = ['Payer', 'Fee Tab', 'Fee Payer', 'Confidence', 'Source', 'Auto Match', 'Note'];
+  const FEE_PAYER_MAP_COLS = ['Payer', 'Sohar payerId', 'Fee Tab', 'Region', 'Fee Payer', 'Confidence', 'Source', 'Auto Match', 'Note'];
   const pairKey = (payer, tab) => `${keyOf(payer)}|${keyOf(tab)}`;
+
+  // ---------- region (Config "Location to State") ----------
+  // Fee schedules are regional and so are payers: "Blue Cross Blue Shield of Texas" must never take a California tab's
+  // Blue Shield rate. A tab's region is the Config state of the NextGen locations mapped to it on Fee Locations (never
+  // the Config default state: an unlisted location is flagged, not assumed).
+  const STATE_NAMES = { alabama: 'AL', alaska: 'AK', arizona: 'AZ', arkansas: 'AR', california: 'CA', colorado: 'CO', connecticut: 'CT', delaware: 'DE',
+    florida: 'FL', georgia: 'GA', hawaii: 'HI', idaho: 'ID', illinois: 'IL', indiana: 'IN', iowa: 'IA', kansas: 'KS', kentucky: 'KY', louisiana: 'LA',
+    maine: 'ME', maryland: 'MD', massachusetts: 'MA', michigan: 'MI', minnesota: 'MN', mississippi: 'MS', missouri: 'MO', montana: 'MT', nebraska: 'NE',
+    nevada: 'NV', 'new hampshire': 'NH', 'new jersey': 'NJ', 'new mexico': 'NM', 'new york': 'NY', 'north carolina': 'NC', 'north dakota': 'ND', ohio: 'OH',
+    oklahoma: 'OK', oregon: 'OR', pennsylvania: 'PA', 'rhode island': 'RI', 'south carolina': 'SC', 'south dakota': 'SD', tennessee: 'TN', texas: 'TX',
+    utah: 'UT', vermont: 'VT', virginia: 'VA', washington: 'WA', 'west virginia': 'WV', wisconsin: 'WI', wyoming: 'WY' };
+  /** The state a payer name names ("BCBS of Texas" -> TX, "Blue Shield of California" -> CA), or '' when it names none. */
+  function payerState(name) {
+    const t = ` ${keyOf(name)} `;
+    let hit = '';
+    for (const n of Object.keys(STATE_NAMES)) if (t.includes(` ${n} `) && n.length >= hit.length) hit = n; // "west virginia" over "virginia"
+    if (hit) return STATE_NAMES[hit];
+    const m = / of (tx|ca|wa|ga|or|az|nv|il|ny|fl) /.exec(t);
+    return m ? m[1].toUpperCase() : '';
+  }
+  /**
+   * Fee tab -> {states: [..], missing: [locations with no Config state]} from Fee Locations rows and the Config
+   * Location to State table (location names matched ignoring case and punctuation).
+   */
+  function tabRegions(locationRows, locationState) {
+    const ls = new Map(Object.entries(locationState || {}).map(([k, v]) => [keyOf(k), str(v).toUpperCase()]));
+    const out = new Map();
+    for (const r of locationRows || []) {
+      const tab = str(r['Fee Tab']), loc = str(r['NextGen Location']);
+      if (!tab || !loc) continue;
+      if (!out.has(tab)) out.set(tab, { states: [], missing: [] });
+      const t = out.get(tab), st = ls.get(keyOf(loc));
+      if (st) { if (!t.states.includes(st)) t.states.push(st); } else if (!t.missing.includes(loc)) t.missing.push(loc);
+    }
+    return out;
+  }
+  const regionText = (rg) => (rg && rg.states.length ? rg.states.join('/') : '');
+  /** A plan's product line, the part a fee schedule splits payer columns on: 'medicare', 'mhsa' or ''. */
+  function productOf(name) {
+    if (/\bmhsa\b/i.test(str(name))) return 'mhsa';
+    return medicareish(feeTokens(name)) ? 'medicare' : '';
+  }
+  // Blue Cross / Blue Shield licensees: an out-of-state one is paid through the local host plan (BlueCard).
+  const BLUE_RE = /\b(blue\s*cross|blue\s*shield|bcbs|anthem|highmark|regence|premera|wellmark|carefirst|excellus|horizon|independence)\b/i;
+  /**
+   * Payer -> fee column on one tab, Sohar-aware. cand: {payer, soharPayerId, soharName, groupName, nextgen, plan,
+   * coverageDiffers}; region: a tabRegions entry; rules: feeConfig (blueCardHosts, medicareFallback, medicareExceptions).
+   * Names are tried in order and the first High match wins (else the best Medium): the row's payer, then (when Sohar
+   * found the same coverage) the NextGen name, then Sohar's payer and group names. A payer naming another state than the
+   * tab's region never matches, except an out-of-state Blue plan, which takes Config "BlueCard host <state>". A Medicare
+   * plan (by any of its names or the Sohar plan) takes a Medicare column; with none, Config "Medicare without Medicare
+   * column" / "Medicare payer column exceptions" decide whether the payer's other column is used.
+   */
+  function matchFeePayerSohar(cand, feePayers, region, rules) {
+    const c = cand || {}, ru = rules || {};
+    const ps = payerState(c.soharName) || payerState(c.groupName) || payerState(c.payer);
+    if (ps && region && region.states.length && !region.states.includes(ps)) {
+      const plan = c.soharName || c.payer;
+      if (!BLUE_RE.test(`${c.soharName} ${c.groupName} ${c.payer}`)) return { feePayer: '', confidence: 'Low', note: `${plan} is a ${ps} plan; this tab is ${regionText(region)}` };
+      const st = region.states[0], host = str((ru.blueCardHosts || {})[st]);
+      if (!host) return { feePayer: '', confidence: 'Low', note: `Out-of-state Blue plan (${plan}, ${ps}) at a ${st} clinic: set Config "BlueCard host ${st}" to the local Blue column` };
+      const col = (feePayers || []).find((p) => keyOf(p) === keyOf(host));
+      return col ? { feePayer: col, confidence: 'High', note: `BlueCard: ${ps} Blue plan at a ${st} clinic, Config "BlueCard host ${st}"` }
+        : { feePayer: '', confidence: 'Low', note: `Config "BlueCard host ${st}" is "${host}", which is not a column on this tab` };
+    }
+    const wantMedicare = [c.payer, c.nextgen, c.plan].some((n) => productOf(n) === 'medicare');
+    // A Medicare plan whose payer name doesn't say so (only the Sohar plan does) also tries "<name> Medicare".
+    const names = [...new Set([c.payer, c.coverageDiffers ? '' : c.nextgen, c.soharName, c.groupName].map(str).filter(Boolean)
+      .flatMap((n) => (wantMedicare && productOf(n) !== 'medicare' ? [n, `${n} Medicare`] : [n])))];
+    const exceptions = new Set((ru.medicareExceptions || []).map(keyOf));
+    let best = null, nonMedicare = null;
+    for (const n of names) {
+      const m = matchFeePayer(n, feePayers);
+      const tagged = n === str(c.payer) ? m : { ...m, note: [m.note, `matched on "${n}"`].filter(Boolean).join('; ') };
+      if (m.feePayer && wantMedicare && !medicareish(feeTokens(m.feePayer))) { if (!nonMedicare && m.confidence !== 'Low') nonMedicare = tagged; continue; }
+      if (m.confidence === 'High') { best = tagged; break; }
+      if (!best || (m.confidence === 'Medium' && best.confidence !== 'Medium')) best = tagged;
+    }
+    if (wantMedicare && (!best || !best.feePayer) && nonMedicare) {
+      const why = exceptions.has(keyOf(nonMedicare.feePayer)) ? 'Config "Medicare payer column exceptions"' : ru.medicareFallback === 'Use payer column' ? 'Config "Medicare without Medicare column"' : '';
+      if (why) best = { ...nonMedicare, note: [nonMedicare.note, `Medicare plan on the ${nonMedicare.feePayer} column (${why})`].filter(Boolean).join('; ') };
+    }
+    if (best && !best.feePayer && wantMedicare) best = { ...best, note: `Medicare plan; no Medicare column for it on this tab${nonMedicare ? ` (only ${nonMedicare.feePayer})` : ''}. Map it on Fee Payer Map, or set Config "Medicare without Medicare column"` };
+    if (best && best.feePayer && region && region.missing.length && !region.states.length) {
+      best = { ...best, confidence: best.confidence === 'High' ? 'Medium' : best.confidence, note: [best.note, `Add ${region.missing.join(', ')} to Config Location to State`].filter(Boolean).join('; ') };
+    }
+    return best || { feePayer: '', confidence: 'Low', note: 'No payer name' };
+  }
+
   /**
    * Fee Payer Map rows: one per payer and fee tab seen. A row a person changed (Source manual, or Fee Payer differs from
-   * Auto Match) is kept; a manual row with a blank Fee Tab applies to every tab. Others are auto-matched again.
+   * Auto Match) is kept; a manual row with a blank Fee Tab applies to every tab. Others are auto-matched again, with
+   * the Sohar-aware matcher when the pair carries Sohar info (pairs [{payer, tab, cand?}]; regions from tabRegions).
    */
-  function feePayerMapRows(prev, pairs, index) {
+  function feePayerMapRows(prev, pairs, index, regions, rules) {
     const out = new Map();
     const isManual = (r) => /^manual/i.test(str(r.Source)) || str(r['Fee Payer']) !== str(r['Auto Match']);
     // Payers with a manual every-tab row (blank Fee Tab): that row is the answer on every tab, so no auto rows for them.
     const everyTab = new Set((prev || []).filter((r) => keyOf(r.Payer) && !keyOf(r['Fee Tab']) && isManual(r)).map((r) => keyOf(r.Payer)));
     for (const r of prev || []) {
       const k = pairKey(r.Payer, r['Fee Tab']);
+      // A manual row keyed by Sohar payerId alone (blank Payer) is kept as is.
+      if (!keyOf(r.Payer) && str(r['Sohar payerId']) && isManual(r)) { out.set(`sohar:${str(r['Sohar payerId'])}|${keyOf(r['Fee Tab'])}`, { Payer: '', 'Sohar payerId': str(r['Sohar payerId']), 'Fee Tab': str(r['Fee Tab']), Region: str(r.Region), 'Fee Payer': str(r['Fee Payer']), Confidence: 'Manual', Source: 'manual', 'Auto Match': str(r['Auto Match']), Note: str(r.Note) }); continue; }
       if (!keyOf(r.Payer) || out.has(k)) continue;
       const v = str(r['Fee Payer']), a = str(r['Auto Match']);
-      if (isManual(r)) out.set(k, { Payer: str(r.Payer), 'Fee Tab': str(r['Fee Tab']), 'Fee Payer': v, Confidence: 'Manual', Source: 'manual', 'Auto Match': a, Note: str(r.Note) });
-      else if (keyOf(r['Fee Tab']) && !everyTab.has(keyOf(r.Payer))) out.set(k, { Payer: str(r.Payer), 'Fee Tab': str(r['Fee Tab']), stale: true });
+      if (isManual(r)) out.set(k, { Payer: str(r.Payer), 'Sohar payerId': str(r['Sohar payerId']), 'Fee Tab': str(r['Fee Tab']), Region: str(r.Region), 'Fee Payer': v, Confidence: 'Manual', Source: 'manual', 'Auto Match': a, Note: str(r.Note) });
+      else if (keyOf(r['Fee Tab']) && !everyTab.has(keyOf(r.Payer))) out.set(k, { Payer: str(r.Payer), 'Sohar payerId': str(r['Sohar payerId']), 'Fee Tab': str(r['Fee Tab']), stale: true });
     }
-    for (const { payer, tab } of pairs || []) {
-      const k = pairKey(payer, tab);
-      if (keyOf(payer) && keyOf(tab) && !out.has(k) && !everyTab.has(keyOf(payer))) out.set(k, { Payer: str(payer), 'Fee Tab': str(tab), stale: true });
+    const candBy = new Map();
+    for (const p of pairs || []) {
+      const k = pairKey(p.payer, p.tab);
+      if (p.cand && !candBy.has(k)) candBy.set(k, p.cand);
+      if (keyOf(p.payer) && keyOf(p.tab) && !out.has(k) && !everyTab.has(keyOf(p.payer))) out.set(k, { Payer: str(p.payer), 'Sohar payerId': str(p.cand && p.cand.soharPayerId), 'Fee Tab': str(p.tab), stale: true });
     }
-    for (const row of out.values()) {
+    for (const [k, row] of out) {
+      const rg = regions && regions.get(row['Fee Tab']);
+      if (rg && !row.Region) row.Region = regionText(rg);
+      const cand = candBy.get(k);
+      if (cand && cand.soharPayerId && !row['Sohar payerId']) row['Sohar payerId'] = str(cand.soharPayerId);
       if (!row.stale) continue;
       delete row.stale;
       const t = index.get(row['Fee Tab']);
-      const m = t ? matchFeePayer(row.Payer, [...t.payers.keys()]) : { feePayer: '', confidence: 'Low', note: `Fee tab ${row['Fee Tab']} is not in the uploaded fee schedule` };
+      const cols = t ? [...t.payers.keys()] : [];
+      const m = !t ? { feePayer: '', confidence: 'Low', note: `Fee tab ${row['Fee Tab']} is not in the uploaded fee schedule` }
+        : cand ? matchFeePayerSohar({ ...cand, payer: row.Payer }, cols, rg, rules) : matchFeePayer(row.Payer, cols);
       Object.assign(row, { 'Fee Payer': m.feePayer, Confidence: m.confidence, Source: 'auto', 'Auto Match': m.feePayer, Note: m.note });
     }
+    for (const row of out.values()) { if (row.Region == null) row.Region = ''; if (row['Sohar payerId'] == null) row['Sohar payerId'] = ''; }
     return [...out.values()].sort((a, b) => a.Payer.localeCompare(b.Payer) || a['Fee Tab'].localeCompare(b['Fee Tab']));
   }
   /**
    * The Fee Payer Map row for a payer on a tab. A person's choice beats an automatic one: a manual row for this payer
-   * and tab, else a manual row for this payer with a blank tab (every tab), else the automatic row for this payer and tab.
+   * and tab, else a manual row for its Sohar payerId (blank Payer) and this tab, else a manual row for this payer with a
+   * blank tab (every tab), else a manual Sohar payerId row with a blank tab, else the automatic row for this payer and tab.
    */
-  function lookupFeePayer(rows, payer, tab) {
+  function lookupFeePayer(rows, payer, tab, soharPayerId) {
     const rs = rows || [];
     const manual = (r) => /^manual/i.test(str(r.Source));
-    const exact = rs.filter((r) => pairKey(r.Payer, r['Fee Tab']) === pairKey(payer, tab));
-    const every = rs.find((r) => keyOf(r.Payer) === keyOf(payer) && !keyOf(r['Fee Tab']));
-    return exact.find(manual) || (every && manual(every) ? every : null) || exact[0] || every || null;
+    const exact = rs.filter((r) => keyOf(r.Payer) && pairKey(r.Payer, r['Fee Tab']) === pairKey(payer, tab));
+    const every = rs.find((r) => keyOf(r.Payer) && keyOf(r.Payer) === keyOf(payer) && !keyOf(r['Fee Tab']));
+    const sid = str(soharPayerId);
+    const bySohar = sid ? rs.filter((r) => manual(r) && !keyOf(r.Payer) && str(r['Sohar payerId']) === sid) : [];
+    const soharTab = bySohar.find((r) => keyOf(r['Fee Tab']) === keyOf(tab)), soharEvery = bySohar.find((r) => !keyOf(r['Fee Tab']));
+    return exact.find(manual) || soharTab || (every && manual(every) ? every : null) || soharEvery || exact[0] || every || null;
   }
   /** A fee payer name as typed -> the tab's column name (case and punctuation ignored), or ''. */
   function resolvePayerColumn(t, name) {
@@ -730,6 +844,9 @@
     };
     const ctxs = {};
     const pairs = [];
+    // Sohar's payer list: a payer's group payer (payerGroupId) names the parent plan family.
+    const soharById = new Map((inp.soharPayers || []).map((p) => [str(p.payerId), p]));
+    const groupNameOf = (p) => { const g = str(p.payerGroupId); const gp = g && g !== str(p.payerId) ? soharById.get(g) : null; return gp ? str(gp.payerName) : ''; };
     for (const per of pers) {
       const r = byPer.get(per);
       const ctx = { per, last: str(r['Last Name']), first: str(r['First Name']), event: str(r['Next Event']), location: str(r['Next Location']),
@@ -752,8 +869,19 @@
       const eligible = /^complete\.eligible/i.test(str(r['Sohar Status']));
       ctx.payer = eligible && str(r['Sohar Payer']) ? str(r['Sohar Payer']) : str(r['NextGen Payer']) || str(r['Sohar Payer']);
       ctx.payerSource = eligible && str(r['Sohar Payer']) ? 'Sohar' : 'NextGen';
+      // The NextGen name carries the product line the fee schedule splits on (BS MHSA, Humana Medicare) and Sohar's payer
+      // name drops it. When Sohar found the same coverage, that name keys the row, so two products of one Sohar payer
+      // never share a Fee Payer Map row.
+      const sid = str(r['Sohar payerId']), sp = sid ? soharById.get(sid) : null;
+      const coverageDiffers = /^(y|yes|true)/i.test(str(r['Coverage Differs']));
+      if (ctx.payerSource === 'Sohar' && !coverageDiffers && productOf(r['NextGen Payer']) && productOf(r['NextGen Payer']) !== productOf(ctx.payer)) {
+        ctx.payer = str(r['NextGen Payer']); ctx.payerSource = 'NextGen (product line)';
+      }
+      ctx.soharPayerId = sid;
+      ctx.cand = { soharPayerId: sid, soharName: str(r['Sohar Payer']) || (sp ? str(sp.payerName) : ''), groupName: sp ? groupNameOf(sp) : '',
+        nextgen: str(r['NextGen Payer']), plan: str(r.Plan), coverageDiffers };
       if (!ctx.payer) ctx.flags.push('No payer name');
-      if (ctx.tab && ctx.payer) pairs.push({ payer: ctx.payer, tab: ctx.tab });
+      if (ctx.tab && ctx.payer) pairs.push({ payer: ctx.payer, tab: ctx.tab, cand: ctx.cand });
       const oon = r.oon || {};
       ctx.oon = !!oon.outOfNetwork || /\b(oon|out[\s-]*of[\s-]*network)\b/i.test(str(r.Network));
       ctx.benefits = {
@@ -765,7 +893,8 @@
       if (!ce.codes.length && ctx.event) ctx.flags.push(`No default codes for "${ctx.event}": add a row on Estimate Codes or enter codes`);
       ctxs[per] = ctx;
     }
-    const payerRows = feePayerMapRows(inp.payerMap, pairs, index);
+    const regions = tabRegions(locationRows, inp.locationState);
+    const payerRows = feePayerMapRows(inp.payerMap, pairs, index, regions, inp.feeRules);
     const logRows = feePayerLog(payerRows, inp.payerLog, inp.when);
     const tables = { rates: {}, gross: {}, desc: {} };
     const addTab = (tab) => {
@@ -778,7 +907,10 @@
     for (const ctx of Object.values(ctxs)) {
       ctx.feePayer = ''; ctx.confidence = ''; ctx.rateKey = '';
       if (ctx.tab && ctx.payer) {
-        const row = lookupFeePayer(payerRows, ctx.payer, ctx.tab);
+        const row = lookupFeePayer(payerRows, ctx.payer, ctx.tab, ctx.soharPayerId);
+        const rg = regions.get(ctx.tab);
+        ctx.region = regionText(rg);
+        if (rg && rg.missing.length && !rg.states.length) ctx.flags.push(`No region for ${rg.missing.join(', ')}: add it to Config Location to State`);
         const t = index.get(ctx.tab);
         const col = row ? resolvePayerColumn(t, row['Fee Payer']) : '';
         ctx.confidence = row ? str(row.Confidence) : '';
@@ -877,7 +1009,7 @@
     FEE_CONFIG_ROWS, TOGGLES, TOGGLE_DEFAULTS, feeConfig, pickToggle, STALE_DAYS,
     FEE_COLS, FEE_META_COLS, parseCodes, parseRate, parseLocations, parseFeeSheet, parseFeeSchedule, feeMetaRows, readMeta, feeStatus, feeIndex,
     isTele, matchLocationTab, FEE_LOCATION_COLS, feeLocationRows, PROVIDER_HOME_COLS, providerHomes, providerHomeRows,
-    feeTokens, matchFeePayer, FEE_PAYER_MAP_COLS, feePayerMapRows, lookupFeePayer, FEE_PAYER_LOG_COLS, feePayerLog,
+    feeTokens, matchFeePayer, matchFeePayerSohar, payerState, tabRegions, productOf, FEE_PAYER_MAP_COLS, feePayerMapRows, lookupFeePayer, FEE_PAYER_LOG_COLS, feePayerLog,
     ESTIMATE_CODE_COLS, ESTIMATE_CODE_SEEDS, parseCodeList, codesForEvent,
     ESTIMATE_DEFAULT_COLS, defaultsFor, rememberDefaults,
     coinsRate, estimateMath, partialNote, benefitsMissing, estimateText, prepareEstimates, estimatePatient, usd,

@@ -79,6 +79,14 @@ A test feature: it estimates what a verified patient pays at the **next visit**,
 - Payer (Sohar payer from an eligible verification, else the NextGen payer) -> payer column on that tab: every word of the column name (or one side of a `/` name) must be in the payer name, the most specific wins, a Medicare / Advantage payer only matches a Medicare / Advantage column. Low confidence or a tie: no estimate, flagged *Map payer to a fee column*.
 - Out of network (Sohar `networkType` OON / out of network): allowed = Gross Charge, with Sohar's out-of-network benefits.
 
+**Regional payer matching (v0.15).** Fee schedules are regional and so are payers, so matching uses Sohar's payer and the clinic's region:
+- **Region** = the Config `Location to State` state of the NextGen locations mapped to the tab on Fee Locations. The Config default state is not used here: a tab whose locations are not in that table gets *No region for …: add it to Config Location to State*, and its matches drop to Medium.
+- **Product line:** when Sohar found the same coverage as NextGen and the NextGen payer name carries a product the fee schedule splits on (MHSA, Medicare / 65 / Advantage), that name keys the Fee Payer Map row (*NextGen (product line)*), so `BS MHSA` gets the BS MHSA column, not Blue Shield.
+- **Names tried, in order:** the row's payer, the NextGen name (unless Sohar's coverage differs), Sohar's payer name, Sohar's group payer name (`payerGroupId` on Sohar Payers). The first High match wins; *matched on "…"* says which name did it.
+- **Another state:** a payer naming another state than the tab's region (`Blue Cross Blue Shield of Illinois` at a CA clinic) never takes that tab's columns. An out-of-state **Blue** plan uses Config `BlueCard host <state>` (the local Blue column, e.g. `BlueCard host CA` = `Anthem`); blank = flagged.
+- **Medicare plans** (any of its names, or Sohar's plan name) take a Medicare column. With none on the tab, Config `Medicare without Medicare column` decides: `Flag` (default, no estimate) or `Use payer column`; `Medicare payer column exceptions` (e.g. `Kaiser`) lists columns used for Medicare plans regardless.
+- Fee Payer Map carries `Sohar payerId` and `Region`. A manual row with a **blank Payer** and a Sohar payerId maps that Sohar payer whatever NextGen calls it (on its Fee Tab, or every tab when blank).
+
 **Sheets** (all add-in owned, saved fail-safe, safe to delete; created only when On):
 
 | Sheet | Table | What |
@@ -87,7 +95,7 @@ A test feature: it estimates what a verified patient pays at the **next visit**,
 | Fee Schedule Info (hidden) | `tblFeeMeta` | File, upload time, counts, tab summary |
 | Fee Locations | `tblFeeLocations` | NextGen Location -> Fee Tab |
 | Provider Home Clinic | `tblProviderHome` | Provider -> Home Location (most frequent in-person location in the report) |
-| Fee Payer Map | `tblFeePayerMap` | Payer + Fee Tab -> Fee Payer, Confidence. A row with a blank Fee Tab applies to every tab. |
+| Fee Payer Map | `tblFeePayerMap` | Payer, Sohar payerId, Fee Tab, Region -> Fee Payer, Confidence. A row with a blank Fee Tab applies to every tab; a manual row with a blank Payer applies to its Sohar payerId. |
 | Fee Payer Map Log | `tblFeePayerMapLog` | Every Fee Payer Map change (Auto-match or Sheet edit) |
 | Estimate Codes | `tblEstimateCodes` | Event keyword -> codes with units (`90868 x1; 99417 x2`). Seeded once, marked `default, review`; the longest keyword found in the event wins. Esketamine seeds use G2083: confirm 56 mg (G2082) vs 84 mg. |
 | Estimate Defaults | `tblEstimateDefaults` | Deductible / Coinsurance / Copay toggles remembered per fee payer |
