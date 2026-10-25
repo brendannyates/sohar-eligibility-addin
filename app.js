@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.14.0';
+  const VERSION = '0.15.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -1624,7 +1624,10 @@
     f.status = F.feeStatus(f.meta, f.schedule.length, new Date());
     f.warn = [];
     if (!f.schedule.length) { f.prep = null; f.est = new Map(); renderFeeStatus(); return; }
+    // Sohar's payer list (group payers) and Config Location to State (each fee tab's region) for regional payer matching.
+    if (!state.soharPayers && !state.demo) state.soharPayers = await X.readSoharPayers().catch(() => []);
     const prep = F.prepareEstimates({
+      soharPayers: state.soharPayers || [], locationState: (state.cfg && state.cfg.locationState) || {}, feeRules: state.cfg.fees,
       // Info saved for a different upload (half-failed save) must not lend its Locations to these rows.
       results: rs, scheduleRows: f.schedule, tabSummary: F.metaMatches(f.meta, f.schedule.length) ? F.readMeta(f.meta).tabSummary : [], locations: f.locations, homes: f.homes,
       payerMap: f.payerMap, payerLog: f.payerLog, codes: f.codes, defaults: f.defaults, appts: importAppts(),
