@@ -6,6 +6,11 @@ Hard rules:
 - Add-in sheets are written only through `writeAddinTable` (fail-safe stage-and-swap). A new add-in table goes in `OWNED` in `excel.js`. Never write an add-in table in place, and never let formulas reference those sheets (each save replaces the sheet). Changes to save/read code must keep `tests/excel.test.mjs` green, including the failure sweeps.
 - The one exception is a flow-owned table: `Clinic Work Inbox` (`tblClinicWorkInbox`, `excel.js` `INBOX`). A Power Automate flow appends to it, so the add-in never rewrites, swaps, sorts, clears or trims it (a stage-and-swap would race the flow and drop rows). It is not in `OWNED`. The add-in only creates it once (`createClinicInbox`, header only, fail-safe) and reads it (`readClinicInbox`). `tests/excel.test.mjs` runs every mutating export against a workbook holding it and fails if one touches it; keep new write paths in that list. Build guide: `docs/clinic-inbox-flow.md`.
 - Synthetic data only in tests, fixtures, demo mode, and commits. No real names, MRNs, member IDs, or exports.
+  The one exception is the generated block in `payer-knowledge.js` (Brendan, 10/28): real payer names and Sohar payer
+  IDs, no patient data, notes or contracted rates. Regenerate it with `node scripts/build-payer-knowledge.mjs <master
+  workbook>` (the workbook stays outside the repo); never hand-edit it. The bar lives in `payer-knowledge.js`
+  (`qualifies` / `select`). Workbook sheets are overrides: a sheet row wins, so Payer Map and Sohar Payers are optional
+  tables (`templateCheck` skips them) and the Payer Map is created on its first save. The fee schedule never goes in it.
 - Never add a network call. `connect-src 'none'` in `index.html` is deliberate; the only remote script is Office.js.
 - `VERIFICATION_COLS` and `DISCOVERY_COLS` match the Sohar CSV templates exactly, in order. Do not rename or reorder.
 - Output table columns (`PATIENT_COLS`, `REVIEW_COLS`) must match the template workbook. Changing the column count means shipping a new `Sohar_Eligibility_Template.xlsx`; a rename of the same column is applied in place by `replaceTable` (v0.12 Review Per Nbr -> MRN).
