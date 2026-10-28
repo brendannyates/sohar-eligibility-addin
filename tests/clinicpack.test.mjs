@@ -338,8 +338,10 @@ test('app.js cttWorkbook: SE Done takes Done and Clinic Note from the NextGen Ta
   const state = { tasks: src.tasks.map((t) => ({ ...t, 'Clinic Note': '' })), demo: false, results: src.results, review: src.review, learning: [], metrics: null,
     cfg: src.cfg, payerRules: R.payerRulesFrom(src.payerRuleRows) };
   const X = { async readTasks() { return sheet; } };
-  const make = new Function('R', 'C', 'XL', 'X', 'state', 'inScopePatients', 'VERSION', `${body}\nreturn { cttWorkbook };`);
-  const { cttWorkbook } = make(R, C, XL, X, state, () => src.patients, '0.14.0');
+  // cttWorkbook runs at new Date(): pin it to the fixture's day, or the 10/26 visit drops out once that date passes.
+  class FixedDate extends Date { constructor(...a) { super(...(a.length ? a : [TODAY.getTime()])); } static now() { return TODAY.getTime(); } }
+  const make = new Function('R', 'C', 'XL', 'X', 'state', 'inScopePatients', 'VERSION', 'Date', `${body}\nreturn { cttWorkbook };`);
+  const { cttWorkbook } = make(R, C, XL, X, state, () => src.patients, '0.14.0', FixedDate);
   const f = await cttWorkbook(LOC);
   const wb = await XL.readWorkbook(f.bytes);
   const done = R.tableObjects(wb.sheets.find((s) => s.name === 'SE Done').rows);
