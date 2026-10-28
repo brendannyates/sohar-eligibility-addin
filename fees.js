@@ -33,6 +33,8 @@
     { setting: 'BlueCard host TX', value: '', what: 'Fee estimates: the fee column on the TX fee tabs for an out-of-state Blue plan seen at a TX clinic. Blank: flagged, no estimate.' },
     { setting: 'Medicare without Medicare column', value: 'Flag', what: 'Fee estimates: a Medicare plan whose payer has no Medicare column on the fee tab. Flag = no estimate, staff map it on Fee Payer Map. Use payer column = the payer\'s commercial column.' },
     { setting: 'Medicare payer column exceptions', value: '', what: 'Fee estimates: fee payer columns (; separated, e.g. Kaiser) used for that payer\'s Medicare plans even when the row above says Flag.' },
+    { setting: 'IVK medication infusions 1-6', value: '400', what: 'Fee estimates: IV ketamine medication, self pay (never billed to insurance), per infusion for infusions 1-6. Added to every IVK infusion estimate, self pay and commercial.' },
+    { setting: 'IVK medication infusions 7+', value: '450', what: 'Fee estimates: IV ketamine medication, self pay, per infusion from infusion 7.' },
   ];
   const TOGGLES = { deductible: ['Applies', 'Waived'], coinsurance: ['After deductible', 'Before deductible', 'None'], copay: ['Added', 'None'] };
   const TOGGLE_DEFAULTS = { deductible: 'Applies', coinsurance: 'After deductible', copay: 'Added' };
@@ -52,6 +54,7 @@
       medicareFallback: /^use/i.test(str(c['Medicare without Medicare column'])) ? 'Use payer column' : 'Flag',
       medicareExceptions: str(c['Medicare payer column exceptions']).split(/[;\n]/).map(str).filter(Boolean),
       on: /^(on|yes|y|true|1)$/i.test(str(c['Fee estimates'])),
+      ivkMed: { first: num(c['IVK medication infusions 1-6']) ?? 400, later: num(c['IVK medication infusions 7+']) ?? 450 },
       defaults: {
         deductible: pickToggle('deductible', c['Estimate deductible'], TOGGLE_DEFAULTS.deductible),
         coinsurance: pickToggle('coinsurance', c['Estimate coinsurance'], TOGGLE_DEFAULTS.coinsurance),
@@ -650,21 +653,55 @@
   // ---------- estimate codes ----------
   const ESTIMATE_CODE_COLS = ['Event keyword', 'Codes', 'Source', 'Note'];
   const SEED_NOTE = 'default, review';
-  const ESK_NOTE = 'Confirm the dose code: G2082 (up to 56 mg) or G2083 (over 56 mg, e.g. 84 mg)';
-  // The longest keyword found in the event wins; on a tie the earlier row wins, so "TMS F/U" is a follow-up visit.
-  const ESTIMATE_CODE_SEEDS = [
+  const seedRows = (rows) => rows.map(([k, c, n]) => ({ 'Event keyword': k, Codes: c, Source: SEED_NOTE, Note: n }));
+  // v0.11-v0.15 seeds. A sheet still holding exactly these (never edited) gets the current seeds instead.
+  const ESK_DOSE_NOTE = 'Confirm the dose code: G2082 (up to 56 mg) or G2083 (over 56 mg, e.g. 84 mg)';
+  const ESTIMATE_CODE_SEEDS_V1 = seedRows([
     ['TMS mapping', '90867 x1', 'TMS initial session with mapping'], ['TMS initial', '90867 x1', 'TMS initial session with mapping'],
     ['motor threshold', '90869 x1', 'Motor threshold re-determination'],
-    ['esketamine', 'G2083 x1', ESK_NOTE], ['ESK', 'G2083 x1', ESK_NOTE], ['Spravato', 'G2083 x1', ESK_NOTE],
+    ['esketamine', 'G2083 x1', ESK_DOSE_NOTE], ['ESK', 'G2083 x1', ESK_DOSE_NOTE], ['Spravato', 'G2083 x1', ESK_DOSE_NOTE],
     ['intake', '90792 x1', 'Psychiatric evaluation with medical services'], ['consult', '90792 x1', 'Psychiatric evaluation with medical services'],
     ['new', '90792 x1', 'New patient evaluation'],
     ['follow up', '99214 x1', 'Established patient visit'], ['F/U', '99214 x1', 'Established patient visit'], ['med management', '99214 x1', 'Established patient visit'],
     ['therapy 60', '90837 x1', 'Psychotherapy, 60 minutes'],
     ['TMS', '90868 x1', 'TMS treatment session'],
-  ].map(([k, c, n]) => ({ 'Event keyword': k, Codes: c, Source: SEED_NOTE, Note: n }));
+  ]);
+  // Codes "none": the event is labeled and never estimated. Interventions (TMS, motor threshold, esketamine) are checked
+  // for eligibility, deductible and OOP max, not cost.
+  const VERIFY_NOTE = 'verify deductible, OOP max and insurance status';
+  const TMS_NOTE = `TMS (intervention): no estimate; ${VERIFY_NOTE}`, MT_NOTE = `TMS motor threshold (intervention): no estimate; ${VERIFY_NOTE}`;
+  const ESK_NOTE = `Esketamine (intervention): no estimate; ${VERIFY_NOTE}`;
+  const IVK_NOTE = 'IV ketamine infusion: provider visit, plus the self-pay medication (Config IVK medication rows)';
+  const VISIT_30 = '30-minute visit';
+  // From the NextGen event names in use (10/2026) and their short forms (MMI, MMT, TFU, TTF, Tel). The longest keyword
+  // found in the event wins; on a tie the earlier row wins.
+  const ESTIMATE_CODE_SEEDS = seedRows([
+    ['TMS', 'none', TMS_NOTE], ['TMS treatment', 'none', TMS_NOTE], ['TMS theta', 'none', TMS_NOTE], ['TMS mapping', 'none', TMS_NOTE],
+    ['TMS initial', 'none', TMS_NOTE], ['MT', 'none', MT_NOTE], ['motor threshold', 'none', MT_NOTE],
+    ['esketamine', 'none', ESK_NOTE], ['esketamine follow up', 'none', ESK_NOTE], ['ESK', 'none', ESK_NOTE], ['Spravato', 'none', ESK_NOTE],
+    // New patient intakes and consults.
+    ['intake', '90792 x1', 'New patient intake'], ['new patient', '90792 x1', 'New patient intake'], ['new', '90792 x1', 'New patient'],
+    ['consult', '90792 x1', 'Consult'], ['ConsultTelepsych', '90792 x1', 'Consult'], ['consult med mgt', '90792 x1', 'Consult with med management'],
+    ['TMS consult', '90792 x1', 'TMS consult'], ['esketamine consult', '90792 x1', 'Esketamine consult'], ['IV ketamine consult', '90792 x1', 'IV ketamine consult'],
+    // IV ketamine, self pay and commercial: 99215 at the first infusion, 99214 after, plus the medication.
+    ['IV ketamine treatment start', '99215 x1', `${IVK_NOTE}; infusion 1`], ['IV ketamine', '99214 x1', IVK_NOTE], ['IVK', '99214 x1', IVK_NOTE],
+    // Any 30-minute visit.
+    ['telepsych', '99214 x1', VISIT_30], ['Tel', '99214 x1', VISIT_30], ['med management', '99214 x1', 'Med management (MMI, MMT)'],
+    ['med mgt', '99214 x1', 'Med management'], ['MMI', '99214 x1', 'Med management in office'], ['MMT', '99214 x1', 'Med management telepsych'],
+    ['follow up', '99214 x1', 'Follow-up visit'], ['F/U', '99214 x1', 'Follow-up visit'], ['TMS follow up', '99214 x1', 'TMS follow-up visit (TFU)'],
+    ['TMS F/U', '99214 x1', 'TMS follow-up visit (TTF)'], ['TFU', '99214 x1', 'TMS follow-up visit'], ['TTF', '99214 x1', 'Telepsych TMS follow-up visit'],
+    ['transition', '99214 x1', 'Transition visit; confirm it is 30 minutes'],
+    ['ADHD testing review', '99214 x1', 'ADHD testing review; confirm it is 30 minutes'],
+    ['ADHD testing', '96136 x1', 'ADHD testing, first 30 minutes; add 96139 for each extra 30'],
+    ['therapy 60', '90837 x1', 'Psychotherapy, 60 minutes'], ['psychotherapy individual 60', '90837 x1', 'Psychotherapy, 60 minutes'],
+  ]);
+  const sameSeeds = (rows, seeds) => (rows || []).length === seeds.length
+    && rows.every((r, i) => ESTIMATE_CODE_COLS.every((c) => str(r[c]) === str(seeds[i][c])));
 
-  /** "90868 x1; 90869 x2, G2083" -> {codes: [{code, units}], bad: [...]}. Units default to 1. */
+  const NO_ESTIMATE_RE = /^(none|no estimate|n\/a)$/i;
+  /** "90868 x1; 90869 x2, G2083" -> {codes: [{code, units}], bad: [...]}. Units default to 1. "none" -> {none: true}. */
   function parseCodeList(text) {
+    if (NO_ESTIMATE_RE.test(str(text))) return { codes: [], bad: [], none: true };
     const codes = [], bad = [];
     for (const part of str(text).split(/\s*[;,+\n]\s*/).filter(Boolean)) {
       const m = /^([A-Z0-9]{4,8}?)(?:\s*[x×*]\s*(\d+(?:\.\d+)?))?$/i.exec(part.trim());
@@ -684,7 +721,38 @@
     }
     if (!best) return { codes: [], keyword: '', note: '' };
     const p = parseCodeList(best.r.Codes);
+    if (p.none) return { codes: [], keyword: str(best.r['Event keyword']), note: str(best.r.Note) || `${str(best.r['Event keyword'])}: no estimate`, bad: [], none: true };
     return { codes: p.codes, keyword: str(best.r['Event keyword']), note: [str(best.r.Note), /review/i.test(str(best.r.Source)) ? 'default codes, review' : ''].filter(Boolean).join('; '), bad: p.bad };
+  }
+
+  // ---------- IV ketamine ----------
+  const isIvkInfusion = (event) => /\b(iv ketamine|ivk)\b/.test(keyOf(event)) && !/\bconsult/.test(keyOf(event));
+  const isIvkStart = (event) => isIvkInfusion(event) && /\bstart\b/.test(keyOf(event));
+  // Same tests as rules.js isMedicare / isMediCal / isKaiser / isVA, plus TriCare and CHAMPVA.
+  const GOVT_RE = /medicare|noridian|novitas|\bqmb\b|medi[\s-]?cal\b|medicaid|kaiser|\bkp\b|veterans?'?\s*affairs|\bva\b|tri\s*-?west|tri\s*-?care|champva/i;
+  const isSelfPayName = (s) => /\bself[\s-]*pay\b/i.test(str(s));
+  const NOT_KEPT_RE = /cancel|no\s*-?\s*show|deleted|resched/i;
+  /**
+   * The next visit's infusion number, counted from the report's IVK visits for this patient (appts: {per, date, event,
+   * status}): {n, exact}. A Treatment Start is 1; after a start on the report, starts + kept visits since; with 6 or
+   * more earlier infusions and no start on the report, at least 7 (exact: false, atLeast: true); otherwise unknown.
+   */
+  function ivkInfusion(per, nextDate, nextEvent, appts) {
+    if (isIvkStart(nextEvent)) return { n: 1, exact: true };
+    const day = C.parseDate(nextDate);
+    if (!day) return { n: null, exact: false };
+    const mine = (appts || []).filter((a) => str(a.per) && str(a.per) === str(per) && isIvkInfusion(a.event) && !NOT_KEPT_RE.test(str(a.status)))
+      .map((a) => ({ d: C.parseDate(a.date), start: isIvkStart(a.event) })).filter((a) => a.d && a.d < day).sort((a, b) => a.d - b.d);
+    const s = mine.map((a) => a.start).lastIndexOf(true);
+    if (s >= 0) return { n: mine.length - s + 1, exact: true };
+    return mine.length >= 6 ? { n: mine.length + 1, exact: false, atLeast: true } : { n: null, exact: false };
+  }
+  /** {n, exact, atLeast} + prices -> {amount (null when the number is unknown), text}. */
+  function ivkMedication(inf, price) {
+    const p = price || { first: 400, later: 450 };
+    if (inf.n == null) return { ...inf, amount: null, text: `IV ketamine medication (self pay): ${usd(p.first)} for infusions 1-6 or ${usd(p.later)} from 7; confirm the infusion number (not in the total)` };
+    const amount = inf.n >= 7 ? p.later : p.first;
+    return { ...inf, amount, text: `IV ketamine medication (self pay), infusion ${inf.atLeast ? `${inf.n} or later` : inf.n}: ${usd(amount)}` };
   }
 
   // ---------- defaults remembered per fee payer ----------
@@ -787,9 +855,18 @@
   function estimateText(e) {
     if (!e) return [];
     const out = e.lines.map((l) => (l.allowed == null ? `${l.code} x${l.units}: no rate on the fee schedule` : `${l.code} x${l.units} at ${usd(l.allowed)} = ${usd(l.total)}${l.desc ? ` (${l.desc.slice(0, 60)})` : ''}`));
+    const med = e.medication;
+    if (e.selfPay) {
+      out.push(`Self pay: the patient pays the Cash rate, ${usd(e.allowed)}`);
+      if (med) out.push(med.text);
+      out.push(`Patient pays: ${usd(e.patient)}`);
+      if (e.partial) out.push(`Partial: no Cash rate for ${e.noRate.join(', ')}, so the total leaves ${e.noRate.length === 1 ? 'it' : 'them'} out.`);
+      return out;
+    }
     out.push(`Allowed: ${usd(e.allowed)}`);
     if (e.noBenefits) {
       out.push('No deductible, coinsurance or copay from Sohar for this plan, so no patient amount. Re-verify, or quote from the allowed amount.');
+      if (med) out.push(med.text);
       return out;
     }
     const t = e.toggles;
@@ -803,6 +880,7 @@
     out.push(t.copay === 'None' ? 'Copay: none' : `Copay: ${usd(e.copay)}`);
     if (e.cap === 'oop') out.push(`Capped at the OOP max remaining: ${usd(e.oopRemaining)}`);
     if (e.cap === 'allowed') out.push(`Capped at the allowed amount: ${usd(e.allowed)}`);
+    if (med) out.push(`Visit: ${usd(e.visitPatient)}`, med.text);
     out.push(`Patient pays: ${usd(e.patient)} · Plan pays: ${usd(e.plan)}`);
     if (e.partial) out.push(`Partial: no rate for ${e.noRate.join(', ')}, so the total leaves ${e.noRate.length === 1 ? 'it' : 'them'} out.`);
     if (e.deductibleAfter != null && t.deductible === 'Applies') out.push(`Deductible remaining after this visit: ${usd(e.deductibleAfter)}`);
@@ -823,14 +901,23 @@
     const tabs = [...index.values()];
     const byPer = new Map();
     for (const r of inp.results || []) if (r['Sent As'] === 'Verification' && !/^Superseded/.test(str(r.Action)) && str(r['Per Nbr'])) byPer.set(str(r['Per Nbr']), r);
+    // Self-pay IV ketamine patients have no verification: they pay the fee schedule's Cash rate plus the medication.
+    const selfPay = new Set();
+    for (const r of inp.results || []) {
+      const per = str(r['Per Nbr']);
+      if (!per || byPer.has(per) || /^Superseded/.test(str(r.Action)) || !isSelfPayName(r['NextGen Payer']) || !isIvkInfusion(r['Next Event'])) continue;
+      byPer.set(per, r); selfPay.add(per);
+    }
     const pers = (inp.pers || [...byPer.keys()]).map(str).filter((p) => byPer.has(p));
     const appts = inp.appts || [];
     const homeRows = providerHomeRows(inp.homes, appts, tele);
     // Home clinics count as locations too: one typed on Provider Home Clinic (often for a telehealth-only provider)
     // may not be any visit's location in this report, and it still needs a fee tab.
     const locationRows = feeLocationRows(inp.locations, [...appts.map((a) => a.loc), ...pers.map((p) => byPer.get(p)['Next Location']), ...homeRows.map((r) => r['Home Location'])], tabs, tele);
-    const seeded = !(inp.codes || []).some((r) => str(r['Event keyword']));
+    // Empty, or still the v1 seeds nobody edited: the current seeds (the pane saves them to Estimate Codes).
+    const seeded = !(inp.codes || []).some((r) => str(r['Event keyword'])) || sameSeeds(inp.codes, ESTIMATE_CODE_SEEDS_V1);
     const codeRows = seeded ? ESTIMATE_CODE_SEEDS.map((r) => ({ ...r })) : inp.codes;
+    const ivkPrice = (inp.feeRules && inp.feeRules.ivkMed) || { first: 400, later: 450 };
     const locRow = new Map(locationRows.map((r) => [keyOf(r['NextGen Location']), r]));
     const homeRow = new Map(homeRows.map((r) => [keyOf(r.Provider), r]));
     const tabFor = (loc) => {
@@ -880,33 +967,47 @@
       ctx.soharPayerId = sid;
       ctx.cand = { soharPayerId: sid, soharName: str(r['Sohar Payer']) || (sp ? str(sp.payerName) : ''), groupName: sp ? groupNameOf(sp) : '',
         nextgen: str(r['NextGen Payer']), plan: str(r.Plan), coverageDiffers };
+      const ce = codesForEvent(ctx.event, codeRows);
+      ctx.codes = ce.codes; ctx.codeKeyword = ce.keyword; ctx.codeNote = ce.note;
+      ctx.selfPay = selfPay.has(per);
+      // Labeled, never estimated: interventions (codes "none"), and IV ketamine on a government plan.
+      if (ce.none) ctx.noEstimate = ce.note;
+      else if (isIvkInfusion(ctx.event)) {
+        const payerText = [ctx.payer, r['NextGen Payer'], r['Sohar Payer'], r.Plan].map(str).join(' ');
+        if (!ctx.selfPay && (GOVT_RE.test(payerText) || productOf(ctx.payer) === 'medicare')) {
+          ctx.noEstimate = `IV ketamine on ${ctx.payer || 'this plan'} (not self pay or commercial): no estimate; ${VERIFY_NOTE}`;
+        } else ctx.medication = ivkMedication(ivkInfusion(per, ctx.appt, ctx.event, appts), ivkPrice);
+      }
+      if (ctx.selfPay) {
+        if (str(r['Sohar Payer'])) ctx.flags.push(`Sohar found coverage (${str(r['Sohar Payer'])}): confirm the patient is self pay`);
+        ctx.payer = 'Self pay'; ctx.payerSource = 'NextGen';
+      }
       if (!ctx.payer) ctx.flags.push('No payer name');
-      if (ctx.tab && ctx.payer) pairs.push({ payer: ctx.payer, tab: ctx.tab, cand: ctx.cand });
+      if (ctx.tab && ctx.payer && !ctx.selfPay && !ctx.noEstimate) pairs.push({ payer: ctx.payer, tab: ctx.tab, cand: ctx.cand });
       const oon = r.oon || {};
       ctx.oon = !!oon.outOfNetwork || /\b(oon|out[\s-]*of[\s-]*network)\b/i.test(str(r.Network));
       ctx.benefits = {
         inn: { deductibleRemaining: str(r['Deductible Remaining']), coinsurance: str(r.Coinsurance), copay: str(r.Copay), oopRemaining: str(r['OOP Remaining']) },
         oon: { deductibleRemaining: str(oon['Deductible Remaining']), coinsurance: str(oon.Coinsurance), copay: str(oon.Copay), oopRemaining: str(oon['OOP Remaining']) },
       };
-      const ce = codesForEvent(ctx.event, codeRows);
-      ctx.codes = ce.codes; ctx.codeKeyword = ce.keyword; ctx.codeNote = ce.note;
-      if (!ce.codes.length && ctx.event) ctx.flags.push(`No default codes for "${ctx.event}": add a row on Estimate Codes or enter codes`);
+      if (!ctx.noEstimate && !ce.codes.length && ctx.event) ctx.flags.push(`No default codes for "${ctx.event}": add a row on Estimate Codes or enter codes`);
       ctxs[per] = ctx;
     }
     const regions = tabRegions(locationRows, inp.locationState);
     const payerRows = feePayerMapRows(inp.payerMap, pairs, index, regions, inp.feeRules);
     const logRows = feePayerLog(payerRows, inp.payerLog, inp.when);
-    const tables = { rates: {}, gross: {}, desc: {} };
+    const tables = { rates: {}, gross: {}, cash: {}, desc: {} };
     const addTab = (tab) => {
       if (tables.gross[tab]) return;
       const t = index.get(tab);
       tables.gross[tab] = Object.fromEntries(t.gross);
+      tables.cash[tab] = Object.fromEntries(t.cash);
       tables.desc[tab] = Object.fromEntries(t.desc);
     };
-    let flagged = 0, ready = 0;
+    let flagged = 0, ready = 0, labeled = 0;
     for (const ctx of Object.values(ctxs)) {
       ctx.feePayer = ''; ctx.confidence = ''; ctx.rateKey = '';
-      if (ctx.tab && ctx.payer) {
+      if (ctx.tab && ctx.payer && !ctx.selfPay && !ctx.noEstimate) {
         const row = lookupFeePayer(payerRows, ctx.payer, ctx.tab, ctx.soharPayerId);
         const rg = regions.get(ctx.tab);
         ctx.region = regionText(rg);
@@ -934,10 +1035,12 @@
       // Copay is Added by default only when Sohar returned one above $0, unless staff chose Added for this fee payer.
       if (!d.copayRemembered && d.copay === 'Added' && !((num(ben.copay) || 0) > 0)) d.copay = 'None';
       ctx.defaults = { deductible: d.deductible, coinsurance: d.coinsurance, copay: d.copay };
-      ctx.ok = !!(ctx.tab && (ctx.oon || ctx.feePayer));
-      if (ctx.ok && ctx.codes.length) ready++; else flagged++;
+      // Self pay pays the Cash rate, so no payer column is needed.
+      ctx.ok = !!(ctx.tab && (ctx.selfPay || ctx.oon || ctx.feePayer));
+      if (ctx.noEstimate) labeled++;
+      else if (ctx.ok && ctx.codes.length) ready++; else flagged++;
     }
-    return { locationRows, homeRows, payerRows, logRows, codeRows, seeded, contexts: ctxs, tables, counts: { patients: pers.length, ready, flagged, tabs: tabs.length } };
+    return { locationRows, homeRows, payerRows, logRows, codeRows, seeded, contexts: ctxs, tables, counts: { patients: pers.length, ready, flagged, labeled, tabs: tabs.length } };
   }
 
   /**
@@ -949,9 +1052,26 @@
     const flags = (ctx.flags || []).slice();
     const codes = o.codes || ctx.codes || [];
     const toggles = { ...(ctx.defaults || TOGGLE_DEFAULTS), ...(o.toggles || {}) };
+    if (ctx.noEstimate) return { md: null, np: null, flags: [`No estimate: ${ctx.noEstimate}`], basis: '', noEstimate: ctx.noEstimate };
     if (!ctx.ok) return { md: null, np: null, flags, basis: '' };
     if (!codes.length) return { md: null, np: null, flags: flags.length ? flags : ['Enter codes to estimate'], basis: '' };
     const rates = tables.rates[ctx.rateKey] || {}, gross = tables.gross[ctx.tab] || {}, desc = tables.desc[ctx.tab] || {};
+    // The IV ketamine medication is self pay on every plan: added on top of the visit, never through benefits.
+    const med = ctx.medication;
+    const withMed = (e) => (!med ? e : { ...e, medication: med, visitPatient: e.patient,
+      patient: e.patient != null && med.amount != null ? cents(e.patient + med.amount) : e.patient });
+    if (ctx.selfPay) {
+      // Self pay: the Cash rate per code, all of it the patient's (MD and NP are the same).
+      const cash = tables.cash[ctx.tab] || {};
+      const ls = codes.map(({ code, units }) => ({ code, units, desc: desc[code] || '', allowed: cash[code] ?? null }));
+      const known = ls.filter((l) => l.allowed != null), noRate = ls.filter((l) => l.allowed == null).map((l) => l.code);
+      const lines = ls.map((l) => ({ ...l, total: l.allowed == null ? null : cents(l.allowed * l.units) }));
+      const allowed = cents(known.reduce((a, l) => a + l.allowed * l.units, 0));
+      const e = known.length
+        ? withMed({ lines, allowed, patient: allowed, plan: 0, selfPay: true, missing: noRate.map((c) => `No rate for ${c}`), partial: noRate.length > 0, noRate, toggles })
+        : { lines, allowed: 0, patient: null, plan: null, selfPay: true, missing: [], partial: false, noRate, toggles, none: `No Cash rate for ${noRate.join(', ')} on ${ctx.tab}` };
+      return { md: e, np: e, flags, basis: `${ctx.tab} · Self pay (Cash)` };
+    }
     const lines = (level) => codes.map(({ code, units }) => ({ code, units, desc: desc[code] || '',
       allowed: ctx.oon ? (gross[code] ?? null) : (rates[code] ? rates[code][level] : null) }));
     const ben = ctx.oon ? ctx.benefits.oon : ctx.benefits.inn;
@@ -959,7 +1079,7 @@
     if (!ctx.oon && !np.lines.some((l) => l.allowed != null)) { np.none = `No NP rate for ${ctx.feePayer} on ${ctx.tab}`; }
     if (!ctx.oon && !md.lines.some((l) => l.allowed != null)) { md.none = `No MD rate for ${ctx.feePayer} on ${ctx.tab}`; }
     const basis = ctx.oon ? `Out of network: Gross Charge on ${ctx.tab}, out-of-network benefits` : `${ctx.tab}${ctx.locality ? ` (${ctx.locality})` : ''} · ${ctx.feePayer}`;
-    return { md: md.none ? { ...md, patient: null } : md, np: np.none ? { ...np, patient: null } : np, flags, basis };
+    return { md: md.none ? { ...md, patient: null } : withMed(md), np: np.none ? { ...np, patient: null } : withMed(np), flags, basis };
   }
 
   // ---------- demo (made-up numbers; the layout mimics a real fee schedule) ----------
@@ -1010,7 +1130,8 @@
     FEE_COLS, FEE_META_COLS, parseCodes, parseRate, parseLocations, parseFeeSheet, parseFeeSchedule, feeMetaRows, readMeta, feeStatus, feeIndex,
     isTele, matchLocationTab, FEE_LOCATION_COLS, feeLocationRows, PROVIDER_HOME_COLS, providerHomes, providerHomeRows,
     feeTokens, matchFeePayer, matchFeePayerSohar, payerState, tabRegions, productOf, FEE_PAYER_MAP_COLS, feePayerMapRows, lookupFeePayer, FEE_PAYER_LOG_COLS, feePayerLog,
-    ESTIMATE_CODE_COLS, ESTIMATE_CODE_SEEDS, parseCodeList, codesForEvent,
+    ESTIMATE_CODE_COLS, ESTIMATE_CODE_SEEDS, ESTIMATE_CODE_SEEDS_V1, parseCodeList, codesForEvent,
+    isIvkInfusion, ivkInfusion, ivkMedication,
     ESTIMATE_DEFAULT_COLS, defaultsFor, rememberDefaults,
     coinsRate, estimateMath, partialNote, benefitsMissing, estimateText, prepareEstimates, estimatePatient, usd,
     metaMatches, parseWarnings,

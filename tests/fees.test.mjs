@@ -62,7 +62,10 @@ test('config: Fee estimates is Off unless the row says On; toggle defaults from 
   assert.deepEqual(F.feeConfig({}).defaults, { deductible: 'Applies', coinsurance: 'After deductible', copay: 'Added' });
   assert.deepEqual(F.feeConfig({ 'Estimate deductible': 'waived', 'Estimate coinsurance': 'before', 'Estimate copay': 'None' }).defaults, { deductible: 'Waived', coinsurance: 'Before deductible', copay: 'None' });
   assert.deepEqual(F.FEE_CONFIG_ROWS.map((r) => [r.setting, r.value]), [['Fee estimates', 'Off'], ['Estimate deductible', 'Applies'], ['Estimate coinsurance', 'After deductible'], ['Estimate copay', 'Added'],
-    ['BlueCard host CA', ''], ['BlueCard host TX', ''], ['Medicare without Medicare column', 'Flag'], ['Medicare payer column exceptions', '']]);
+    ['BlueCard host CA', ''], ['BlueCard host TX', ''], ['Medicare without Medicare column', 'Flag'], ['Medicare payer column exceptions', ''],
+    ['IVK medication infusions 1-6', '400'], ['IVK medication infusions 7+', '450']]);
+  assert.deepEqual(F.feeConfig({}).ivkMed, { first: 400, later: 450 });
+  assert.deepEqual(F.feeConfig({ 'IVK medication infusions 1-6': '$410', 'IVK medication infusions 7+': '460' }).ivkMed, { first: 410, later: 460 });
 });
 
 test('parse: visible tabs only; tabs with no MD / NP payer columns are skipped', () => {
@@ -293,19 +296,28 @@ test('Fee Payer Map: auto per payer and tab, manual edits win (also with a blank
 
 test('estimate codes: seeds marked default, review; longest keyword wins; units', () => {
   assert.ok(F.ESTIMATE_CODE_SEEDS.every((r) => r.Source === 'default, review'));
-  const c = (ev) => F.codesForEvent(ev, F.ESTIMATE_CODE_SEEDS).codes.map((x) => `${x.code}x${x.units}`).join(' ');
-  assert.equal(c('TMS Treatment Unilateral'), '90868x1');
-  assert.equal(c('TMS Mapping Session'), '90867x1');
-  assert.equal(c('TMS Motor Threshold'), '90869x1');
-  assert.equal(c('TMS Follow Up'), '99214x1', 'follow up is longer than TMS');
-  assert.equal(c('Telepsych TMS F/U'), '99214x1', 'a tie goes to the earlier row');
-  assert.equal(c('Esketamine Follow Up'), 'G2083x1');
-  assert.equal(c('Spravato Tx'), 'G2083x1');
-  assert.equal(c('Tel New Patient - Mature'), '90792x1');
-  assert.equal(c('Med Management In-Office'), '99214x1');
-  assert.equal(c('Therapy 60 min'), '90837x1');
-  assert.equal(c('Telepsych'), '');
-  assert.match(F.codesForEvent('Esketamine Tx Start', F.ESTIMATE_CODE_SEEDS).note, /G2082.*G2083/);
+  const c = (ev) => { const r = F.codesForEvent(ev, F.ESTIMATE_CODE_SEEDS); return r.none ? 'none' : r.codes.map((x) => `${x.code}x${x.units}`).join(' '); };
+  // Every NextGen event name in use (10/2026, event text only) gets codes, or is labeled "none".
+  const expect = {
+    'TMS Treatment Unilateral': 'none', 'TMS Treatment Bilateral': 'none', 'TMS Theta Tx Bilateral': 'none', 'TMS Theta Tx Unilateral': 'none',
+    'MT Redo': 'none', 'MT MagV': 'none', 'MT BW': 'none', 'MT BW H7': 'none', 'MT Hold - MagVenture': 'none', 'TMS Motor Threshold': 'none', 'TMS Mapping Session': 'none',
+    'Esketamine Follow Up': 'none', 'Esketamine Follow Up Telepsych': 'none', 'Esketamine Tx Start': 'none', 'Hold-Esketamine Tx Start': 'none', 'Esketamine Daily Tx': 'none', 'Spravato Tx': 'none',
+    'Tel New Patient - Mature': '90792x1', 'IP New Patient - Mature': '90792x1', 'TMS ConsultTelepsych': '90792x1', 'TMS Consult In Person': '90792x1',
+    'TMS Consult+Med Mgt In Person': '90792x1', 'TMS Consult+Med Mgt Telepsych': '90792x1', 'TMS Consult Telepsych Internal': '90792x1', 'TMS Consult In Person Internal': '90792x1',
+    'Esk ConsultTelepsych': '90792x1', 'Esketamine Consult In Person': '90792x1', 'ESK Consult+Med Mgt Telepsych': '90792x1', 'IV Ketamine Consult Tele': '90792x1',
+    'Tel MindfulOne Consult': '90792x1', 'IP MindfulOne Consult': '90792x1',
+    'IV Ketamine Treatment Start': '99215x1', 'IV Ketamine Follow Up': '99214x1',
+    'Telepsych': '99214x1', 'Med Management Telepsych': '99214x1', 'Med Management In-Office': '99214x1', 'Telepsych TMS F/U': '99214x1', 'TMS Follow Up': '99214x1',
+    'Kaiser TMS F/U Telepsych': '99214x1', 'Kaiser TMS F/U': '99214x1', 'Transition Telepsych Patient': '99214x1', 'Transition Appointment': '99214x1',
+    'Telepsych Only': '99214x1', 'Telepsych Adolescent F/u': '99214x1', 'Tel MindfulConnect': '99214x1', 'ADHD Testing Review Tele': '99214x1', 'ADHD Testing Review In Person': '99214x1',
+    'ADHD Testing 30': '96136x1', 'Psychotherapy Individual 60': '90837x1', 'Therapy 60 min': '90837x1',
+    MMI: '99214x1', MMT: '99214x1', TFU: '99214x1', TTF: '99214x1', Tel: '99214x1',
+  };
+  for (const [ev, want] of Object.entries(expect)) assert.equal(c(ev), want, ev);
+  assert.equal(c('Peer To Peer'), '');
+  assert.match(F.codesForEvent('TMS Treatment Unilateral', F.ESTIMATE_CODE_SEEDS).note, /^TMS \(intervention\): no estimate; verify deductible, OOP max and insurance status$/);
+  assert.match(F.codesForEvent('Esketamine Tx Start', F.ESTIMATE_CODE_SEEDS).note, /^Esketamine \(intervention\)/);
+  assert.deepEqual(F.parseCodeList('None'), { codes: [], bad: [], none: true });
   assert.deepEqual(F.parseCodeList('90868 x2; 90869, g2083 X1'), { codes: [{ code: '90868', units: 2 }, { code: '90869', units: 1 }, { code: 'G2083', units: 1 }], bad: [] });
   assert.deepEqual(F.parseCodeList('90868 x2; nonsense here').bad, ['nonsense here']);
 });
@@ -383,13 +395,16 @@ const RESULTS = [
   mk({ 'Per Nbr': '7', 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found' }),
 ];
 const APPTS = [{ rendering: 'Doe, Pat MD', loc: 'Mill Street', event: 'TMS' }, { rendering: 'Doe, Pat MD', loc: 'Mill Street', event: 'TMS' }, { rendering: 'Doe, Pat MD', loc: 'Telehealth', event: 'Telepsych' }];
-const prep = (o) => F.prepareEstimates({ results: RESULTS, scheduleRows: F.parseFeeSchedule(WB).rows, appts: APPTS, teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', ...o });
+// The fixtures estimate "TMS Treatment" as a stand-in visit: an Estimate Codes sheet staff edited (the v1 rows), which
+// the seed upgrade leaves alone.
+const OLD_CODES = F.ESTIMATE_CODE_SEEDS_V1.map((r) => ({ ...r, Source: 'manual' }));
+const prep = (o) => F.prepareEstimates({ results: RESULTS, scheduleRows: F.parseFeeSchedule(WB).rows, appts: APPTS, teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', codes: OLD_CODES, ...o });
 
 test('prepareEstimates: tab by location, telehealth by home clinic, payer column, codes; flags instead of guesses', () => {
   const p = prep();
   assert.deepEqual(Object.keys(p.contexts).sort(), ['1', '2', '3', '4', '5', '6'], 'verified patients only');
-  assert.equal(p.seeded, true);
-  assert.equal(p.codeRows.length, F.ESTIMATE_CODE_SEEDS.length);
+  assert.equal(p.seeded, false, 'edited Estimate Codes are kept');
+  assert.equal(p.codeRows, OLD_CODES);
   const c = p.contexts;
   assert.deepEqual([c[1].tab, c[1].feePayer, c[1].payerSource, c[1].codes[0].code], ['Bayview', 'Blue Shield', 'Sohar', '90868']);
   assert.deepEqual([c[2].telehealth, c[2].home, c[2].tab, c[2].feePayer, c[2].codes[0].code], [true, 'Mill Street', 'Bayview', 'Acme Health', '99214']);
@@ -400,7 +415,7 @@ test('prepareEstimates: tab by location, telehealth by home clinic, payer column
   assert.equal(c[5].ok, false);
   assert.ok(c[5].flags.some((f) => /^Map payer to a fee column: Acme Health Medicare Advantage on Ridge/.test(f)));
   assert.deepEqual([c[6].payer, c[6].payerSource, c[6].feePayer], ['Kaiser Synthetic', 'NextGen', 'Kaiser'], 'not eligible: the NextGen payer');
-  assert.deepEqual(p.counts, { patients: 6, ready: 4, flagged: 2, tabs: 2 });
+  assert.deepEqual(p.counts, { patients: 6, ready: 4, flagged: 2, labeled: 0, tabs: 2 });
   assert.ok(p.locationRows.some((r) => r['NextGen Location'] === 'Faraway' && r['Fee Tab'] === ''));
   assert.ok(p.homeRows.some((r) => r.Provider === 'Doe, Pat MD' && r['Home Location'] === 'Mill Street'));
   assert.equal(p.logRows.length, p.payerRows.length);
@@ -535,7 +550,7 @@ test('fix: an "MD/NP" column is one rate for both levels, so NP is estimated too
   assert.equal(t.unparsed.na, 4, 'an NA in an MD/NP column counts once');
   const res = [mk({ 'Per Nbr': '1', 'Next Appt': '11/02/2026', 'Next Event': 'TMS Treatment', 'Next Location': 'Lake Town', 'Sohar Payer': 'Kaiser Foundation Health Plan',
     Copay: '0', Coinsurance: '10%', 'Deductible Remaining': '0', 'OOP Remaining': '3091.11' })];
-  const q = F.prepareEstimates({ results: res, scheduleRows: p.rows, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't' });
+  const q = F.prepareEstimates({ results: res, scheduleRows: p.rows, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', codes: OLD_CODES });
   const e = F.estimatePatient(q.contexts[1], q.tables);
   assert.equal(q.contexts[1].feePayer, 'Kaiser');
   assert.deepEqual([e.md.allowed, e.np.allowed, e.np.none], [271.11, 271.11, undefined]);
@@ -731,7 +746,7 @@ test('v0.15: prepareEstimates keys product lines by the NextGen name, fills Soha
       'Sohar Payer': 'Blue Cross Blue Shield of Texas', 'Sohar payerId': 'SBX2', 'NextGen Payer': 'BCBS TX', Copay: '0', Coinsurance: '20%', 'Deductible Remaining': '0', 'OOP Remaining': '100' }),
   ];
   const locationState = { 'Harbor Point Clinic': 'CA' };
-  const q = F.prepareEstimates({ results: res, scheduleRows: F.parseFeeSchedule(WB).rows, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', locationState });
+  const q = F.prepareEstimates({ results: res, scheduleRows: F.parseFeeSchedule(WB).rows, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', codes: OLD_CODES, locationState });
   const c21 = q.contexts[21], c22 = q.contexts[22];
   assert.equal(c21.payerSource, 'NextGen (product line)');
   assert.equal(c21.payer, 'BS 65 Senior');
@@ -743,7 +758,7 @@ test('v0.15: prepareEstimates keys product lines by the NextGen name, fills Soha
   assert.deepEqual(Object.keys(row22), F.FEE_PAYER_MAP_COLS, 'rows carry exactly the sheet columns');
   // Staff map the Sohar payer itself (blank Payer): it applies whatever NextGen calls the plan.
   const manual = { Payer: '', 'Sohar payerId': 'SBX2', 'Fee Tab': '', Region: '', 'Fee Payer': 'Kaiser', Confidence: '', Source: 'manual', 'Auto Match': '', Note: '' };
-  const q2 = F.prepareEstimates({ results: res, scheduleRows: F.parseFeeSchedule(WB).rows, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', locationState, payerMap: [manual] });
+  const q2 = F.prepareEstimates({ results: res, scheduleRows: F.parseFeeSchedule(WB).rows, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', codes: OLD_CODES, locationState, payerMap: [manual] });
   assert.equal(q2.contexts[22].feePayer, 'Kaiser');
   assert.ok(q2.payerRows.some((r) => r.Payer === '' && r['Sohar payerId'] === 'SBX2'), 'the manual Sohar payerId row is kept');
 });
@@ -770,4 +785,73 @@ test('v0.15: Config decides out-of-state Blue plans (BlueCard host) and Medicare
   assert.equal(F.matchFeePayerSohar({ payer: 'Acme Health', plan: 'Medicare Advantage' }, cols, ca, F.feeConfig({ 'Medicare payer column exceptions': 'Kaiser' })).feePayer, '', 'exceptions are per column');
   assert.equal(F.matchFeePayerSohar({ payer: 'Acme Health', plan: 'Medicare Advantage' }, cols, ca, F.feeConfig({ 'Medicare without Medicare column': 'Use payer column' })).feePayer, 'Acme Health');
   for (const s of ['BlueCard host CA', 'BlueCard host TX', 'Medicare without Medicare column', 'Medicare payer column exceptions']) assert.ok(F.FEE_CONFIG_ROWS.some((r) => r.setting === s), s);
+});
+
+// ---------- v0.16: Estimate Codes by event, interventions, IV ketamine ----------
+test('v0.16 seeds: untouched v1 Estimate Codes are upgraded to the current seeds; edited ones are kept', () => {
+  const up = prep({ codes: F.ESTIMATE_CODE_SEEDS_V1.map((r) => ({ ...r })) });
+  assert.equal(up.seeded, true);
+  assert.equal(up.codeRows.length, F.ESTIMATE_CODE_SEEDS.length);
+  assert.equal(prep({ codes: F.ESTIMATE_CODE_SEEDS_V1.map((r, i) => (i ? { ...r } : { ...r, Codes: '90867 x2' })) }).seeded, false);
+  assert.equal(prep({ codes: [] }).seeded, true);
+});
+
+test('v0.16 interventions: labeled "No estimate", not flagged, no Fee Payer Map pair', () => {
+  const p = prep({ codes: undefined });   // current seeds: every fixture "TMS Treatment" is an intervention
+  assert.deepEqual(p.counts, { patients: 6, ready: 1, flagged: 0, labeled: 5, tabs: 2 });
+  const e = F.estimatePatient(p.contexts[1], p.tables);
+  assert.deepEqual([e.md, e.np, e.flags], [null, null, ['No estimate: TMS (intervention): no estimate; verify deductible, OOP max and insurance status']]);
+  assert.ok(!p.payerRows.some((r) => r.Payer === 'Kaiser Synthetic'), 'interventions add no Fee Payer Map rows');
+  assert.equal(F.estimatePatient(p.contexts[2], p.tables).md.patient, 51.11, 'a 30-minute visit is still estimated');
+});
+
+const IVK_RESULTS = [
+  mk({ 'Per Nbr': '21', 'Next Appt': '11/10/2026', 'Next Event': 'IV Ketamine Follow Up', 'Next Location': 'Harbor Point Clinic', 'Next Provider': 'Doe, Pat MD',
+    'Sohar Payer': 'Acme Health Group', Copay: '0', Coinsurance: '20%', 'Deductible Remaining': '0', 'OOP Remaining': '5000' }),
+  mk({ 'Per Nbr': '22', 'Next Appt': '11/10/2026', 'Next Event': 'IV Ketamine Follow Up', 'Next Location': 'Harbor Point Clinic', 'Sohar Payer': 'Acme Health Medicare Advantage' }),
+  mk({ 'Per Nbr': '23', 'Sent As': 'Discovery', 'Sohar Status': 'No coverage found', 'NextGen Payer': 'Self Pay', 'Next Appt': '11/10/2026', 'Next Event': 'IV Ketamine Follow Up', 'Next Location': 'Harbor Point Clinic' }),
+  mk({ 'Per Nbr': '24', 'Next Appt': '11/10/2026', 'Next Event': 'IV Ketamine Treatment Start', 'Next Location': 'Harbor Point Clinic', 'Sohar Payer': 'Acme Health Group', Coinsurance: '20%', 'Deductible Remaining': '0' }),
+  mk({ 'Per Nbr': '25', 'Next Appt': '11/10/2026', 'Next Event': 'IV Ketamine Follow Up', 'Next Location': 'Harbor Point Clinic', 'Sohar Payer': 'Acme Health Group', Copay: '0', Coinsurance: '20%', 'Deductible Remaining': '0', 'OOP Remaining': '5000' }),
+  mk({ 'Per Nbr': '26', 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', 'NextGen Payer': 'Self Pay', 'Sohar Payer': 'Acme Health Group', 'Next Appt': '11/10/2026', 'Next Event': 'Telepsych' }),
+];
+const IVK_APPTS = [
+  { per: '21', date: '11/01/2026', event: 'IV Ketamine Treatment Start', status: 'Completed' }, { per: '21', date: '11/03/2026', event: 'IV Ketamine Follow Up', status: 'Completed' },
+  { per: '21', date: '11/05/2026', event: 'IV Ketamine Follow Up', status: 'Cancelled' }, { per: '21', date: '11/07/2026', event: 'IV Ketamine Follow Up', status: 'Completed' },
+  { per: '21', date: '11/12/2026', event: 'IV Ketamine Follow Up', status: '' },
+  ...[1, 2, 3, 4, 5, 6, 7].map((d) => ({ per: '23', date: `10/0${d}/2026`, event: 'IV Ketamine Follow Up', status: 'Completed' })),
+];
+const ivkPrep = () => F.prepareEstimates({ results: IVK_RESULTS, scheduleRows: F.parseFeeSchedule(WB).rows, appts: IVK_APPTS, teleKeywords: ['Tele'],
+  cfgDefaults: F.TOGGLE_DEFAULTS, when: 't', feeRules: F.feeConfig({}) });
+
+test('v0.16 IVK: infusion number from the report; 1-6 = $400, 7+ = $450; unknown = confirm', () => {
+  assert.deepEqual(F.ivkInfusion('21', '11/10/2026', 'IV Ketamine Follow Up', IVK_APPTS), { n: 4, exact: true }, 'start + 2 kept visits before; cancelled and later ones skipped');
+  assert.deepEqual(F.ivkInfusion('23', '11/10/2026', 'IV Ketamine Follow Up', IVK_APPTS), { n: 8, exact: false, atLeast: true });
+  assert.deepEqual(F.ivkInfusion('25', '11/10/2026', 'IV Ketamine Follow Up', IVK_APPTS), { n: null, exact: false });
+  assert.deepEqual(F.ivkInfusion('9', '11/10/2026', 'IV Ketamine Treatment Start', []), { n: 1, exact: true });
+  assert.equal(F.ivkMedication({ n: 6, exact: true }).amount, 400);
+  assert.equal(F.ivkMedication({ n: 7, exact: true }).amount, 450);
+  assert.match(F.ivkMedication({ n: null }).text, /\$400\.00 for infusions 1-6 or \$450\.00 from 7; confirm the infusion number/);
+  assert.equal(F.isIvkInfusion('IV Ketamine Consult Tele'), false);
+});
+
+test('v0.16 IVK: commercial = visit through benefits + medication; government = no estimate; self pay = Cash + medication', () => {
+  const p = ivkPrep(), c = p.contexts;
+  assert.deepEqual(Object.keys(c).sort(), ['21', '22', '23', '24', '25'], 'self-pay IVK joins the verified patients; a self-pay non-IVK patient does not');
+  const e21 = F.estimatePatient(c[21], p.tables);
+  assert.deepEqual([e21.md.visitPatient, e21.md.patient, e21.np.patient, e21.md.medication.amount], [34.22, 434.22, 430.22, 400], '20% of 171.11 / 151.11, plus $400');
+  const t21 = F.estimateText(e21.md);
+  assert.ok(t21.includes('Visit: $34.22'), t21.join(' | '));
+  assert.ok(t21.includes('IV ketamine medication (self pay), infusion 4: $400.00'), t21.join(' | '));
+  assert.ok(t21.includes('Patient pays: $434.22 · Plan pays: $136.89'), t21.join(' | '));
+  assert.match(c[22].noEstimate, /^IV ketamine on Acme Health Medicare Advantage \(not self pay or commercial\): no estimate; verify deductible, OOP max and insurance status$/);
+  assert.equal(F.estimatePatient(c[22], p.tables).md, null);
+  assert.deepEqual([c[23].selfPay, c[23].payer, c[23].ok], [true, 'Self pay', true]);
+  const e23 = F.estimatePatient(c[23], p.tables);
+  assert.deepEqual([e23.md.allowed, e23.md.patient, e23.np.patient, e23.basis], [151.11, 601.11, 601.11, 'Bayview · Self pay (Cash)'], 'Cash 99214 + $450 (infusion 8 or later)');
+  assert.ok(F.estimateText(e23.md).includes('IV ketamine medication (self pay), infusion 8 or later: $450.00'));
+  assert.deepEqual([c[24].codes[0].code, c[24].medication.amount], ['99215', 400], 'Treatment Start: 99215, infusion 1');
+  const e25 = F.estimatePatient(c[25], p.tables);
+  assert.deepEqual([e25.md.patient, e25.md.medication.amount], [34.22, null], 'unknown infusion number: the medication is not in the total');
+  assert.equal(p.counts.labeled, 1);
+  assert.ok(!p.payerRows.some((r) => /self pay/i.test(r.Payer)), 'self pay needs no fee payer column');
 });
