@@ -16,6 +16,8 @@
     { code: 'SFHP_PROVIDER', label: 'SFHP provider', severity: 'high', color: 'red' },
     { code: 'KAISER_MM_NOAUTH', label: 'Kaiser/VA MM no auth', severity: 'high', color: 'red' },
     { code: 'NP_TMS', label: 'NP-TMS', severity: 'high', color: 'red' },
+    // R14 (v0.16): an intervention's authorization belongs to the insurance it was obtained under.
+    { code: 'INS_CHANGED', label: 'Insurance changed?', severity: 'high', color: 'red' },
     // R13 esketamine payer credential rules (Payer Credential Rules sheet). Besse is a flag only: nothing is re-routed.
     { code: 'ESK_CRED', label: 'ESK credential', severity: 'high', color: 'red' },
     { code: 'BESSE_NO', label: 'Not Besse-approved', severity: 'medium', color: 'amber' },
@@ -101,6 +103,10 @@
   const isTMSEvent = (e) => /\btms\b|\bmt\b|mag\s*v|theta/i.test(str(e));
   /** Esketamine: "Esketamine Treatment", "Spravato First Dose", "ESK Obs". Not IV ketamine. */
   const isESKEvent = (e) => /esketamine|spravato|\besk\b/i.test(str(e));
+  /** IV ketamine: "IV Ketamine Follow Up", "IVK". Not esketamine. */
+  const isIVKEvent = (e) => /\biv\s*ketamine\b|\bivk\b/i.test(str(e));
+  /** Interventions that run on an authorization: TMS, esketamine, IV ketamine. Consults come before the auth. */
+  const isInterventionEvent = (e) => (isTMSEvent(e) || isESKEvent(e) || isIVKEvent(e)) && !/consult/i.test(str(e));
   const NOT_MM =/\btms\b|\bmt\b|mag\s*v|theta|esketamine|spravato|ketamine|\bivk\b|\bivn\b|meeting|training|on\s*call|peer\s*to\s*peer|adhd|testing|psychotherapy/i;
   /** Medication management: "Med Management ...", plain "Telepsych", "Tel/IP New Patient", "Transition Telepsych Patient". */
   const isMedMgmtEvent = (e) => {
@@ -336,6 +342,24 @@
       }
     }
 
+    // R14 Interventions (TMS, esketamine, IV ketamine; not consults): when Sohar disagrees with the chart (not eligible,
+    // coverage ending before the visit, or a discovery that found different coverage), the authorization on file may be
+    // for insurance the patient no longer has. Flag only.
+    const iv = up.find((a) => isInterventionEvent(a.event));
+    if (iv) {
+      const why = [];
+      const v = latest(rows.filter((r) => isVerification(r) && !isSuperseded(r)));
+      if (v && /^complete\.ineligible/i.test(str(v['Sohar Status']))) why.push(`Sohar says not eligible${str(v['Sohar Payer']) ? ` with ${str(v['Sohar Payer'])}` : ''}`);
+      const end = v && isEligible(v) ? parseDate(v['Coverage End']) : null;
+      if (end && end < iv._d) why.push(`coverage ends ${fmtDate(end)}, before the visit`);
+      const diff = latest(rows.filter((r) => !isSuperseded(r) && str(r['Coverage Differs']) === 'Yes'));
+      if (diff) why.push(`Sohar found ${str(diff['Sohar Payer']) || 'other coverage'}; NextGen has ${str(diff['NextGen Payer']) || primary || 'another payer'}`);
+      if (why.length) {
+        const appt = apptInfo(iv, x);
+        out.push(mk('INS_CHANGED', `${appt.event} ${appt.date}: ${why.join('; ')}. The authorization on file may be for the old insurance.`, { appt }));
+      }
+    }
+
     // Guarantor search found coverage: the policy is the guarantor's (the patient a dependent on it).
     const viaG = latest(rows.filter((r) => r['Searched As'] === 'Guarantor' && r['Sohar Status'] === 'Coverage found'));
     if (viaG) out.push(mk('GUARANTOR', `Coverage found through the guarantor: ${str(viaG['Sohar Payer']) || 'a payer'}${str(viaG['Sohar Date']) ? ` (${fmtDate(parseDate(viaG['Sohar Date']))})` : ''}. Add the guarantor's policy in NextGen with the patient as a dependent, then verify.`));
@@ -377,6 +401,7 @@
     SFHP_PROVIDER: 'Move the visit to an SFHP-approved provider, or confirm approval and add the provider to Config "SFHP providers".',
     KAISER_MM_NOAUTH: 'Get the Kaiser, VA or TriWest authorization on file (Auth Cd) before the med management visit.',
     NP_TMS: 'Reassign the TMS session to an MD/DO rendering provider.',
+    INS_CHANGED: 'Confirm the patient\'s current insurance. If it changed, update NextGen and get a new authorization from the new payer before the visit.',
     REVERIFY: `Resubmit in Sohar: ${REVERIFY_URL}`,
     QMB: 'Do not collect Medicare cost-sharing from the patient until billing confirms.',
     SECONDARY: 'Check the secondary before planning or collecting a copay, coinsurance or deductible.',
@@ -1163,7 +1188,7 @@
   return {
     payerRuleRows,
     REVERIFY_URL, PILLS, CLINIC_COLS, CLINIC_REVIEW_COLS, CLINIC_REQUEST_COLS, PAYER_EVIDENCE_COLS,
-    isMediCal, isKaiser, isVA, isSFHP, isQMB, isCarelon, isUMR, isNP, isTMSEvent, isESKEvent, isMedMgmtEvent, isVIP, isMedicare,
+    isMediCal, isKaiser, isVA, isSFHP, isQMB, isCarelon, isUMR, isNP, isTMSEvent, isESKEvent, isIVKEvent, isInterventionEvent, isMedMgmtEvent, isVIP, isMedicare,
     payerRulesFrom,
     patientFlags, allFlags, reviewRows, clinicRows, clinicReviewRows, clinicEmail, payerEvidence, evidenceSummary,
     bestResult, lasfir, collapseFlags,

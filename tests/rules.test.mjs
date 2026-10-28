@@ -494,3 +494,24 @@ test('Dual eligible: Medicare with Medi-Cal secondary keeps the Medi-Cal flag an
   const c = pat({ 'Primary Payer': 'Aetna', 'Secondary Payer': 'Health Net Medi-Cal' }, { finClass: 'Aetna', appointments: [appt({ event: 'TMS Follow Up' })] });
   assert.ok(!codes(R.patientFlags(c, [], CFG)).includes('QMB'));
 });
+
+test('R14: intervention visit + Sohar disagrees = Insurance changed? (flag only)', () => {
+  const tms = pat({}, { appointments: [appt({ event: 'TMS Treatment Unilateral' })] });
+  const flags = (p, rows) => R.patientFlags(p, rows, CFG).filter((f) => f.code === 'INS_CHANGED');
+  assert.equal(flags(tms, [fresh()]).length, 0, 'eligible, no coverage change: no flag');
+  const inel = flags(tms, [fresh({ 'Sohar Status': 'complete.ineligible' })]);
+  assert.equal(inel.length, 1);
+  assert.match(inel[0].detail, /^TMS Treatment Unilateral 10\/20\/2026: Sohar says not eligible with Blue Shield of California\. The authorization on file may be for the old insurance\.$/);
+  assert.match(flags(tms, [fresh({ 'Coverage End': '10/18/2026' })])[0].detail, /coverage ends 10\/18\/2026, before the visit/);
+  assert.equal(flags(tms, [fresh({ 'Coverage End': '12/31/2026' })]).length, 0);
+  const moved = [fresh(), { 'Per Nbr': '1001', MRN: 'M1001', 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', 'Sohar Date': '2026-10-14T17:00:00Z', 'Sohar Payer': 'Acme Health', 'NextGen Payer': 'Blue Shield CA', 'Coverage Differs': 'Yes' }];
+  assert.match(flags(tms, moved)[0].detail, /Sohar found Acme Health; NextGen has Blue Shield CA/);
+  // ESK and IV ketamine count; consults and med management do not; an ineligible row superseded by a newer eligible one does not.
+  assert.equal(flags(pat({}, { appointments: [appt({ event: 'Esketamine Follow Up' })] }), [fresh({ 'Sohar Status': 'complete.ineligible' })]).length, 1);
+  assert.equal(flags(pat({}, { appointments: [appt({ event: 'IV Ketamine Follow Up' })] }), [fresh({ 'Sohar Status': 'complete.ineligible' })]).length, 1);
+  assert.equal(flags(pat({}, { appointments: [appt({ event: 'TMS Consult In Person' })] }), [fresh({ 'Sohar Status': 'complete.ineligible' })]).length, 0);
+  assert.equal(flags(pat({}, { appointments: [appt()] }), [fresh({ 'Sohar Status': 'complete.ineligible' })]).length, 0);
+  assert.equal(flags(tms, [fresh({ 'Sohar Status': 'complete.ineligible', Action: 'Superseded by a newer check' })]).length, 0);
+  assert.ok(R.isInterventionEvent('MT Redo') && R.isIVKEvent('IVK infusion') && !R.isIVKEvent('Esketamine'));
+  assert.equal(R.PILLS.find((p) => p.code === 'INS_CHANGED').severity, 'high');
+});

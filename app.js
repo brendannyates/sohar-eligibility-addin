@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.15.0';
+  const VERSION = '0.16.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -1590,7 +1590,8 @@
     for (let r = det.headerRow + 1; r < end; r++) {
       const row = state.rows[r] || [];
       const g = (f) => (cm[f] == null ? '' : String(row[cm[f]] ?? '').trim());
-      if (g('perNbr')) out.push({ rendering: g('rendering'), loc: g('loc'), event: g('event') });
+      // per, date and status let fees.js count a patient's IV ketamine infusions.
+      if (g('perNbr')) out.push({ rendering: g('rendering'), loc: g('loc'), event: g('event'), per: g('perNbr'), date: cm.apptDt == null ? '' : row[cm.apptDt], status: g('sts') });
     }
     return out;
   }
@@ -1659,14 +1660,15 @@
     if (f.prep) {
       const groups = new Map();
       for (const e of f.est.values()) for (const fl of e.flags) {
-        const k = /^No fee tab|matches more than one fee tab|is not in the uploaded/.test(fl) ? 'need a fee tab (Fee Locations)'
+        const k = /^No estimate:/.test(fl) ? 'intervention or IVK on a government plan: no estimate (deductible, OOP max and insurance checked)'
+          : /^No fee tab|matches more than one fee tab|is not in the uploaded/.test(fl) ? 'need a fee tab (Fee Locations)'
           : /^Map payer|^Fee payer/.test(fl) ? 'need a payer mapped to a fee column (Fee Payer Map)'
             : /^No default codes|^Enter codes/.test(fl) ? 'need estimate codes (Estimate Codes)'
               : /^Telehealth visit/.test(fl) ? 'telehealth with no home clinic (Provider Home Clinic)' : 'other';
         groups.set(k, (groups.get(k) || 0) + 1);
       }
       const n = f.prep.counts;
-      parts.push(`<p>${n.ready} of ${n.patients} verified patient${n.patients === 1 ? '' : 's'} have an estimate for the next visit${n.flagged ? `; ${n.flagged} flagged` : ''}. Estimates are not a guarantee.</p>`);
+      parts.push(`<p>${n.ready} of ${n.patients} verified patient${n.patients === 1 ? '' : 's'} have an estimate for the next visit${n.flagged ? `; ${n.flagged} flagged` : ''}${n.labeled ? `; ${n.labeled} not estimated (interventions)` : ''}. Estimates are not a guarantee.</p>`);
       if (groups.size) parts.push(`<ul class="pc-items">${[...groups].map(([k, v]) => `<li>${v} ${esc(k)}</li>`).join('')}</ul>`);
     }
     for (const w of f.warn || []) parts.push(`<p class="warn">${esc(w)}</p>`);
