@@ -207,17 +207,24 @@
     });
   }
 
+  // Built-in payer knowledge (payer-knowledge.js): the sheet rows win, built-in rows fill in what the sheet lacks, so a
+  // workbook without the Payer Map or Sohar Payers tab still works. Built-in Payer Map rows carry builtIn: true.
+  const knowledge = () => root.PayerKnowledge || null;
+  const PAYER_MAP_COLS = ['NextGen Payer Name', 'Sohar payerId', 'Sohar payerName', 'Confidence', 'Action', 'Notes', 'Last reviewed'];
+
   async function readPayerMap() {
-    const rows = await readTable(TABLES.payerMap);
-    return rows.map((r) => ({
+    const rows = (await readTable(TABLES.payerMap, true)).map((r) => ({
       nextgenPayerName: r['NextGen Payer Name'], payerId: r['Sohar payerId'], payerName: r['Sohar payerName'],
       confidence: r['Confidence'], notes: r['Notes'],
     }));
+    const K = knowledge();
+    return K ? K.mergePayerMap(rows) : rows;
   }
 
   async function readSoharPayers() {
-    const rows = await readTable(TABLES.sohar);
-    return rows.map((r) => ({ payerId: String(r.payerId || ''), payerName: String(r.payerName || ''), aliasPayerNames: String(r.aliasPayerNames || '') }));
+    const rows = (await readTable(TABLES.sohar, true)).map((r) => ({ payerId: String(r.payerId || ''), payerName: String(r.payerName || ''), aliasPayerNames: String(r.aliasPayerNames || '') }));
+    const K = knowledge();
+    return K ? K.mergeSoharPayers(rows).map(({ payerId, payerName, aliasPayerNames }) => ({ payerId, payerName, aliasPayerNames })) : rows;
   }
 
   async function upsertPayerMap(entry, opts) { return upsertPayerMapMany([entry], opts); }
@@ -232,6 +239,8 @@
   async function upsertPayerMapMany(entries, opts) {
     if (!entries || !entries.length) return 0;
     const C = root.SoharCore;
+    // A workbook that starts on the built-in payer knowledge has no Payer Map yet: make it on the first save.
+    if (!(await tableExists(TABLES.payerMap))) await createHeaderTable({ sheet: SHEETS.payerMap, table: TABLES.payerMap }, PAYER_MAP_COLS, 'the Payer Map', 'save the payer again');
     return run(async (ctx) => {
       const t = ctx.workbook.tables.getItem(TABLES.payerMap);
       const h = t.getHeaderRowRange(); h.load('values');
@@ -562,38 +571,42 @@
    * most the hidden staging sheet, which the next try removes or finishes. Returns true when it made (or finished) the
    * table, false when it was already there (it is then left exactly as it is).
    */
-  async function createClinicInbox(cols) {
-    const failed = (s) => (e) => { e.message = `Could not set up the clinic inbox (${s}): ${e.message}. Nothing else in the workbook changed; try again.`; throw e; };
+  async function createClinicInbox(cols) { return createHeaderTable({ sheet: INBOX.sheet, table: INBOX.table }, cols, 'the clinic inbox', 'set up the inbox again'); }
+
+  // Header-only table creation (the clinic inbox, and the Payer Map in a workbook that starts without one), fail-safe
+  // as described above. spec: {sheet, table}. label / retry word the errors.
+  async function createHeaderTable(spec, cols, label, retry) {
+    const failed = (s) => (e) => { e.message = `Could not set up ${label} (${s}): ${e.message}. Nothing else in the workbook changed; try again.`; throw e; };
     return run(async (ctx) => {
       const wb = ctx.workbook;
-      const real = wb.tables.getItemOrNullObject(INBOX.table), stg = wb.tables.getItemOrNullObject(STG(INBOX.table));
-      const ws = wb.worksheets.getItemOrNullObject(INBOX.sheet), stage = wb.worksheets.getItemOrNullObject(STAGE_SHEET(INBOX.table));
+      const real = wb.tables.getItemOrNullObject(spec.table), stg = wb.tables.getItemOrNullObject(STG(spec.table));
+      const ws = wb.worksheets.getItemOrNullObject(spec.sheet), stage = wb.worksheets.getItemOrNullObject(STAGE_SHEET(spec.table));
       real.load('isNullObject'); stg.load('isNullObject'); ws.load('isNullObject,id'); stage.load('isNullObject');
       await ctx.sync().catch(failed('checking the workbook'));
       if (!real.isNullObject) return false;
       let home = null;
       if (!stg.isNullObject) { home = stg.worksheet; home.load('id'); await ctx.sync().catch(failed('checking the workbook')); }
-      // A sheet with the inbox name that is not this setup's own (cut off after the sheet rename) belongs to someone.
+      // A sheet with this name that is not this setup's own (cut off after the sheet rename) belongs to someone.
       if (!ws.isNullObject && !(home && home.id === ws.id)) {
-        throw new Error(`Could not set up the clinic inbox: this workbook already has a sheet named "${INBOX.sheet}" without the ${INBOX.table} table. Rename or delete that sheet, then set up the inbox again. Nothing was changed.`);
+        throw new Error(`Could not set up ${label}: this workbook already has a sheet named "${spec.sheet}" without the ${spec.table} table. Rename or delete that sheet, then ${retry}. Nothing was changed.`);
       }
       if (!home) {
-        if (!stage.isNullObject) wb.worksheets.getItem(STAGE_SHEET(INBOX.table)).delete(); // an earlier try cut off before its table
-        const s = wb.worksheets.add(STAGE_SHEET(INBOX.table));
+        if (!stage.isNullObject) wb.worksheets.getItem(STAGE_SHEET(spec.table)).delete(); // an earlier try cut off before its table
+        const s = wb.worksheets.add(STAGE_SHEET(spec.table));
         s.visibility = Excel.SheetVisibility.hidden;
         const rg = s.getRangeByIndexes(0, 0, 2, cols.length);
         rg.numberFormat = [cols.map(() => '@'), cols.map(() => '@')];
         rg.values = [cols, cols.map(() => '')];
-        s.tables.add(rg, true).name = STG(INBOX.table);
+        s.tables.add(rg, true).name = STG(spec.table);
         await ctx.sync().catch(failed('making the table'));
         home = s;
       }
       home.visibility = Excel.SheetVisibility.visible;
-      home.name = INBOX.sheet;
-      wb.tables.getItem(STG(INBOX.table)).name = INBOX.table; // last: the flow only ever sees a complete table
+      home.name = spec.sheet;
+      wb.tables.getItem(STG(spec.table)).name = spec.table; // last: a reader only ever sees a complete table
       await ctx.sync().catch(failed('naming the table'));
-      try { home.freezePanes.freezeRows(1); wb.tables.getItem(INBOX.table).getRange().format.autofitColumns(); await ctx.sync(); }
-      catch (e) { console.warn('clinic inbox formatting skipped', e); } // cosmetic only
+      try { home.freezePanes.freezeRows(1); wb.tables.getItem(spec.table).getRange().format.autofitColumns(); await ctx.sync(); }
+      catch (e) { console.warn(`${label} formatting skipped`, e); } // cosmetic only
       return true;
     });
   }
@@ -830,9 +843,11 @@
     });
   }
 
+  // Payer Map and Sohar Payers are optional since v0.17 (built-in payer knowledge fills in).
+  const OPTIONAL_TABLES = new Set([TABLES.payerMap, TABLES.sohar]);
   async function templateCheck() {
     return run(async (ctx) => {
-      const names = Object.values(TABLES);
+      const names = Object.values(TABLES).filter((n) => !OPTIONAL_TABLES.has(n));
       const items = names.map((n) => { const t = ctx.workbook.tables.getItemOrNullObject(n); t.load('isNullObject'); return t; });
       await ctx.sync();
       return names.filter((n, i) => items[i].isNullObject);

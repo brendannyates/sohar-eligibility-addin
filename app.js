@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.16.0';
+  const VERSION = '0.17.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -515,7 +515,8 @@
       // sheet since the last logged state (or a Baseline), before the add-in writes anything.
       const pending = state.pendingLog || [];
       logRows.push(...pending);
-      try { logRows.push(...C.sheetEditLog(state.payerMap, (await X.readPayerMapLog()).concat(pending), when)); } catch (e) { console.error(e); }
+      // Built-in payer knowledge rows are not sheet edits: only rows on the Payer Map sheet are compared with the log.
+      try { logRows.push(...C.sheetEditLog(state.payerMap.filter((r) => !r.builtIn), (await X.readPayerMapLog()).concat(pending), when)); } catch (e) { console.error(e); }
       // The outcomes ledger feeds learning. Read once per pane session; processResults keeps state.outcomes current
       // after each upload. If it cannot be read, nothing is learned this time (never a guess from nothing) and the
       // next build tries again.

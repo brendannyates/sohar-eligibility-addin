@@ -672,7 +672,9 @@ export function createMock(opts = {}) {
   };
 
   // The real excel.js, run in this realm (so arrays/objects it returns compare cleanly) with its own globals.
-  const self = { SoharCore: require('../../core.js') };
+  // opts.knowledge: also load the built-in payer knowledge (payer-knowledge.js), as index.html does. Off by default so
+  // Payer Map tests see only their own synthetic rows.
+  const self = { SoharCore: require('../../core.js'), ...(opts.knowledge ? { PayerKnowledge: require('../../payer-knowledge.js') } : {}) };
   // opts.source or EXCEL_MOCK_SOURCE=path: run a candidate excel.js without touching the real file.
   const src = opts.source ?? fs.readFileSync(process.env.EXCEL_MOCK_SOURCE || EXCEL_JS, 'utf8');
   vm.runInThisContext(`(function (self, globalThis, Excel, Office, console) {\n${src}\n})`, { filename: fileURLToPath(EXCEL_JS) })
