@@ -84,7 +84,7 @@ test('excel: without payer knowledge loaded, the sheets read exactly as before',
 
 test('generated block: counts match, no duplicate keys, every mapped payerId is on the Sohar list, nothing person-shaped', () => {
   const map = K.payerMap(), sohar = K.soharPayers();
-  assert.deepEqual(K.META.counts, { payerMap: map.length, soharPayers: sohar.length, feeLocations: K.feeLocations().length, feePayerMap: K.feePayerMap().length });
+  assert.deepEqual(K.META.counts, { payerMap: map.length, soharPayers: sohar.length, feeLocations: K.feeLocations().length, feePayerMap: K.feePayerMap().length, feeFlags: K.feeFlags().length });
   assert.equal(new Set(map.map((r) => r.nextgenPayerName.toLowerCase())).size, map.length);
   assert.equal(new Set(sohar.map((r) => r.payerId)).size, sohar.length);
   const ids = new Set(sohar.map((r) => r.payerId));
@@ -94,4 +94,24 @@ test('generated block: counts match, no duplicate keys, every mapped payerId is 
   const text = JSON.stringify([map, K.feeLocations(), K.feePayerMap()].map((l) => l.map((r) => { const { notes, Note, ...rest } = r; return rest; })));
   assert.doesNotMatch(text, /\b\d{1,2}\/\d{1,2}\/(19|20)\d{2}\b/);
   assert.doesNotMatch(text, /PER-\d|\bMRN\b|memberId/i);
+});
+
+test('v0.18 approved review list: Yes keeps the match, a column name must be on the tab, "No, <text>" becomes a flag', () => {
+  const ok = 'OK to build in? (Yes / No / correct column)';
+  const cols = (tab) => (tab === 'Tab1' ? ['Plan A', 'Local Blue', 'Plan B'] : []);
+  const ap = K.approved([
+    { Payer: 'Plan A PPO', 'Fee Tab': 'Tab1', 'Fee Payer': 'Plan A', [ok]: 'Yes' },
+    { Payer: 'Far Blue', 'Fee Tab': 'Tab1', 'Fee Payer': 'Plan B', [ok]: 'local blue' },
+    { Payer: 'Far Medicaid', 'Fee Tab': 'Tab1', 'Fee Payer': 'Plan A', [ok]: 'No, Flag for possible OON review' },
+    { Payer: 'Plain No', 'Fee Tab': 'Tab1', 'Fee Payer': 'Plan A', [ok]: 'No' },
+    { Payer: 'Typo', 'Fee Tab': 'Tab1', 'Fee Payer': 'Plan A', [ok]: 'Plan Z' },
+    { Payer: 'Blank', 'Fee Tab': 'Tab1', 'Fee Payer': 'Plan A', [ok]: '' },
+  ], cols);
+  assert.deepEqual(ap.feePayerMap, [['Plan A PPO', 'Tab1', 'Plan A'], ['Far Blue', 'Tab1', 'Local Blue']]);
+  assert.deepEqual(ap.feeFlags, [['Far Medicaid', 'Tab1', 'Flag for possible OON review']]);
+  assert.deepEqual(ap.skipped.map((s) => s.payer), ['Typo', 'Blank']);
+});
+
+test('generated fee flags read back in the shape fees.prepareEstimates takes', () => {
+  for (const f of K.feeFlags()) { assert.ok(f.Payer && f['Fee Tab'] && f.Flag); }
 });

@@ -1008,6 +1008,9 @@
     for (const ctx of Object.values(ctxs)) {
       ctx.feePayer = ''; ctx.confidence = ''; ctx.rateKey = '';
       if (ctx.tab && ctx.payer && !ctx.selfPay && !ctx.noEstimate) {
+        // Flags set when the fuzzy fee matches were reviewed (payer-knowledge feeFlags, e.g. "Flag for possible OON review").
+        const fl = (inp.feeFlags || []).find((f) => keyOf(f.Payer) === keyOf(ctx.payer) && keyOf(f['Fee Tab']) === keyOf(ctx.tab));
+        if (fl) ctx.flags.push(`${str(fl.Flag)}: ${ctx.payer} on ${ctx.tab}`);
         const row = lookupFeePayer(payerRows, ctx.payer, ctx.tab, ctx.soharPayerId);
         const rg = regions.get(ctx.tab);
         ctx.region = regionText(rg);
