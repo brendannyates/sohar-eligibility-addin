@@ -10,7 +10,7 @@
   'use strict';
 
   // BEGIN GENERATED: scripts/build-payer-knowledge.mjs. Do not edit by hand.
-  const META = {"generated":"2026-10-28","counts":{"payerMap":55,"soharPayers":828,"feeLocations":12,"feePayerMap":37}};
+  const META = {"generated":"2026-10-29","counts":{"payerMap":55,"soharPayers":828,"feeLocations":12,"feePayerMap":198,"feeFlags":1}};
   // [NextGen Payer Name, Sohar payerId, Sohar payerName, Confidence]
   const PAYER_MAP = [
     ["AARP UHC Claims Medicare Supplement","36273","AARP","Probable"],
@@ -954,6 +954,171 @@
     ["TriWest","Los Angeles","TriWest"],
     ["TriWest","Marin","TriWest"],
     ["TriWest","Orange","TriWest"],
+    ["Aetna Generic","Houston","Aetna"],
+    ["Aetna Meritain Health","SF","Aetna"],
+    ["Anthem Blue Cross","Burlingame","Anthem"],
+    ["Anthem Blue Cross","Los Angeles","Anthem"],
+    ["Anthem Blue Cross","Marin","Anthem"],
+    ["Anthem Blue Cross","Oakland","Anthem"],
+    ["Anthem Blue Cross","Orange","Anthem"],
+    ["Anthem Blue Cross","SF","Anthem"],
+    ["Anthem Blue Cross Blue Card","SF","Anthem"],
+    ["Anthem Blue Cross Blue Shield of Connecticut","Austin","BCBS of TX - HP ( & Others)"],
+    ["Anthem Blue Cross Blue Shield of Connecticut","Burlingame","Blue Shield"],
+    ["Anthem Blue Cross Blue Shield of Connecticut","Houston","BCBS of TX - HP ( & Others)"],
+    ["Anthem Blue Cross Blue Shield of Connecticut","Oakland","Blue Shield"],
+    ["Anthem Blue Cross Blue Shield of Connecticut","Orange","Blue Shield"],
+    ["Anthem Blue Cross Blue Shield of New York","Austin","BCBS of TX - HP ( & Others)"],
+    ["Anthem Blue Cross Blue Shield of New York","Houston","BCBS of TX - HP ( & Others)"],
+    ["Anthem Blue Cross Blue Shield of New York","Marin","Blue Shield"],
+    ["Anthem Blue Cross Blue Shield of New York","Oakland","Blue Shield"],
+    ["Anthem Blue Cross Blue Shield of New York","SF","Blue Shield"],
+    ["Anthem Generic","Oakland","Anthem"],
+    ["Blue Cross Blue Shield of Alabama","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Alabama","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Arizona","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of Arizona","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Colorado","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of Colorado","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Colorado","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Florida","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Florida","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Georgia","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of Georgia","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Georgia","Marin","Blue Shield"],
+    ["Blue Cross Blue Shield of Georgia","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Georgia","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Georgia","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Illinois","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of Illinois","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Illinois","Marin","Blue Shield"],
+    ["Blue Cross Blue Shield of Illinois","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Illinois","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Illinois","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Indiana","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Indiana","Marin","Blue Shield"],
+    ["Blue Cross Blue Shield of Indiana","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Indiana","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Iowa","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Kansas City","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Kansas City","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Kentucky","Marin","Blue Shield"],
+    ["Blue Cross Blue Shield of Kentucky","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Massachusetts","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of Massachusetts","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Massachusetts","Marin","Blue Shield"],
+    ["Blue Cross Blue Shield of Massachusetts","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Massachusetts","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Massachusetts","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Michigan","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of Michigan","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Minnesota","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Minnesota","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Missouri","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Missouri","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Missouri","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Nevada","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of New Jersey","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of New Jersey","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of New Jersey","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of North Carolina","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of North Carolina","Marin","Blue Shield"],
+    ["Blue Cross Blue Shield of North Carolina","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of North Dakota","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of Ohio","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Ohio","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Ohio","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Pennsylvania","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Pennsylvania","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Rhode Island","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Rhode Island","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Tennessee","Marin","Blue Shield"],
+    ["Blue Cross Blue Shield of Tennessee","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Texas","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Texas","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Texas","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Texas","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Virginia","Burlingame","Blue Shield"],
+    ["Blue Cross Blue Shield of Virginia","Los Angeles","Blue Shield"],
+    ["Blue Cross Blue Shield of Virginia","Marin","Blue Shield"],
+    ["Blue Cross Blue Shield of Virginia","Oakland","Blue Shield"],
+    ["Blue Cross Blue Shield of Virginia","Orange","Blue Shield"],
+    ["Blue Cross Blue Shield of Virginia","SF","Blue Shield"],
+    ["Blue Cross Blue Shield of Wisconsin","Marin","Blue Shield"],
+    ["Blue Shield CA","Burlingame","Blue Shield"],
+    ["Blue Shield CA","Los Angeles","Blue Shield"],
+    ["Blue Shield CA","Marin","Blue Shield"],
+    ["Blue Shield CA","Orange","Blue Shield"],
+    ["Blue Shield CA","SF","Blue Shield"],
+    ["Blue Shield CA Blue Card","Los Angeles","Blue Shield"],
+    ["Blue Shield CA Blue Card","Marin","Blue Shield"],
+    ["Blue Shield CA Blue Card","Oakland","Blue Shield"],
+    ["Blue Shield FEP","Oakland","Blue Shield"],
+    ["Blue Shield of California","Burlingame","Blue Shield"],
+    ["Blue Shield of California","Los Angeles","Blue Shield"],
+    ["Blue Shield of California","Marin","Blue Shield"],
+    ["Blue Shield of California","Oakland","Blue Shield"],
+    ["Blue Shield of California","Orange","Blue Shield"],
+    ["Blue Shield of California","SF","Blue Shield"],
+    ["Blue Shield of Idaho","Burlingame","Blue Shield"],
+    ["Carelon Behavioral Health","Orange","Carelon/Beacon"],
+    ["Cigna Generic","Austin","CIGNA"],
+    ["Highmark Blue Cross Blue Shield of Western New York","Burlingame","Blue Shield"],
+    ["Imperial Health CA Medicare Adv","Oakland","Imperial Medicare Adv"],
+    ["Kaiser Foundation Health Plan of Northern California","Burlingame","Kaiser"],
+    ["Kaiser Foundation Health Plan of Northern California","Los Angeles","Kaiser"],
+    ["Kaiser Foundation Health Plan of Northern California","Marin","Kaiser"],
+    ["Kaiser Foundation Health Plan of Northern California","Oakland","Kaiser"],
+    ["Kaiser Foundation Health Plan of Northern California","Orange","Kaiser"],
+    ["Kaiser Foundation Health Plan of Northern California","SF","Kaiser"],
+    ["Kaiser Foundation Health Plan of Southern California","Los Angeles","Kaiser"],
+    ["Kaiser Foundation Health Plan of Southern California","Oakland","Kaiser"],
+    ["Kaiser Foundation Health Plan of Southern California","Orange","Kaiser"],
+    ["Kaiser Foundation Northern California","Burlingame","Kaiser"],
+    ["Kaiser Foundation Northern California","Oakland","Kaiser"],
+    ["Kaiser Foundation Northern California","Orange","Kaiser"],
+    ["Kaiser Self Funded Plan - Harrington/Fiserv","Oakland","Kaiser"],
+    ["MultiPlan PHCS Generic","Los Angeles","MultiPlan"],
+    ["Noridian Northern CA","Oakland","Noridian"],
+    ["Noridian Northern CA","Orange","Noridian"],
+    ["Noridian Northern CA","SF","Noridian"],
+    ["Noridian Southern CA","Los Angeles","Noridian"],
+    ["Noridian Southern CA","Orange","Noridian"],
+    ["Noridian Southern CA","SF","Noridian"],
+    ["Novitas Texas Medicare","Houston","Novitas (Medicare)"],
+    ["Optum All Savers","Houston","Optum"],
+    ["Optum Health Behavioral Solutions","Austin","Optum"],
+    ["Optum Health Behavioral Solutions","Burlingame","Optum"],
+    ["Optum Health Behavioral Solutions","Houston","Optum"],
+    ["Optum Health Behavioral Solutions","Oakland","Optum"],
+    ["Optum Health Behavioral Solutions","Orange","Optum"],
+    ["Optum Health Behavioral Solutions","SF","Optum"],
+    ["Optum Medical Network","Burlingame","Optum"],
+    ["Optum Medical Network","Houston","Optum"],
+    ["Optum Medical Network","Los Angeles","Optum"],
+    ["Optum Medical Network","Oakland","Optum"],
+    ["Optum Medical Network","Orange","Optum"],
+    ["Optum Medical Network","SF","Optum"],
+    ["QMB TX Novitas Medicare","Houston","Novitas (Medicare)"],
+    ["Tricare For Life","Orange","TriCare"],
+    ["Tricare For Life","SF","TriCare"],
+    ["Tricare West","Los Angeles","TriCare"],
+    ["Tricare West","Oakland","TriCare"],
+    ["Tricare West","SF","TriCare"],
+    ["TRICARE West","Orange","TriCare"],
+    ["TriWest","Oakland","TriWest/VA"],
+    ["TriWest","SF","TriWest/VA"],
+    ["TRIWEST HEALTHCARE ALLIANCE","Orange","TriWest"],
+    ["TRIWEST HEALTHCARE ALLIANCE","SF","TriWest/VA"],
+    ["Veterans Affairs Community Care Network","SF","TriWest/VA"],
+    ["Veterans Affairs Nor Cal","SF","TriWest/VA"],
+    ["Washington Regence Blue Shield","Burlingame","Blue Shield"],
+    ["Washington Regence Blue Shield","Los Angeles","Blue Shield"],
+    ["Washington Regence Blue Shield","Orange","Blue Shield"],
+  ];
+  // [Payer, Fee Tab, Flag]
+  const FEE_FLAGS = [
+    ["Anthem Medicaid of Ohio","SF","Flag for possible OON review"],
   ];
   // END GENERATED
 
@@ -1021,6 +1186,28 @@
     return { payerMap, soharPayers, feeLocations, feePayerMap, review };
   }
 
+  /**
+   * The reviewed fuzzy list (select's review rows with "OK to build in?" filled) -> rows to build in.
+   * Yes: the Fee Payer as matched. A column name: that column (it must be on the tab: tabColumns(tab) -> names).
+   * "No" alone: left out. "No, <text>": left out and <text> becomes a fee flag for that payer on that tab.
+   * Blank or anything else: left out, listed in skipped.
+   */
+  function approved(rows, tabColumns) {
+    const feePayerMap = [], feeFlags = [], skipped = [];
+    const colsOn = (tab) => new Map((tabColumns ? tabColumns(tab) : []).map((c) => [low(c), c]));
+    for (const r of rows || []) {
+      const payer = str(r.Payer), tab = str(r['Fee Tab']);
+      const ok = str(Object.entries(r).find(([k]) => /^ok to build in/i.test(k))?.[1]);
+      if (!payer || !tab) continue;
+      const no = /^no\b[\s,:;-]*(.*)$/i.exec(ok);
+      if (/^yes$/i.test(ok)) feePayerMap.push([payer, tab, str(r['Fee Payer'])]);
+      else if (no) { if (str(no[1])) feeFlags.push([payer, tab, str(no[1])]); }
+      else if (ok && colsOn(tab).has(low(ok))) feePayerMap.push([payer, tab, colsOn(tab).get(low(ok))]);
+      else skipped.push({ payer, tab, answer: ok });
+    }
+    return { feePayerMap, feeFlags, skipped };
+  }
+
   // ---------- built-in rows in the shapes the add-in and the scripts already use ----------
   /** Payer Map rows as excel.readPayerMap returns them, marked builtIn. */
   const payerMap = () => PAYER_MAP.map(([nextgenPayerName, payerId, payerName, confidence]) =>
@@ -1044,7 +1231,9 @@
   const mergeFeeLocations = (sheet) => merge(sheet, feeLocations(), (r) => low(r['NextGen Location']));
   // A Sohar payerId-only Fee Payer Map row (blank Payer) has no built-in twin, so it is always kept.
   const mergeFeePayerMap = (sheet) => merge(sheet, feePayerMap(), (r) => (str(r.Payer) ? `${low(r.Payer)}|${low(r['Fee Tab'])}` : `#${str(r['Sohar payerId'])}|${low(r['Fee Tab'])}`));
+  /** Fee flags from the review (e.g. "Flag for possible OON review"): {Payer, 'Fee Tab', Flag}, for fees.prepareEstimates. */
+  const feeFlags = () => FEE_FLAGS.map(([payer, tab, flag]) => ({ Payer: payer, 'Fee Tab': tab, Flag: flag }));
 
-  return { META, BAR: { keep: [...KEEP], needEvidence: [...NEED_EVIDENCE], minAgreed: MIN_AGREED }, qualifies, select,
-    payerMap, soharPayers, feeLocations, feePayerMap, mergePayerMap, mergeSoharPayers, mergeFeeLocations, mergeFeePayerMap };
+  return { META, BAR: { keep: [...KEEP], needEvidence: [...NEED_EVIDENCE], minAgreed: MIN_AGREED }, qualifies, select, approved,
+    payerMap, soharPayers, feeLocations, feePayerMap, feeFlags, mergePayerMap, mergeSoharPayers, mergeFeeLocations, mergeFeePayerMap };
 });

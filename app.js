@@ -1,13 +1,14 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.17.0';
+  const VERSION = '0.18.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
   const XL = window.SoharXlsx;
   const F = window.SoharFees; // fee estimates (v0.11, a test, Off by default)
   const PRM = window.PayerRules; // esketamine payer credential rules (v0.13, payer-rules.js, shared with other add-ins)
+  const PK = window.PayerKnowledge; // built-in payer mappings and fee review flags (v0.17, payer-knowledge.js)
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
   const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, discoveryVerify: null, pendingFocus: '', demo: false,
@@ -1633,6 +1634,7 @@
       // Info saved for a different upload (half-failed save) must not lend its Locations to these rows.
       results: rs, scheduleRows: f.schedule, tabSummary: F.metaMatches(f.meta, f.schedule.length) ? F.readMeta(f.meta).tabSummary : [], locations: f.locations, homes: f.homes,
       payerMap: f.payerMap, payerLog: f.payerLog, codes: f.codes, defaults: f.defaults, appts: importAppts(),
+      feeFlags: PK ? PK.feeFlags() : [],
       teleKeywords: (state.cfg && state.cfg.teleKeywords) || ['Tele'], cfgDefaults: state.cfg.fees.defaults, when: fmtStamp(new Date()),
       pers: C.benefitsView(rs).rows.map((r) => r['Per Nbr']),
     });

@@ -855,3 +855,13 @@ test('v0.16 IVK: commercial = visit through benefits + medication; government = 
   assert.equal(p.counts.labeled, 1);
   assert.ok(!p.payerRows.some((r) => /self pay/i.test(r.Payer)), 'self pay needs no fee payer column');
 });
+
+// ---------- v0.18: fee flags from the reviewed fuzzy matches ----------
+test('v0.18 fee flags: a reviewed "No, <flag>" payer on a tab is flagged on that patient only', () => {
+  const base = prep().contexts[1];
+  assert.ok(base.tab && base.payer, 'fixture patient 1 has a tab and payer');
+  const p = prep({ feeFlags: [{ Payer: base.payer.toUpperCase(), 'Fee Tab': base.tab, Flag: 'Flag for possible OON review' }, { Payer: 'Other Synthetic Payer', 'Fee Tab': base.tab, Flag: 'x' }] });
+  assert.ok(p.contexts[1].flags.includes(`Flag for possible OON review: ${base.payer} on ${base.tab}`));
+  assert.ok(!p.contexts[2].flags.some((f) => /possible OON/.test(f)), 'other patients untouched');
+  assert.deepEqual(prep({ feeFlags: [{ Payer: base.payer, 'Fee Tab': 'Another Tab', Flag: 'y' }] }).contexts[1].flags, base.flags, 'other tab: no flag');
+});
