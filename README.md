@@ -171,7 +171,7 @@ IR Portal and the secondary files are under collapsed sections. Full screen adds
 
 ## What it does (detail)
 
-1. **Upload or paste** the report. **Upload report file** takes `.csv` or `.xlsx` (xlsx needs ExcelApi 1.13) and replaces the `Import` sheet; pasting still works. Then it **scans** the `Import` sheet. Finds the NextGen header row under the title block, maps columns by name (synonyms live in `core.js`), and reports which fields are present.
+1. **Upload or paste** the report. **Upload report file** takes `.csv` or `.xlsx` (xlsx needs ExcelApi 1.13) and replaces the `Import` sheet, which is very hidden (v0.19), so upload rather than paste. Then it **scans** the `Import` sheet. Finds the NextGen header row under the title block, maps columns by name (synonyms live in `core.js`), and reports which fields are present.
 2. **Map payers.** Any NextGen payer name not in `tblPayerMap` is listed with Sohar suggestions. Picking one writes the row to the Payer Map sheet, so it is remembered next time.
 3. **Build.** One row per `Per Nbr`. Routing: verification when the primary payer maps (Exact, Probable, Confirmed, Auto-High, Auto-Medium, Learned) and `Pol Nbr (Cht Guar)` exists; discovery otherwise (no payer, Self Pay, unmapped, Auto-Low, Review or an unrecognized label, or no member ID). R3 and R4 above can add a last-encounter verification. Writes `Patients`, `Review`, `Verification`, `Discovery`.
 4. **Export.** Downloads `sohar_verification_import_*.csv` and `sohar_discovery_import_*.csv` with the exact Sohar template columns. The same rows are on the sheets.
@@ -221,7 +221,10 @@ npm run serve     # http://localhost:8080 opens in demo mode (synthetic rows, no
 
 ## PHI
 
-- The workbook holds names, DOBs, and member IDs once the report is pasted. Keep it in MHS OneDrive or SharePoint.
+- No sheet shows a patient's or subscriber's name or DOB (v0.19, Brendan 10/28). Sheets and their downloads show **LASFIR** (first three letters of the last name + first three of the first, `core.lasfir`) and keep the **MRN**. Patients, Verification and Discovery keep the template's column count: Last Name / First Name / DOB are renamed in place to `LASFIR` / `Name on File` / `DOB on File` ("Yes" or blank, so the Dashboard's missing-name and missing-DOB counts still work), and the Subscriber columns likewise. Sohar Results, NextGen Tasks, Benefits, IR Cross-Ref, Discovery Verify, Discovery from Verify, Payer Mapping, the benefits CSV and the tracker file have `LASFIR` in place of the name and DOB columns. The derived columns come from `core.cellOf`.
+- Names exist only in memory (rebuilt from the report on every open) and on the sheets that must hold them: `Import` (the raw report), `Sohar Uploads` and `IR Uploads`. `lockNameSheets` makes those **very hidden** on every open and upload (no Unhide menu lists them) and deletes the `Export` sheet, a one-off web CSV fallback that carries names. This keeps names off screens, screen shares and copy-paste. It is not access control: anyone who can open the workbook can still read them with a script or by downloading the file, so the workbook's SharePoint folder permissions are the real control.
+- The Sohar import files still carry names and DOBs (Sohar needs them). Discovery Verify and Discovery from Verify files are the sheet's rows (typed member IDs and ZIPs go out) with names put back from the session's build (`core.fillNames`); a row with no name on file is refused with a "refresh first" message.
+- The workbook holds member IDs and, on the very hidden sheets, names and DOBs. Keep it in MHS OneDrive or SharePoint.
 - The pane makes no network calls (`connect-src 'none'` in `index.html`). The only remote asset is Office.js from Microsoft's CDN. CSVs are generated in the browser and saved locally.
 - GitHub Pages hosts code only and never receives workbook data.
 - Tests and demo mode use synthetic data only. Never commit a real export.

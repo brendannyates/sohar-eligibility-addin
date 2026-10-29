@@ -47,14 +47,14 @@ test('writeTasks creates the sheet and table; a rewrite replaces every row', asy
   assert.deepEqual(await X.readTasks(), []);
   await X.writeTasks(C.TASK_COLS, tasks(7, 'old'));
   assert.deepEqual(m.sheetNames(), ['Import', 'NextGen Tasks']);
-  assert.deepEqual(m.tableInfo('tblNextGenTasks'), { sheet: 'NextGen Tasks', address: 'A1:Q8', rows: 7, cols: 17 }); // v0.14: Clinic Note last
+  assert.deepEqual(m.tableInfo('tblNextGenTasks'), { sheet: 'NextGen Tasks', address: 'A1:P8', rows: 7, cols: 16 }); // v0.14: Clinic Note last; v0.19: LASFIR for the two name columns
   assert.deepEqual(await X.readTasks(), expected(C.TASK_COLS, tasks(7, 'old')));
   assert.equal((await X.readTasks())[0].MRN, '0000', 'text format keeps leading zeros');
   assert.equal(m.frozenRows('NextGen Tasks'), 1);
   assert.equal(m.activeSheet(), 'Import', 'writeTasks does not activate');
   await X.writeTasks(C.TASK_COLS, tasks(3, 'new'));
   assert.deepEqual(await X.readTasks(), expected(C.TASK_COLS, tasks(3, 'new')));
-  assert.equal(m.usedAddress('NextGen Tasks'), 'A1:Q4', 'no leftover rows from the longer old table');
+  assert.equal(m.usedAddress('NextGen Tasks'), 'A1:P4', 'no leftover rows from the longer old table');
   assert.deepEqual(m.tableNames(), ['tblNextGenTasks']);
 });
 
@@ -62,10 +62,10 @@ test('writeUploads keeps Sohar Uploads hidden and round-trips the JSON records',
   const m = createMock(), X = m.SoharExcel;
   assert.deepEqual(await X.readUploads(), []);
   await X.writeUploads(C.UPLOAD_COLS, uploads(5, 'a'));
-  assert.equal(m.sheetVisibility('Sohar Uploads'), 'Hidden');
+  assert.equal(m.sheetVisibility('Sohar Uploads'), 'VeryHidden');
   assert.deepEqual(await X.readUploads(), expected(C.UPLOAD_COLS, uploads(5, 'a')));
   await X.writeUploads(C.UPLOAD_COLS, uploads(2, 'b'));
-  assert.equal(m.sheetVisibility('Sohar Uploads'), 'Hidden');
+  assert.equal(m.sheetVisibility('Sohar Uploads'), 'VeryHidden');
   assert.deepEqual(await X.readUploads(), expected(C.UPLOAD_COLS, uploads(2, 'b')));
   await X.writeUploads(C.UPLOAD_COLS, []);
   assert.deepEqual(await X.readUploads(), []);
@@ -77,7 +77,7 @@ test('writeIrUploads / readIrUploads round-trip records on a hidden sheet', asyn
   assert.deepEqual(await X.readIrUploads(), []);
   const recs = [{ id: 'IR-1', text: 'Insurance card update' }, { id: 'IR-2', text: 'Payer changed' }];
   await X.writeIrUploads(recs);
-  assert.equal(m.sheetVisibility('IR Uploads'), 'Hidden');
+  assert.equal(m.sheetVisibility('IR Uploads'), 'VeryHidden');
   assert.deepEqual(await X.readIrUploads(), recs);
 });
 
@@ -428,7 +428,7 @@ async function sweep(kase, mode, nOld, nNew, viaRecover) {
     try {
       await write(X, NEXT);
       if (!isDeepStrictEqual(await read(X), expected(cols, NEXT))) bad.push(`${KNOBS[mode]}=${k}: the next clean write did not save`);
-      if (hidden && m.sheetVisibility(sheet) !== 'Hidden') bad.push(`${KNOBS[mode]}=${k}: ${sheet} visible after the next clean write`);
+      if (hidden && m.sheetVisibility(sheet) === 'Visible') bad.push(`${KNOBS[mode]}=${k}: ${sheet} visible after the next clean write`);
       if (!isDeepStrictEqual(m.visibleSheets(), visibleAfter)) bad.push(`${KNOBS[mode]}=${k}: visible sheets ${m.visibleSheets()} after the next clean write`);
     } catch (e) { bad.push(`${KNOBS[mode]}=${k}: the next clean write threw ${e.message}`); }
   }
@@ -488,7 +488,7 @@ test('a save cut off mid-swap days ago: the next read puts the new rows in place
   assert.deepEqual(await X.readUploads(), expected(C.UPLOAD_COLS, uploads(3, 'cut')), 'never [] while a complete copy exists');
   assert.deepEqual(m.tableNames(), ['tblSoharUploads']);
   assert.equal(m.tableInfo('tblSoharUploads').sheet, 'Sohar Uploads');
-  assert.equal(m.sheetVisibility('Sohar Uploads'), 'Hidden');
+  assert.equal(m.sheetVisibility('Sohar Uploads'), 'VeryHidden');
   assert.ok(!m.sheetNames().some((n) => n.startsWith('~saving')));
   assert.deepEqual(await X.recoverAll(), ['Sohar Uploads'], 'the pane can say what was put back');
   assert.deepEqual(await X.recoverAll(), [], 'reported once');
@@ -538,7 +538,7 @@ test('a save keeps the sheet where it was in the tab order and its visibility', 
   await X.writeTasks(C.TASK_COLS, tasks(3, 'new'));
   await X.writeUploads(C.UPLOAD_COLS, uploads(2, 'new'));
   assert.deepEqual(m.sheetNames(), order);
-  assert.equal(m.sheetVisibility('Sohar Uploads'), 'Hidden');
+  assert.equal(m.sheetVisibility('Sohar Uploads'), 'VeryHidden');
   assert.equal(m.sheetVisibility('NextGen Tasks'), 'Visible');
 });
 
@@ -619,7 +619,7 @@ test('Sohar Uploads is hidden again on save even if someone unhid it', async () 
   const m = createMock(), X = m.SoharExcel;
   m.seedTable('Sohar Uploads', 'tblSoharUploads', C.UPLOAD_COLS, uploads(1, 'old')); // visible
   await X.writeUploads(C.UPLOAD_COLS, uploads(2, 'new'));
-  assert.equal(m.sheetVisibility('Sohar Uploads'), 'Hidden');
+  assert.equal(m.sheetVisibility('Sohar Uploads'), 'VeryHidden');
 });
 
 // The swap paths for an old table on a renamed sheet, and a renamed old table with a clashing target sheet.
@@ -880,11 +880,12 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
     recoverAll: () => X.recoverAll(),
     activate: () => X.activate('Clinic Work Inbox'),
     createClinicInbox: () => X.createClinicInbox(RL.INBOX_COLS),
+    lockNameSheets: () => X.lockNameSheets(),
   };
   // Every other write* export: a plain (cols, rows) table save.
   for (const k of Object.keys(X)) if (/^write/.test(k) && !calls[k]) calls[k] = () => X[k](['Key', 'Record'], two(['Key', 'Record']));
   // A new mutating export must be listed here (or be a write*) so this proof keeps covering every write path.
-  const mutating = Object.keys(X).filter((k) => typeof X[k] === 'function' && /^(write|upsert|replace|ensure|set|append|import|recover|activate|create|insert|delete|clear|add)/.test(k));
+  const mutating = Object.keys(X).filter((k) => typeof X[k] === 'function' && /^(write|upsert|replace|ensure|set|append|import|recover|activate|create|insert|delete|clear|add|lock)/.test(k));
   assert.deepEqual(mutating.filter((k) => !calls[k]), [], 'every mutating export is exercised');
   assert.ok(mutating.length >= 35, `${mutating.length} write paths`);
   const bad = [];

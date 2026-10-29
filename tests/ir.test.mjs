@@ -12,7 +12,7 @@ const IR = [
   ['', '', 'I-4', 'Haddad', 'Mira', '5/5/1985', 'ER/HIM/NB/Authorization Missing - Auth on file is expired', 'Walnut Creek', '', '9/1/2026', 'ROE JO', '10/25/2026'],
   ['', '', 'I-5', 'Petrov', 'Ilya', '2/2/1970', 'ER/HIM/NB/Provider Out of Network', 'Walnut Creek', '777', '9/2/2026', 'ROE JO', ''],
 ];
-const base = (o) => Object.fromEntries(C.RESULTS_COLS.map((c) => [c, o[c] ?? '']));
+const base = (o) => ({ ...Object.fromEntries(C.RESULTS_COLS.map((c) => [c, ''])), ...o }); // results keep names in memory (v0.19)
 const RESULTS = [
   base({ 'Per Nbr': '101', MRN: '901', 'Last Name': 'Okafor', 'First Name': 'Chidi', DOB: '01/01/1990', 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', 'Sohar Payer': 'Cigna', 'Choose in NextGen': 'Cigna', 'Next Appt': '10/21/2026', 'Next Location': 'San Rafael', 'Sohar Date': '2026-10-14', Match: 'Per Nbr' }),
   base({ 'Per Nbr': '100', MRN: '900', 'Last Name': 'Rivera', 'First Name': 'Ana', DOB: '03/04/1980', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Payer': 'Blue Shield of California', Plan: 'SYNTH PPO', 'Coverage Start': '10/1/2026', 'Benefit Flag': 'Deductible met', 'Sohar Date': '2026-10-14', Match: 'Per Nbr' }),

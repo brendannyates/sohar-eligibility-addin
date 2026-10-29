@@ -98,7 +98,7 @@
       const d = C.parseDate(r['Next Appt']);
       if (!d || (from && d < from) || (to && d > to)) return false;
     }
-    if (tv && !['Last Name', 'First Name', 'MRN', 'Per Nbr', 'NextGen Payer', 'Sohar Payer', 'Plan', 'Choose in NextGen', 'Task', 'Details'].some((k) => String(r[k] || '').toLowerCase().includes(tv))) return false;
+    if (tv && !['LASFIR', 'MRN', 'Per Nbr', 'NextGen Payer', 'Sohar Payer', 'Plan', 'Choose in NextGen', 'Task', 'Details'].some((k) => String(C.cellOf(r, k) || '').toLowerCase().includes(tv))) return false;
     return true;
   }
   function filteredRows() {
@@ -142,7 +142,7 @@
 
   const cell = (v, cls) => `<td${cls ? ` class="${cls}"` : ''}>${esc(v)}</td>`;
   const left = (rem, total) => (rem === '' || rem == null ? '' : total !== '' && total != null ? `${rem} of ${total}` : String(rem));
-  const name = (r) => [r['Last Name'], r['First Name']].filter(Boolean).join(', ') || '(not matched)';
+  const name = (r) => C.tagOf(r) || '(not matched)'; // LASFIR: names are not shown (v0.19)
   function link(u) { return /^https:\/\//.test(u || '') ? `<a href="${esc(u)}" target="_blank" rel="noopener">Sohar</a>` : ''; }
 
   function renderPrep() {
@@ -213,7 +213,7 @@
     const grp = (title, keys, src) => `<div class="dgroup"><h3>${title}</h3><dl>${keys.filter((k) => (src || r)[k] !== '' && (src || r)[k] != null).map((k) => `<dt>${esc(k)}</dt><dd>${k === 'Sohar Link' ? link((src || r)[k]) : esc((src || r)[k])}</dd>`).join('') || '<dd class="hint">None</dd>'}</dl></div>`;
     const box = $('detail');
     box.innerHTML = `<div class="dhead"><h2>${esc(name(r))}</h2>
-        <span class="hint">${esc(idText(r))}${r['Per Nbr'] && r.MRN ? ` · Per Nbr ${esc(r['Per Nbr'])}` : ''}${r.DOB ? ` · DOB ${esc(r.DOB)}` : ''}</span>
+        <span class="hint">${esc(idText(r))}${r['Per Nbr'] && r.MRN ? ` · Per Nbr ${esc(r['Per Nbr'])}` : ''}</span>
         <button class="small" id="btnHide">Close</button></div>
       <div class="dgrid">
         ${grp('Upcoming visits', ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'Next Provider', 'Upcoming Appts', 'Upcoming Detail'])}
@@ -384,7 +384,7 @@
   function tableInto(id, cols, data, empty) {
     const t = $(id);
     t.querySelector('thead').innerHTML = `<tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr>`;
-    t.querySelector('tbody').innerHTML = data.length ? data.map((r) => `<tr>${cols.map((c) => cell(r[c])).join('')}</tr>`).join('') : `<tr><td colspan="${cols.length}" class="hint">${esc(empty)}</td></tr>`;
+    t.querySelector('tbody').innerHTML = data.length ? data.map((r) => `<tr>${cols.map((c) => cell(C.cellOf(r, c))).join('')}</tr>`).join('') : `<tr><td colspan="${cols.length}" class="hint">${esc(empty)}</td></tr>`;
   }
   function renderLearning() {
     const L = learning || {};
@@ -457,9 +457,11 @@
       cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS; data = exportsData[kind] || [];
     } else if (kind === 'discoveryVerify') {
       if (!discVerify.length) { notice('No discovery patients are waiting for verification. Upload a discovery output with coverage found first.', false); return; }
+      try { C.namesMissing(discVerify); } catch (e) { notice(e.message, false); return; }
       name = C.fileName('discoveryVerify'); cols = C.VERIFICATION_COLS; data = discVerify;
     } else if (kind === 'verifyFailed') {
       if (!verFailed.length) { notice('No failed verifications are waiting for discovery.', false); return; }
+      try { C.namesMissing(verFailed); } catch (e) { notice(e.message, false); return; }
       name = C.fileName('verifyFailed'); cols = C.DISCOVERY_COLS; data = verFailed;
     } else if (kind === 'mapping') {
       const d = (learning && learning.mapping) || [];

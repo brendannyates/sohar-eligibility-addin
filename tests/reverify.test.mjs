@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const C = createRequire(import.meta.url)('../core.js');
+const PATIENT_MEMORY = C.PATIENT_COLS.map((c) => ({ 'LASFIR': 'Last Name', 'Name on File': 'First Name', 'DOB on File': 'DOB', 'Subscriber LASFIR': 'Subscriber First', 'Subscriber Name on File': 'Subscriber Last', 'Subscriber DOB on File': 'Subscriber DOB' }[c] || c)); // v0.19: names in memory, LASFIR on the sheet
 
 // Re-verify skip window, Sohar ref memory, no-identifier results, error.payer.npi. Approved by Brendan 2026-10-20.
 // Synthetic data only.
@@ -147,7 +148,7 @@ test('applyReverifySkips: recent eligible same policy leaves the verification fi
   assert.equal(p.Route, 'verification', 'Route stays verification');
   assert.equal(p['Route Reason'], 'mapped payer + member ID; skipped: verified eligible 10/18/2026, next check 10/25/2026');
   assert.deepEqual(p.x.reverifySkip, { verified: '10/18/2026', due: '10/25/2026', reason: 'verified eligible 10/18/2026, next check 10/25/2026', partial: false });
-  assert.deepEqual(Object.keys(p).filter((k) => k !== 'x'), C.PATIENT_COLS, 'Patients columns unchanged');
+  assert.deepEqual(Object.keys(p).filter((k) => k !== 'x'), PATIENT_MEMORY, 'Patients columns unchanged');
   assert.equal(by['201'].x.reverifySkip.due, '10/25/2026', 'next visit 11/02 is a new month but 13 days out');
   assert.equal(by['202'].x.reverifySkip, undefined, 'ineligible: re-verify');
   assert.equal(by['203'].x.reverifySkip, undefined, 'a different member ID on the chart: never skipped');

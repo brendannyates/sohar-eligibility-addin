@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.18.0">
+  <link rel="stylesheet" href="style.css?v=0.19.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -33,7 +33,7 @@
           <select id="clinicLoc"><option value="">All locations</option></select>
         </label>
         <label>Search
-          <input id="clinicText" type="search" placeholder="Name or MRN">
+          <input id="clinicText" type="search" placeholder="LASFIR or MRN">
         </label>
       </div>
       <div id="clinicChips" class="chips filterchips" role="group" aria-label="Filter by flag"></div>
@@ -77,10 +77,9 @@
             </div>
             <div class="actions">
               <button class="primary alt" id="btnBuild" disabled>Rebuild with these options</button>
-              <button class="link" id="btnScan">Re-read the Import sheet</button>
+              <button class="link" id="btnScan">Re-read the report</button>
             </div>
             <div class="actions">
-              <button class="link" data-goto="Import">Import sheet</button>
               <button class="link" data-goto="Patients">Patients</button>
               <button class="link" data-goto="Review">Review</button>
               <button class="link" data-goto="Payer Map">Payer Map</button>
@@ -250,13 +249,13 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.18.0"></script>
-  <script src="core.js?v=0.18.0"></script>
-  <script src="rules.js?v=0.18.0"></script>
-  <script src="fees.js?v=0.18.0"></script>
-  <script src="xlsx.js?v=0.18.0"></script>
-  <script src="payer-knowledge.js?v=0.18.0"></script>
-  <script src="excel.js?v=0.18.0"></script>
-  <script src="app.js?v=0.18.0"></script>
+  <script src="payer-rules.js?v=0.19.0"></script>
+  <script src="core.js?v=0.19.0"></script>
+  <script src="rules.js?v=0.19.0"></script>
+  <script src="fees.js?v=0.19.0"></script>
+  <script src="xlsx.js?v=0.19.0"></script>
+  <script src="payer-knowledge.js?v=0.19.0"></script>
+  <script src="excel.js?v=0.19.0"></script>
+  <script src="app.js?v=0.19.0"></script>
 </body>
 </html>
