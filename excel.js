@@ -10,6 +10,8 @@
   const RESULTS_TABLE = 'tblSoharResults';
   const TASKS_TABLE = 'tblNextGenTasks';
   const CHUNK = 1000;
+  // LASFIR and the "on file" columns are worked out from a row's names (core.cellOf); names themselves never reach a sheet.
+  const cellOf = (r, c) => (root.SoharCore ? root.SoharCore.cellOf(r, c) : r[c]);
 
   // delayForCellEdit: wait out a cell someone is still typing in instead of failing (ExcelApi 1.11).
   async function run(fn) {
@@ -40,12 +42,13 @@
   const READ_CHUNK = 500;
 
   // ---------- fail-safe saves ----------
-  // Sheets + tables the add-in rebuilds with writeAddinTable. hidden: kept off the tab bar.
+  // Sheets + tables the add-in rebuilds with writeAddinTable. hidden: kept off the tab bar. hidden 'very': off the Unhide
+  // list too (v0.19: the saved Sohar and IR files carry patient names and DOBs; not access control, a script can read them).
   const OWNED = {
     tblSoharResults: { sheet: 'Sohar Results' }, tblNextGenTasks: { sheet: 'NextGen Tasks' }, tblExport: { sheet: 'Export' },
     tblIrCrossRef: { sheet: 'IR Cross-Ref' }, tblBenefits: { sheet: 'Benefits' }, tblDiscoveryVerify: { sheet: 'Discovery Verify' },
     tblVerifyFailed: { sheet: 'Discovery from Verify' }, tblPayerEvidence: { sheet: 'Payer Evidence' },
-    tblSoharUploads: { sheet: 'Sohar Uploads', hidden: true }, tblIrUploads: { sheet: 'IR Uploads', hidden: true },
+    tblSoharUploads: { sheet: 'Sohar Uploads', hidden: 'very' }, tblIrUploads: { sheet: 'IR Uploads', hidden: 'very' },
     // Payer learning (v0.10): the outcomes ledger is hidden (it has Per Nbr); the log and the rollup have no patient identifiers.
     tblPayerOutcomes: { sheet: 'Payer Outcomes', hidden: true }, tblPayerMapLog: { sheet: 'Payer Map Log' }, tblPayerLearning: { sheet: 'Payer Learning' },
     // Sohar ref -> Per Nbr memory (append-only, kept by "Clear saved Sohar results") and "Re-verify anyway" requests.
@@ -78,6 +81,7 @@
   // staging sheet and then the table into place. "Real table missing + STG present" can only mean an interrupted
   // swap, and rescue() finishes it. Sheet names max 31 chars: '~saving tblDiscoveryVerify' is 26.
   const STAGE_SHEET = (t) => `~saving ${t}`, STG = (t) => `${t}_stg`, STAGE_IMPORT = '~saving Import';
+  const visOf = (hidden) => (hidden === 'very' ? Excel.SheetVisibility.veryHidden : hidden ? Excel.SheetVisibility.hidden : Excel.SheetVisibility.visible);
 
   /** Finish an interrupted swap: rename the staging sheet and its STG table to the real names. True when done. */
   async function rescue(ctx, tableName) {
@@ -89,7 +93,7 @@
       await ctx.sync();
       // A different sheet still holding the real name has already lost its table: it is the old sheet, half-deleted.
       if (!clash.isNullObject && clash.id !== sws.id) clash.delete();
-      sws.visibility = hidden ? Excel.SheetVisibility.hidden : Excel.SheetVisibility.visible;
+      sws.visibility = visOf(hidden);
       if (sws.name !== sheet) sws.name = sheet;
       stg.name = tableName; // last: the real name only ever appears on complete data
       await ctx.sync();
@@ -336,7 +340,7 @@
       if (body.rowCount > 1) body.getRow(1).getBoundingRect(body.getLastRow()).delete(Excel.DeleteShiftDirection.up);
       await ctx.sync();
       // Everything is written as text so member IDs and ZIPs keep leading zeros.
-      const values = rows.map((r) => cols.map((c) => { const v = r[c]; return v == null ? '' : v; }));
+      const values = rows.map((r) => cols.map((c) => { const v = cellOf(r, c); return v == null ? '' : v; }));
       if (!values.length) { t.getDataBodyRange().numberFormat = [cols.map(() => '@')]; await ctx.sync(); return; }
       const canResize = Office.context.requirements.isSetSupported('ExcelApi', '1.13');
       if (canResize) {
@@ -368,6 +372,38 @@
     });
   }
 
+  /**
+   * v0.19: the sheets that keep patient names and DOBs (the Import report, saved Sohar and IR files) go very hidden, so no
+   * Unhide menu lists them, and the Export sheet (a one-off CSV download with names) is removed. Hides only, never
+   * writes cells. Returns a warning, or ''. Not access control: anyone who can open the workbook can still script them.
+   */
+  const NAME_SHEETS = [SHEETS.import, 'Sohar Uploads', 'IR Uploads'];
+  async function lockNameSheets() {
+    return run(async (ctx) => {
+      const wb = ctx.workbook;
+      const list = NAME_SHEETS.map((n) => { const s = wb.worksheets.getItemOrNullObject(n); s.load('isNullObject,id,visibility'); return s; });
+      const exp = wb.worksheets.getItemOrNullObject('Export'); exp.load('isNullObject,id');
+      const active = wb.worksheets.getActiveWorksheet(); active.load('id');
+      const prot = Office.context.requirements.isSetSupported('ExcelApi', '1.7') ? wb.protection : null;
+      if (prot) prot.load('protected');
+      await ctx.sync();
+      const hide = list.filter((s) => !s.isNullObject && s.visibility !== Excel.SheetVisibility.veryHidden);
+      if (!hide.length && exp.isNullObject) return '';
+      if (prot && prot.protected) return 'The workbook structure is protected, so the sheets with patient names could not be hidden. Unprotect it (Review > Protect Workbook) and reopen the pane.';
+      // Move off a sheet about to go, onto Patients (or any visible sheet that stays).
+      const going = new Set(hide.map((s) => s.id).concat(exp.isNullObject ? [] : [exp.id]));
+      if (going.has(active.id)) {
+        const home = wb.worksheets.getItemOrNullObject(SHEETS.patients); home.load('isNullObject,visibility');
+        await ctx.sync();
+        if (!home.isNullObject && home.visibility === Excel.SheetVisibility.visible) home.activate();
+      }
+      for (const s of hide) s.visibility = Excel.SheetVisibility.veryHidden;
+      if (!exp.isNullObject) exp.delete();
+      await ctx.sync();
+      return '';
+    });
+  }
+
   // ---------- file upload ----------
   const canInsertWorkbook = () => Office.context.requirements.isSetSupported('ExcelApi', '1.13');
 
@@ -385,7 +421,7 @@
         await ctx.sync().catch(failed('checking the workbook'));
         if (!old.isNullObject) old.delete();
         const stage = wb.worksheets.add(STAGE_IMPORT);
-        stage.visibility = Excel.SheetVisibility.hidden;
+        stage.visibility = Excel.SheetVisibility.veryHidden; // the report has names and DOBs
         await ctx.sync().catch(failed('preparing'));
         for (const [i, chunk] of writeChunks(grid)) {
           ctx.application.suspendApiCalculationUntilNextSync();
@@ -676,7 +712,7 @@
   async function writeAddinTable(sheetName, tableName, cols, rows, activate, opts) {
     const own = OWNED[tableName] || { sheet: sheetName };
     const pct = new Set((opts && opts.pctCols) || []);
-    const values = rows.map((r) => cols.map((c) => { const v = r[c]; return v == null ? '' : v; }));
+    const values = rows.map((r) => cols.map((c) => { const v = cellOf(r, c); return v == null ? '' : v; }));
     const fmt = (r, hdr) => r.map((v, j) => (!hdr && pct.has(cols[j]) ? '0%' : '@'));
     const unchanged = (s) => (e) => { e.message = `Could not save the ${sheetName} sheet (${s}): ${e.message}. The ${sheetName} sheet was not changed; its previous data is still there.`; throw e; };
     await run(async (ctx) => {
@@ -714,7 +750,7 @@
       // A stray STG table off the staging sheet (the real table is intact here) would block the name: drop it.
       else if (!p.stg.isNullObject) wb.tables.getItem(STG(tableName)).delete();
       const stage = wb.worksheets.add(STAGE_SHEET(tableName));
-      stage.visibility = Excel.SheetVisibility.hidden;
+      stage.visibility = own.hidden === 'very' ? Excel.SheetVisibility.veryHidden : Excel.SheetVisibility.hidden;
       stage.load('id');
       await ctx.sync().catch(unchanged('preparing'));
       const stageId = stage.id;
@@ -732,7 +768,7 @@
       await ctx.sync().catch(unchanged('making the table'));
 
       // The swap, in an order where any cut-off point leaves either the old table intact or a complete STG table.
-      const vis = own.hidden ? Excel.SheetVisibility.hidden : p.ws.isNullObject ? Excel.SheetVisibility.visible : p.ws.visibility;
+      const vis = own.hidden ? visOf(own.hidden) : p.ws.isNullObject ? Excel.SheetVisibility.visible : p.ws.visibility;
       stage.visibility = vis; // before the delete, so a visible sheet always remains
       if (!p.real.isNullObject && oldTableSheetId !== (p.ws.isNullObject ? null : p.ws.id)) p.real.delete(); // old table on a renamed sheet
       if (!p.ws.isNullObject) p.ws.delete(); // takes the old table with it
@@ -775,7 +811,7 @@
             bar.dataBar.upperBoundRule = { type: 'Number', formula: '1' };
           }
         }
-        if ((activate || wasActive) && vis !== Excel.SheetVisibility.hidden) ws.activate();
+        if ((activate || wasActive) && vis === Excel.SheetVisibility.visible) ws.activate();
         await ctx.sync();
       } catch (e) { console.warn(`formatting of ${sheetName} skipped`, e); }
     });
@@ -861,6 +897,6 @@
     readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, writePayerMetrics,
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
-    INBOX, readClinicInbox, createClinicInbox, writeImportRows, importXlsx, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
+    INBOX, readClinicInbox, createClinicInbox, writeImportRows, importXlsx, lockNameSheets, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

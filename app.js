@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.18.0';
+  const VERSION = '0.19.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -32,7 +32,7 @@
     if (!X || state.clinicFile) { location.reload(); return; }
     b.disabled = true;
     await guard(async () => { setStatus('Refreshing from this workbook…', ''); await loadConfig(); await refreshAll();
-      if ($('btnBuild').disabled) setStatus('Refreshed. There is no usable report on the Import sheet yet; see step 1.', 'bad');
+      if ($('btnBuild').disabled) setStatus('Refreshed. No usable report has been uploaded yet; see step 1.', 'bad');
     }, 'scanResult');
     b.disabled = false;
   });
@@ -77,6 +77,7 @@
    * (and the Sohar imports) for today; if Sohar results were saved, match them again so next visits and tasks are current.
    */
   async function autoRefresh() {
+    await lockNames();
     try {
       const rows = await X.readImportRows();
       const det = C.detectHeader(rows);
@@ -281,8 +282,15 @@
     try {
       if (isCSV(file)) await X.writeImportRows(C.parseCSV(await readText(file)));
       else await X.importXlsx(await readBase64(file));
+      await lockNames();
       await refreshAll();
     } finally { dropBusy('dropReport'); }
+  }
+
+  /** Very hide the sheets that keep names and DOBs (Import, saved Sohar and IR files) and drop the Export sheet. */
+  async function lockNames() {
+    if (state.demo || !X.lockNameSheets) return;
+    try { const w = await X.lockNameSheets(); if (w) setStatus(w, 'warn'); } catch (e) { console.error(e); setStatus(`Could not hide the sheets with patient names: ${e.message}`, 'warn'); }
   }
 
   async function scan() {
@@ -294,7 +302,7 @@
       const rw = $('reportWarn');
       rw.hidden = true; rw.innerHTML = '';
       if (!det) {
-        out.innerHTML = `<p class="bad">No header row found. The Import sheet needs the NextGen columns, including <b>Per Nbr</b> and <b>Appt Dt</b>.</p>`;
+        out.innerHTML = `<p class="bad">No header row found. The report needs the NextGen columns, including <b>Per Nbr</b> and <b>Appt Dt</b>. Upload it again in step 1.</p>`;
         state.detection = null; $('btnBuild').disabled = true; return;
       }
       state.detection = det;
@@ -312,7 +320,7 @@
       if (det.missing.length) { out.innerHTML += `<p class="bad">Missing required columns: ${det.missing.map(label).join(', ')}.</p>`; $('btnBuild').disabled = true; return; }
       await loadPayerStep();
       $('btnBuild').disabled = false;
-    } finally { unbusy('btnScan', 'Re-read the Import sheet'); }
+    } finally { unbusy('btnScan', 'Re-read the report'); }
   }
 
   // ---------- payers: auto-mapped, with an optional review list ----------
@@ -579,7 +587,7 @@
       state.patients = res.patients; state.review = res.review.concat(C.learningReviewRows(state.learning));
       const pt = state.cfg.payerTests || C.PAYER_TEST_DEFAULTS;
       state.exports = C.buildExports(res.patients, { ...state.cfg, guarantorRequests: state.guarantorActive, mappingDiscovery: pt.mappingDiscovery !== false });
-      await X.writePayerMapping(C.MAPPING_DISCOVERY_COLS, state.exports.mapping).catch((e) => { console.error(e); sheetWarn.push(`Payer Mapping sheet not updated: ${e.message}`); });
+      await X.writePayerMapping(C.MAPPING_SHEET_COLS, state.exports.mapping).catch((e) => { console.error(e); sheetWarn.push(`Payer Mapping sheet not updated: ${e.message}`); });
       state.exports.payerTests = [];
       if (pt.on) {
         const errs = new Map();
@@ -593,8 +601,8 @@
       }
       await X.replaceTable(X.TABLES.patients, C.PATIENT_COLS, res.patients);
       // The Review sheet is written by refreshRules (build review + clinic rule flags).
-      await X.replaceTable(X.TABLES.verification, C.VERIFICATION_COLS, state.exports.verification);
-      await X.replaceTable(X.TABLES.discovery, C.DISCOVERY_COLS, state.exports.discovery);
+      await X.replaceTable(X.TABLES.verification, C.VERIFICATION_SHEET_COLS, state.exports.verification);
+      await X.replaceTable(X.TABLES.discovery, C.DISCOVERY_SHEET_COLS, state.exports.discovery);
       await X.setConfigValue('Last build', `${C.fmtDate(new Date())} · scope: ${state.cfg.scope} · as of ${C.fmtDate(res.asOf)}`).catch(() => {});
 
       const s = C.summarize(res.patients);
@@ -692,8 +700,8 @@
         <td>${who(s)}</td><td title="${esc(s.verified)}">${short(s.verified)}</td><td>${esc(by(s))}</td></tr>`).join('')}</tbody></table>
       <div class="actions"><button class="link" id="btnReverifyCancel">Cancel these requests</button></div></details>` : '');
   }
-  const SKIP_COLS = ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'];
-  const skipRows = () => (state.skipped || []).map((s) => ({ Location: s.location, 'Next Appt': s.nextAppt, MRN: s.mrn, 'Per Nbr': s.per, 'Last Name': s.last, 'First Name': s.first,
+  const SKIP_COLS = ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'LASFIR', 'Verified', 'Next Check', 'Other Insurance Sent'];
+  const skipRows = () => (state.skipped || []).map((s) => ({ Location: s.location, 'Next Appt': s.nextAppt, MRN: s.mrn, 'Per Nbr': s.per, LASFIR: C.lasfir(s.last, s.first),
     Verified: s.verified, 'Next Check': s.due, 'Other Insurance Sent': s.partial ? 'Yes' : '' }));
 
   /** Admin opt-in: every skipped patient goes back on the verification file (until a newer Sohar verification exists). */
@@ -729,7 +737,7 @@
     const cur = await X.readReverifyRequests();
     await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, on ? C.addReverifyRequest(cur, key, new Date().toISOString(), 'Clinic tab') : C.removeReverifyRequest(cur, key));
     await build();
-    note('clinicNote', on ? `${r ? C.lasfir(r['Last Name'], r['First Name']) + ' is' : 'The patient is'} back on the verification file for the admin's next Sohar run.` : 'Request removed.', 'ok');
+    note('clinicNote', on ? `${r ? C.tagOf(r) + ' is' : 'The patient is'} back on the verification file for the admin's next Sohar run.` : 'Request removed.', 'ok');
   }
   const clinicKey = (r) => C.keyOf(r);
 
@@ -1168,7 +1176,7 @@
     const q = $('clinicText').value.trim().toLowerCase();
     const all = clinicRowsAt(loc);
     const rows = all.filter((r) => (!state.clinicFilter || splitList(r.Pills, ';').includes(state.clinicFilter))
-      && (!q || [r['Last Name'], r['First Name'], r.MRN, r['Per Nbr']].some((v) => String(v || '').toLowerCase().includes(q))));
+      && (!q || [C.tagOf(r), r.MRN, r['Per Nbr']].some((v) => String(v || '').toLowerCase().includes(q))));
     const list = $('clinicList');
     const meta = $('clinicMeta');
     if (!state.clinic) { meta.textContent = ''; return; }
@@ -1188,7 +1196,7 @@
       const ver = r['Verified Date'] ? `Verified ${esc(r['Verified Date'])}${r['Days Since Verified'] !== '' && r['Days Since Verified'] != null ? ` (${esc(r['Days Since Verified'])}d)` : ''}` : 'Not verified in Sohar';
       const ben = meterHtml('Deductible', r.Deductible, r['Deductible Remaining'], r['Deductible Status']) + meterHtml('OOP max', r['OOP Max'], r['OOP Remaining'], r['OOP Status']);
       return `<article class="pcard${high ? ' hi' : ''}">
-        <div class="pc-head"><span class="pc-time">${esc(r['Next Time'] || '')}</span><b>${esc([r['Last Name'], r['First Name']].filter(Boolean).join(', '))}</b><span class="hint">${esc(C.idLabel(r))}</span></div>
+        <div class="pc-head"><span class="pc-time">${esc(r['Next Time'] || '')}</span><b>${esc(C.tagOf(r))}</b><span class="hint">${esc(C.idLabel(r))}</span></div>
         <div class="pc-sub">${esc([r['Next Event'], r['Next Provider']].filter(Boolean).join(' · '))}${!loc && r.Location ? ` <span class="hint">· ${esc(r.Location)}</span>` : ''}</div>
         ${pills.length ? `<div class="pills">${cardPills(pills).map((l) => pillHtml(l)).join(' ')}</div>` : ''}
         <dl class="pc-dl">
@@ -1452,11 +1460,11 @@
       if (pt.updated) { await X.writePayerTests(C.PAYER_TEST_COLS, pt.table).catch((e) => note('resultsResult', `Payer Tests not updated: ${e.message}`, 'warn')); state.payerTests = pt.table; step(`${pt.updated} payer test result${pt.updated === 1 ? '' : 's'} recorded.`); }
     }
     const dv = C.keepMemberIds(res.discoveryVerification, await X.readDiscoveryVerify(), state.perToKey);
-    await X.writeDiscoveryVerify(C.VERIFICATION_COLS, dv);
+    await X.writeDiscoveryVerify(C.VERIFICATION_SHEET_COLS, dv);
     // Keep ZIPs an admin typed on the Discovery from Verify sheet.
     const zips = new Map((await X.readVerifyFailed()).filter((r) => String(r.zipCode || '').trim()).map((r) => [state.perToKey.get(String(r.id)) || String(r.id), String(r.zipCode).trim()]));
     const vf = res.verificationDiscovery.map((r) => (r.zipCode ? r : { ...r, zipCode: zips.get(String(r.id)) || '' }));
-    await X.writeVerifyFailed(C.DISCOVERY_COLS, vf);
+    await X.writeVerifyFailed(C.DISCOVERY_SHEET_COLS, vf);
     state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv; state.verifyFailed = vf;
     // Payer outcomes ledger (hidden Payer Outcomes sheet): every Sohar outcome, append-only, for payer learning.
     // "Clear saved Sohar results" does not touch it. A read error skips the update, so the ledger is never overwritten.
@@ -1544,7 +1552,7 @@
     const tile = (n, l, cls) => `<div class="count ${cls}"><div class="n">${n}</div><div class="l">${l}</div></div>`;
     const bar = (pct) => `<span class="meter" data-pct="${pct === '' ? 0 : pct}"><span></span></span>`;
     const rows = s.watch.slice(0, 25).map((r) => `<tr>
-        <td><b>${esc(C.lasfir(r['Last Name'], r['First Name']))}</b><br><span class="hint">${esc(C.idLabel(r))}${r.Service ? ` · ${esc(r.Service)}` : ''}</span></td>
+        <td><b>${esc(C.tagOf(r))}</b><br><span class="hint">${esc(C.idLabel(r))}${r.Service ? ` · ${esc(r.Service)}` : ''}</span></td>
         <td>${esc(String(r['Next Appt'] || '').slice(0, 5)) || '<span class="hint">no visit</span>'}</td>
         <td>${r['OOP Status'] === 'Met' ? '<b class="okc">Met</b>' : `${esc(usd(r['OOP Remaining']))} left`}<br><span class="hint">of ${esc(usd(r['OOP Max']))}</span></td>
         <td class="meterc">${bar(r['OOP % Met'])}<span class="hint">${r['OOP % Met'] === '' ? '' : Math.round(r['OOP % Met'] * 100) + '%'}</span></td>
@@ -1744,20 +1752,23 @@
 
   async function currentDiscoveryVerify() {
     if (state.demo) return state.discoveryVerify || [];
-    return X.readDiscoveryVerify(); // the sheet, so member IDs typed there go out
+    // The sheet, so member IDs typed there go out; names and DOBs come back from this session's build (never on the sheet).
+    return C.fillNames(await X.readDiscoveryVerify(), state.discoveryVerify);
   }
   async function currentVerifyFailed() {
     if (state.demo) return state.verifyFailed || [];
-    return X.readVerifyFailed(); // the sheet, so ZIPs typed there go out
+    return C.fillNames(await X.readVerifyFailed(), state.verifyFailed); // the sheet, so ZIPs typed there go out
   }
   async function downloadVerifyFailed() {
     const rows = await currentVerifyFailed();
     if (!rows.length) throw new Error('No failed verifications are waiting for discovery.');
+    C.namesMissing(rows);
     await saveCSV(C.fileName('verifyFailed'), C.DISCOVERY_COLS, rows, 'resultsResult');
   }
   async function downloadDiscoveryVerify() {
     const rows = await currentDiscoveryVerify();
     if (!rows.length) throw new Error('No discovery patients are waiting for verification. Upload a discovery output with coverage found first.');
+    C.namesMissing(rows);
     await saveCSV(C.fileName('discoveryVerify'), C.VERIFICATION_COLS, rows, 'resultsResult');
     const noId = rows.filter((r) => !String(r.memberId || '').trim()).length;
     if (noId) note('resultsResult', `${noId} row${noId === 1 ? ' has' : 's have'} no member ID. Sohar may reject ${noId === 1 ? 'it' : 'them'}; fill the memberId column on the Discovery Verify sheet and download again.`, 'warn');
@@ -1772,7 +1783,7 @@
     await saveCSV(C.fileName('tracker'), C.TRACKER_EXPORT_COLS, out.rows, 'benBox');
     const n = `${out.rows.length} patient${out.rows.length === 1 ? '' : 's'}`;
     if (out.pending.length) {
-      const who = out.pending.map((r) => `${C.lasfir(r['Last Name'], r['First Name'])} · ${C.idLabel(r)}`).join(', ');
+      const who = out.pending.map((r) => `${C.tagOf(r)} · ${C.idLabel(r)}`).join(', ');
       note('benBox', `${n} in the file. Left out, still waiting on the step 3 verification: ${who}. Save the tracker file again after that output is uploaded.`, 'warn');
     } else note('benBox', `${n} in the tracker file. Import it in the TMS Tracker and the ESK Tracker.`, 'ok');
   }
@@ -2253,7 +2264,7 @@
       if (!t) return [];
       const at = (h) => new Date(Date.now() - h * 36e5).toISOString(), file = (l) => `Clinic Eligibility - ${l} ${C.localDate(new Date())}.xlsx`;
       return [
-        { Location: t['Next Location'], Kind: 'Task done', Key: t['Task Key'], MRN: t.MRN, LASFIR: C.lasfir(t['Last Name'], t['First Name']), Value: 'Yes',
+        { Location: t['Next Location'], Kind: 'Task done', Key: t['Task Key'], MRN: t.MRN, LASFIR: C.tagOf(t), Value: 'Yes',
           Note: 'Called the patient, new card scanned', By: 'Front desk', When: at(3), File: file(t['Next Location']), Received: at(2.9) },
         { Location: 'San Rafael', Kind: 'Note', Key: '800104', MRN: '800104', LASFIR: C.lasfir('Haddad', 'Mira'), Value: '',
           Note: 'Bringing the new Kaiser card on Monday', By: 'Front desk', When: at(2), File: file('San Rafael'), Received: at(1.9) },

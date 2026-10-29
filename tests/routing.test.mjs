@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const C = createRequire(import.meta.url)('../core.js');
+const PATIENT_MEMORY = C.PATIENT_COLS.map((c) => ({ 'LASFIR': 'Last Name', 'Name on File': 'First Name', 'DOB on File': 'DOB', 'Subscriber LASFIR': 'Subscriber First', 'Subscriber Name on File': 'Subscriber Last', 'Subscriber DOB on File': 'Subscriber DOB' }[c] || c)); // v0.19: names in memory, LASFIR on the sheet
+const RESULTS_MEMORY = C.RESULTS_COLS.flatMap((c) => (c === 'LASFIR' ? ['LASFIR', 'Last Name', 'First Name', 'DOB'] : [c])); // v0.19: names in memory, LASFIR on the sheet
 
 // Synthetic data only. Header list is the current NextGen Appointments Listing layout.
 const HDR = ['Appointment Pre-Check Complete', 'Res Name', 'Pat Sts', 'Portal Enrollment', 'Pat Name', 'Appt Date', 'Beg Tm', 'Event', 'Details',
@@ -146,7 +148,7 @@ test('R2: buildPatients auto-maps new names, routes High/Medium to verification,
   assert.equal(by['33'].Route, 'discovery');
   assert.equal(by['34'].Route, 'discovery', 'Self Pay unchanged');
   for (const p of res.patients) {
-    assert.deepEqual(Object.keys(p).filter((k) => k !== 'x'), C.PATIENT_COLS);
+    assert.deepEqual(Object.keys(p).filter((k) => k !== 'x'), PATIENT_MEMORY);
     assert.equal(typeof p.x, 'object');
   }
   // Without a Sohar payer list the old behavior holds.
@@ -303,7 +305,7 @@ test('mergeSoharResults keeps both verification rows and marks the better one', 
   assert.equal(tr.rows.find((r) => r['Per Nbr'] === '52')['Sohar Ref'], 'q-2', 'tracker export uses the eligible insurance');
   const tasks = C.buildTasks(res.results).filter((t) => t['Per Nbr'] === '52').map((t) => t.Task).sort();
   assert.deepEqual(tasks, ['Update benefits in NextGen', 'Update insurance in NextGen'], 'no task for the superseded row');
-  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon', 'key'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
+  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon', 'key'].includes(k)).sort(), [...RESULTS_MEMORY].sort());
 });
 
 test('two insurances: an old eligible result on another policy does not override a fresh ineligible one', () => {

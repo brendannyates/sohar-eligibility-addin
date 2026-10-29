@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 const C = createRequire(import.meta.url)('../core.js');
+const RESULTS_MEMORY = C.RESULTS_COLS.flatMap((c) => (c === 'LASFIR' ? ['LASFIR', 'Last Name', 'First Name', 'DOB'] : [c])); // v0.19: names in memory, LASFIR on the sheet
 
 // Synthetic data only.
 const HDR = ['Pat Sts', 'Pat Name', 'Appt Dt', 'Beg Tm', 'Event', 'Loc Name', 'Per Nbr', 'Birth Dt', 'Rendering', 'Sts', 'Md Rc',
@@ -84,7 +85,7 @@ test('verification output matches on id and carries in-network tier-one benefits
   const res = merged();
   assert.equal(res.error, undefined);
   assert.deepEqual(res.unknownFiles, ['junk.csv']);
-  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon', 'key'].includes(k)).sort(), [...C.RESULTS_COLS].sort());
+  for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon', 'key'].includes(k)).sort(), [...RESULTS_MEMORY].sort());
   assert.ok(res.results.find((r) => r['Per Nbr'] === '100').x.appointments.length, 'non-column x carries the patient extras');
   const by = (per, sent) => res.results.find((r) => r['Per Nbr'] === per && r['Sent As'] === sent);
 

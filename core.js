@@ -8,16 +8,23 @@
   const VERIFICATION_COLS = ['firstName', 'lastName', 'dateOfBirth', 'state', 'memberId', 'payerId',
     'placeOfServiceCode', 'specialtyCode', 'id', 'subscriberFirstName', 'subscriberLastName', 'subscriberDateOfBirth'];
   const DISCOVERY_COLS = ['firstName', 'lastName', 'dateOfBirth', 'state', 'zipCode', 'payerId', 'id'];
+  // v0.19 (Brendan, 10/28): no sheet shows a patient's or subscriber's name or DOB once the report is in. Names live only in
+  // memory and on the very hidden Import sheet; sheets show LASFIR plus "on file" marks (derived by cellOf). The Sohar
+  // file sheets keep the template's column count, so their name columns are renamed in place.
+  const VERIFICATION_SHEET_COLS = ['LASFIR', 'Name on File', 'DOB on File', 'state', 'memberId', 'payerId',
+    'placeOfServiceCode', 'specialtyCode', 'id', 'Subscriber LASFIR', 'Subscriber Name on File', 'Subscriber DOB on File'];
+  const DISCOVERY_SHEET_COLS = ['LASFIR', 'Name on File', 'DOB on File', 'state', 'zipCode', 'payerId', 'id'];
 
-  const PATIENT_COLS = ['Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB', 'State', 'Zip', 'Pat Sts', 'Route', 'Route Reason',
+  // Names and DOB renamed in place (same count: the Dashboard counts blanks in C, D and E for missing names and DOBs).
+  const PATIENT_COLS = ['Per Nbr', 'MRN', 'LASFIR', 'Name on File', 'DOB on File', 'State', 'Zip', 'Pat Sts', 'Route', 'Route Reason',
     'In Scope', 'Next Appt', 'Next Event', 'POS', 'Primary Payer', 'Sohar payerId', 'Confidence', 'Member ID', 'Member ID (Lst Enc)',
     'Member ID Mismatch', 'Secondary Payer', 'Secondary Sohar payerId', 'Appt Count', 'First Appt', 'Last Appt',
-    'Subscriber First', 'Subscriber Last', 'Subscriber DOB', 'Flags'];
+    'Subscriber LASFIR', 'Subscriber Name on File', 'Subscriber DOB on File', 'Flags'];
   // v0.12: the patient column is the MRN (the add-in renames an older template's "Per Nbr" header in place).
   const REVIEW_COLS = ['Severity', 'Issue', 'MRN', 'Detail', 'Fix'];
   // Sohar Results sheet. The add-in creates this table itself, so it is not part of the template contract.
   const RESULTS_COLS = ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'Next Provider', 'Upcoming Appts', 'Upcoming Detail',
-    'Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Choose in NextGen', 'Benefit Flag',
+    'Per Nbr', 'MRN', 'LASFIR', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Choose in NextGen', 'Benefit Flag',
     'Plan', 'Network', 'Coverage Level', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance',
     'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status',
     'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Coverage Differs', 'Match',
@@ -26,10 +33,11 @@
   const UPLOAD_COLS = ['Kind', 'Key', 'File', 'Uploaded', 'Record'];
   // NextGen Tasks sheet (created by the add-in). Done and Clinic Note survive rebuilds via Task Key. Clinic Note (v0.14): the
   // note a clinic left when it marked the task done in its Clinic Eligibility file. Add columns at the end only.
-  const TASK_COLS = ['Done', 'Due By', 'Next Appt', 'Next Time', 'Next Location', 'Per Nbr', 'MRN', 'Last Name', 'First Name', 'Result Type',
+  const TASK_COLS = ['Done', 'Due By', 'Next Appt', 'Next Time', 'Next Location', 'Per Nbr', 'MRN', 'LASFIR', 'Result Type',
     'Task', 'Details', 'Choose in NextGen', 'Sohar Link', 'Sohar Ref', 'Task Key', 'Clinic Note'];
-  // Benefits CSV for the TMS Tracker. Treat as a contract: add columns at the end only.
-  const BENEFITS_EXPORT_COLS = ['Per Nbr', 'MRN', 'Last Name', 'First Name', 'DOB', 'Sohar Payer', 'Plan', 'Network', 'Coverage Level',
+  // Benefits CSV for the TMS Tracker. Treat as a contract: add columns at the end only. Both trackers match on MRN; v0.19
+  // swapped Last Name, First Name and DOB (never read by either) for LASFIR.
+  const BENEFITS_EXPORT_COLS = ['Per Nbr', 'MRN', 'LASFIR', 'Sohar Payer', 'Plan', 'Network', 'Coverage Level',
     'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status',
     'OOP Max', 'OOP Remaining', 'OOP Status', 'Benefit Flag', 'Sohar Status', 'Sohar Date', 'Sohar Ref'];
 
@@ -724,6 +732,7 @@
   // Payer mapping discovery (v0.12): the Sohar discovery template plus the member ID at the end, so Sohar can find the
   // payer of the policy NextGen has. Not a Sohar template: Sohar accepting the extra column is unconfirmed.
   const MAPPING_DISCOVERY_COLS = [...DISCOVERY_COLS, 'memberId'];
+  const MAPPING_SHEET_COLS = [...DISCOVERY_SHEET_COLS, 'memberId'];
 
   /**
    * A discovery patient whose NextGen payer has no confident Sohar payer (unmapped, Auto-Low, Review or an unknown
@@ -796,7 +805,7 @@
   function toCSV(cols, rows, opts) {
     const safe = !!(opts && opts.safe);
     const lines = [cols.join(',')];
-    for (const r of rows) lines.push(cols.map((c) => csvCell(r[c], safe)).join(','));
+    for (const r of rows) lines.push(cols.map((c) => csvCell(cellOf(r, c), safe)).join(','));
     return lines.join('\r\n') + '\r\n';
   }
   /** RFC 4180 CSV -> 2D array of strings. Handles quotes, embedded newlines, CRLF and a UTF-8 BOM. */
@@ -989,6 +998,54 @@
     const l = (s) => str(s).toUpperCase().replace(/[^A-Z]/g, '').slice(0, 3);
     return l(last) + l(first);
   }
+  // A row's own name fields: patient-shaped ('Last Name'), Sohar-file-shaped (lastName) or the subscriber's.
+  const pick1 = (r, a, b) => str(r[a] != null && r[a] !== '' ? r[a] : r[b]);
+  const nameOf = (r, sub) => (sub
+    ? { last: pick1(r, 'Subscriber Last', 'subscriberLastName'), first: pick1(r, 'Subscriber First', 'subscriberFirstName'), dob: pick1(r, 'Subscriber DOB', 'subscriberDateOfBirth') }
+    : { last: pick1(r, 'Last Name', 'lastName'), first: pick1(r, 'First Name', 'firstName'), dob: pick1(r, 'DOB', 'dateOfBirth') });
+  /** A row's LASFIR: its own LASFIR column (a row read back from a sheet), else from its names. */
+  function tagOf(r) {
+    if (!r) return '';
+    if (str(r.LASFIR)) return str(r.LASFIR);
+    const n = nameOf(r);
+    return lasfir(n.last, n.first);
+  }
+  const yes = (b) => (b ? 'Yes' : '');
+  // Sheet columns that stand in for names and DOBs, worked out from the row's name fields.
+  const DERIVED_COLS = {
+    'LASFIR': tagOf,
+    'Name on File': (r) => { const n = nameOf(r); return yes(n.last && n.first); },
+    'DOB on File': (r) => yes(nameOf(r).dob),
+    'Subscriber LASFIR': (r) => { const n = nameOf(r, true); return lasfir(n.last, n.first); },
+    'Subscriber Name on File': (r) => { const n = nameOf(r, true); return yes(n.last && n.first); },
+    'Subscriber DOB on File': (r) => yes(nameOf(r, true).dob),
+  };
+  /** The value a sheet or CSV shows for column c: the row's own value, else a derived LASFIR / "on file" column. */
+  function cellOf(r, c) {
+    const v = r[c];
+    if ((v == null || v === '') && DERIVED_COLS[c]) return DERIVED_COLS[c](r);
+    return v;
+  }
+  /**
+   * Sohar file rows from the sheet (member IDs and ZIPs typed there go out) with names and DOBs put back from the rows
+   * built in memory, matched by id + payerId. Check namesMissing before saving a file.
+   */
+  function fillNames(sheetRows, memRows) {
+    const by = new Map();
+    for (const m of memRows || []) { by.set(`${str(m.id)}|${str(m.payerId)}`, m); if (!by.has(str(m.id))) by.set(str(m.id), m); }
+    const keys = ['firstName', 'lastName', 'dateOfBirth', 'subscriberFirstName', 'subscriberLastName', 'subscriberDateOfBirth'];
+    return (sheetRows || []).map((r) => {
+      const m = by.get(`${str(r.id)}|${str(r.payerId)}`) || by.get(str(r.id));
+      const o = { ...r };
+      for (const k of keys) if (!str(o[k])) o[k] = m ? str(m[k]) : '';
+      return o;
+    });
+  }
+  /** Throws when a Sohar file row has no first or last name (Sohar needs both). */
+  function namesMissing(rows) {
+    const n = (rows || []).filter((o) => !str(o.firstName) || !str(o.lastName)).length;
+    if (n) throw new Error(`${n} row${n === 1 ? ' has' : 's have'} no name on file (names are not kept on sheets). Click refresh (⟳) to rebuild, then save again.`);
+  }
 
   /**
    * Plain-text note for admins, grouped by location then appointment. LASFIR + MRN only (minimum necessary).
@@ -1017,7 +1074,7 @@
       lines.push(`${loc} (${list.length})`);
       for (const r of list) {
         const when = r['Next Appt'] ? `${String(r['Next Appt']).slice(0, 5)}${r['Next Time'] ? ' ' + r['Next Time'] : ''}` : 'no appt';
-        const tag = lasfir(r['Last Name'], r['First Name']);
+        const tag = tagOf(r);
         const id = keyOf(r) ? `${tag} · ${idLabel(r)}` : `${tag ? tag + ' · ' : ''}Sohar ref ${r['Sohar Ref'] || '?'}`;
         if (benefits) {
           const amt = [r['Deductible Status'] && r['Deductible Status'] !== 'None' ? `ded remaining ${r['Deductible Remaining'] || '?'}` : '', r['OOP Remaining'] !== '' && r['OOP Remaining'] != null ? `OOP remaining ${r['OOP Remaining']}` : ''].filter(Boolean).join(', ');
@@ -1152,6 +1209,7 @@
         'Searched As': f.tag ? searchedAs(f.tag) : 'Patient',
         ...(f.benefits || {}), ...f.cols,
       };
+      row.LASFIR = tagOf(row); // names stay in memory (IR name + DOB match); sheets get LASFIR
       for (const c of RESULTS_COLS) if (row[c] == null) row[c] = '';
       row.key = p ? keyOf(p) : ''; // non-column: patient key (MRN), what tasks, flags and saved tables key on
       row.x = p ? p.x || null : null; // non-column: patient extras (appointments, fin class, verifyRows) for the rules
@@ -1456,7 +1514,7 @@
 
     // Soonest appointment first; rows with no upcoming appointment last.
     const t = (r) => (r['Next Appt'] ? parseDate(r['Next Appt']).getTime() : Infinity);
-    results.sort((a, b) => t(a) - t(b) || a['Last Name'].localeCompare(b['Last Name']));
+    results.sort((a, b) => t(a) - t(b) || str(a['Last Name']).localeCompare(str(b['Last Name'])));
     // refsPending: blank-id records whose ref was only learned in this pass (same upload, or an original saved before the
     // Sohar Refs sheet existed). Run accumulateResults + mergeSoharResults again with refs + these refs before saving.
     const refsPending = unresolved.filter((ks) => ks.some((k) => learned.has(k))).length;
@@ -1649,7 +1707,7 @@
       const key = taskKey(keyOf(r), r['Sohar Ref'], task, r['Searched As']);
       tasks.push({
         'Done': '', 'Due By': r['Next Appt'], 'Next Appt': r['Next Appt'], 'Next Time': r['Next Time'], 'Next Location': r['Next Location'],
-        'Per Nbr': r['Per Nbr'], 'MRN': r.MRN, 'Last Name': r['Last Name'], 'First Name': r['First Name'], 'Result Type': r['Sent As'],
+        'Per Nbr': r['Per Nbr'], 'MRN': r.MRN, 'LASFIR': tagOf(r), 'Result Type': r['Sent As'],
         'Task': task, 'Details': details, 'Choose in NextGen': r['Choose in NextGen'] || '', 'Sohar Link': r['Sohar Link'], 'Sohar Ref': r['Sohar Ref'], 'Task Key': key, 'Clinic Note': '',
       });
     };
@@ -1712,7 +1770,7 @@
       lines.push(`${loc} (${list.length})`);
       for (const t of list) {
         const when = t['Next Appt'] ? `${String(t['Next Appt']).slice(0, 5)}${t['Next Time'] ? ' ' + t['Next Time'] : ''}` : 'no appt';
-        const tag = lasfir(t['Last Name'], t['First Name']);
+        const tag = tagOf(t);
         const who = keyOf(t) ? `${tag} · ${idLabel(t)}` : `Sohar ref ${t['Sohar Ref'] || '?'}`;
         lines.push(`- ${when} · ${who} · ${t.Task}: ${t.Details}`);
       }
@@ -1770,7 +1828,7 @@
     desc: ['description', 'description option', 'description type'], fac: ['facility', 'location'], mrn: ['mrn'],
     dos: ['dos', 'date of service'], prov: ['provider', 'rendering provider'], due: ['due date', 'due'], act: ['last activity'],
   };
-  const IR_COLS = ['Category', 'Description', 'Incident ID', 'DOS', 'Due Date', 'Facility', 'Provider', 'MRN', 'Last Name', 'First Name',
+  const IR_COLS = ['Category', 'Description', 'Incident ID', 'DOS', 'Due Date', 'Facility', 'Provider', 'MRN', 'LASFIR',
     'Per Nbr', 'Next Appt', 'Next Location', 'Sohar Result', 'Sohar Payer', 'Plan', 'Coverage Start', 'Coverage End', 'Benefit Flag',
     'Choose in NextGen', 'Open NextGen Tasks', 'Suggested Action', 'Match'];
 
@@ -1856,7 +1914,7 @@
 
       out.push({
         'Category': cat, 'Description': str(ir.desc), 'Incident ID': str(ir.id), 'DOS': fmtDate(dos), 'Due Date': fmtDate(due),
-        'Facility': str(ir.fac), 'Provider': str(ir.prov), 'MRN': str(ir.mrn), 'Last Name': str(ir.last), 'First Name': str(ir.first),
+        'Facility': str(ir.fac), 'Provider': str(ir.prov), 'MRN': str(ir.mrn), 'LASFIR': lasfir(ir.last, ir.first),
         'Per Nbr': any['Per Nbr'] || '', 'Next Appt': any['Next Appt'] || '', 'Next Location': any['Next Location'] || '',
         'Sohar Result': [ver ? `Verification: ${ver['Sohar Status']}` : '', disc ? `Discovery: ${disc['Sohar Status']}` : ''].filter(Boolean).join('; '),
         'Sohar Payer': (ver && ver['Sohar Payer']) || (disc && disc['Sohar Payer']) || '', 'Plan': (ver && ver.Plan) || '',
@@ -1880,7 +1938,7 @@
     const lines = [`IR Portal cross-check with Sohar: ${rows.length} insurance-related item${rows.length > 1 ? 's' : ''}.`, ''];
     for (const [f, list] of [...byFac].sort((a, b) => a[0].localeCompare(b[0]))) {
       lines.push(`${f} (${list.length})`);
-      for (const r of list) lines.push(`- ${lasfir(r['Last Name'], r['First Name'])} · MRN ...${String(r.MRN).slice(-4)} · DOS ${r.DOS || '?'} · ${r.Category}: ${r['Suggested Action']}`);
+      for (const r of list) lines.push(`- ${tagOf(r)} · MRN ...${String(r.MRN).slice(-4)} · DOS ${r.DOS || '?'} · ${r.Category}: ${r['Suggested Action']}`);
       lines.push('');
     }
     return lines.join('\n').trim() + '\n';
@@ -1894,7 +1952,7 @@
       const prev = by.get(r['Per Nbr']);
       if (!prev || String(r['Sohar Date']) > String(prev['Sohar Date'])) by.set(r['Per Nbr'], r);
     }
-    return [...by.values()].map((r) => Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, r[c] == null ? '' : r[c]])));
+    return [...by.values()].map((r) => Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, cellOf(r, c) == null ? '' : cellOf(r, c)])));
   }
 
   // Final file for the TMS Tracker and ESK Tracker imports: the benefits columns, then these. Add columns at the end only.
@@ -1925,7 +1983,7 @@
       if (!prev || String(r['Sohar Date']) > String(prev['Sohar Date'])) by.set(r['Per Nbr'], r);
     }
     const rows = [...by.values()].map((r) => ({
-      ...Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, r[c] == null ? '' : r[c]])),
+      ...Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, cellOf(r, c) == null ? '' : cellOf(r, c)])),
       'Service': serviceLine(events.get(r['Per Nbr'])),
       'Source': r['Discovery Follow-up'] === 'From discovery' ? 'Discovery, then verification' : 'Verification',
       'Exported': exportedAt || '',
@@ -1965,7 +2023,7 @@
 
   // ---------- benefits sheet ----------
   // Benefits sheet (created by the add-in): one row per verified patient, OOP max closest to met first.
-  const BENEFIT_SHEET_COLS = ['Flag', 'Next Appt', 'Next Time', 'Next Location', 'Service', 'Per Nbr', 'MRN', 'Last Name', 'First Name',
+  const BENEFIT_SHEET_COLS = ['Flag', 'Next Appt', 'Next Time', 'Next Location', 'Service', 'Per Nbr', 'MRN', 'LASFIR',
     'Sohar Payer', 'Plan', 'Copay', 'Coinsurance',
     'OOP Max', 'OOP Met', 'OOP Remaining', 'OOP % Met', 'OOP Status',
     'Deductible', 'Deductible Met', 'Deductible Remaining', 'Deductible % Met', 'Deductible Status',
@@ -2003,7 +2061,7 @@
       const ded = spent(b.Deductible, b['Deductible Remaining']);
       return {
         'Flag': benefitSheetFlag(b), 'Next Appt': str(r['Next Appt']), 'Next Time': str(r['Next Time']), 'Next Location': str(r['Next Location']),
-        'Service': b.Service, 'Per Nbr': b['Per Nbr'], 'MRN': b.MRN, 'Last Name': b['Last Name'], 'First Name': b['First Name'],
+        'Service': b.Service, 'Per Nbr': b['Per Nbr'], 'MRN': b.MRN, 'LASFIR': tagOf(b),
         'Sohar Payer': b['Sohar Payer'], 'Plan': b.Plan, 'Copay': b.Copay, 'Coinsurance': b.Coinsurance,
         'OOP Max': b['OOP Max'], 'OOP Met': oop.met, 'OOP Remaining': b['OOP Remaining'], 'OOP % Met': oop.pct, 'OOP Status': b['OOP Status'],
         'Deductible': b.Deductible, 'Deductible Met': ded.met, 'Deductible Remaining': b['Deductible Remaining'], 'Deductible % Met': ded.pct, 'Deductible Status': b['Deductible Status'],
@@ -3088,7 +3146,7 @@
   }
 
   return {
-    VERIFICATION_COLS, DISCOVERY_COLS, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, UPLOAD_COLS, BENEFITS_EXPORT_COLS,
+    VERIFICATION_COLS, DISCOVERY_COLS, VERIFICATION_SHEET_COLS, DISCOVERY_SHEET_COLS, MAPPING_SHEET_COLS, tagOf, cellOf, fillNames, namesMissing, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, UPLOAD_COLS, BENEFITS_EXPORT_COLS,
     localDate, fileName, FILE_LABELS, BENEFIT_SHEET_COLS, BENEFIT_PCT_COLS, benefitsView, benefitsSummary,
     resultKey, accumulateResults, stampSentPayerIds, combineResults, keepMemberIds, TRACKER_EXPORT_COLS, serviceLine, trackerExport, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
     irCategory, parseIrPortal, irCrossReference, irMessage,
