@@ -22,12 +22,14 @@ Hard rules:
   `calcPatient`), but its built-in rates never go in this repo: staff drop the calculator .html once, and
   `parseCalculatorHtml` + `mergeSchedules` put the rates on the hidden fee sheets (a saved rate is never changed).
 - Never add a network call. `connect-src 'none'` in `index.html` is deliberate; the only remote script is Office.js.
-- `VERIFICATION_COLS` and `DISCOVERY_COLS` match the Sohar CSV templates exactly, in order. Do not rename or reorder.
+- `VERIFICATION_COLS`, `DISCOVERY_COLS` and `record.FLOW_IMPORT_COLS` (the "MHS Eligibility - Discovery vs NextGen" Flow's CSV
+  template, v0.21) match the Sohar CSV templates exactly, in order. Do not rename or reorder. The Flow file has no
+  rateTable column, so Flow runs from it never estimate cost.
 - Output table columns (`PATIENT_COLS`, `REVIEW_COLS`) must match the template workbook. Changing the column count means shipping a new `Sohar_Eligibility_Template.xlsx`; a rename of the same column is applied in place by `replaceTable` (v0.12 Review Per Nbr -> MRN).
 - The patient key is the MRN (`core.keyOf`, PER-<Per Nbr> fallback). Key on it, never on Per Nbr, in anything saved or sent to Sohar. `cfg.payerTests` is the Config settings; Payer Tests rows travel as `cfg.payerTestRows`.
 - `payer-rules.js` is shared byte-identical with the Clinic Template Tool and ESK Tracker repos: never edit it here alone. The real Payer Credential Rules table (OneDrive CSV, imported to the editable `Payer Credential Rules` sheet) never goes in this repo, a test, a fixture or the demo. Besse approval is a flag only.
 - `core.js` and `rules.js` are also copied byte-identical into the Clinic Template Tool (it re-derives Clinic Eligibility files with them). After changing either, copy both into CTT in the same change and check with `git hash-object`. The Clinic Eligibility file (`rules.clinicPack`) never carries patient or guarantor names or DOBs (LASFIR instead), only the one clinic's patients, and never a `tblClinicMeta` table.
-- No sheet (or download built from a sheet's columns) carries a patient's or subscriber's name or DOB (Brendan, 10/28): use `LASFIR` and keep the MRN. Names live in memory and on the very hidden `Import`, `Sohar Uploads` and `IR Uploads` sheets (`lockNameSheets`); only the Sohar import CSVs (`VERIFICATION_COLS` / `DISCOVERY_COLS`) carry them. Sheets use the `*_SHEET_COLS` lists and `core.cellOf`. `tests/names.test.mjs` checks every sheet column list.
+- No sheet (or download built from a sheet's columns) carries a patient's or subscriber's name or DOB (Brendan, 10/28): use `LASFIR` and keep the MRN. Names live in memory and on the very hidden `Import`, `Sohar Uploads` and `IR Uploads` sheets (`lockNameSheets`); only the Sohar import CSVs (`VERIFICATION_COLS` / `DISCOVERY_COLS` / `FLOW_IMPORT_COLS`) carry them. Sheets use the `*_SHEET_COLS` lists and `core.cellOf`. `tests/names.test.mjs` checks every sheet column list.
 - Every file is LF (`core.autocrlf=false`, no `.gitattributes`). Never save CRLF: it rewrites whole files in the diff and breaks the byte-identical `git hash-object` check for the shared files.
 - Routing changes (what counts as verification vs discovery, scope, the POS rule) need Brendan's explicit OK on the exact rule before coding.
 

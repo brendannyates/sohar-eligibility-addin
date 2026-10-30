@@ -710,6 +710,10 @@
       if (!exportsData) { notice('No Sohar import built yet. Upload the NextGen report in the pane first.', false); return; }
       name = C.fileName(kind);
       cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS; data = exportsData[kind] || [];
+    } else if (kind === 'flow') {
+      // v0.21: the Sohar Flow import (record.FLOW_IMPORT_COLS), built by the pane with the other imports.
+      if (!exportsData || !(exportsData.flow || []).length) { notice('No Sohar Flow file built yet. Upload the NextGen report in the pane first.', false); return; }
+      name = REC.flowImportFileName(); cols = REC.FLOW_IMPORT_COLS; data = exportsData.flow;
     } else if (kind === 'discoveryVerify') {
       if (!discVerify.length) { notice('No discovery patients are waiting for verification. Upload a discovery output with coverage found first.', false); return; }
       try { C.namesMissing(discVerify); } catch (e) { notice(e.message, false); return; }
