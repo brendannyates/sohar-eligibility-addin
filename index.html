@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.19.0">
+  <link rel="stylesheet" href="style.css?v=0.20.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -152,10 +152,10 @@
           </div>
           <details class="more" id="feeSection" hidden>
             <summary>Fee estimates (test)</summary>
-            <p class="hint">Upload the fee schedule workbook. Each verified patient's next visit is matched to a fee tab (by location; telehealth uses the provider's home clinic) and a payer column, and the pane estimates what the patient pays, MD and NP. Estimates are not a guarantee. Turn off: Config <b>Fee estimates</b> = Off.</p>
-            <input type="file" id="fileFee" accept=".xlsx,.xlsm" hidden>
+            <p class="hint">Upload the fee schedule workbook, or drop the West Coast Patient Responsibility Calculator (.html) once: its built-in rates fill in what the saved schedule is missing, and the full-screen patient record runs its math. Each verified patient's next visit is matched to a fee tab (by location; telehealth uses the provider's home clinic) and a payer column, and the pane estimates what the patient pays, MD and NP. Estimates are not a guarantee. Turn off: Config <b>Fee estimates</b> = Off.</p>
+            <input type="file" id="fileFee" accept=".xlsx,.xlsm,.html,.htm" hidden>
             <div id="dropFee" class="drop slim" tabindex="0" role="button" aria-label="Upload the fee schedule">
-              Drop the fee schedule here, or <u>choose the file</u><br><span class="hint">.xlsx; it replaces the one saved in this workbook</span>
+              Drop the fee schedule here, or <u>choose the file</u><br><span class="hint">.xlsx replaces the one saved in this workbook; the calculator .html adds to it</span>
             </div>
             <div id="feeStatus" class="result"></div>
             <div class="actions">
@@ -249,13 +249,14 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.19.0"></script>
-  <script src="core.js?v=0.19.0"></script>
-  <script src="rules.js?v=0.19.0"></script>
-  <script src="fees.js?v=0.19.0"></script>
-  <script src="xlsx.js?v=0.19.0"></script>
-  <script src="payer-knowledge.js?v=0.19.0"></script>
-  <script src="excel.js?v=0.19.0"></script>
-  <script src="app.js?v=0.19.0"></script>
+  <script src="payer-rules.js?v=0.20.0"></script>
+  <script src="core.js?v=0.20.0"></script>
+  <script src="rules.js?v=0.20.0"></script>
+  <script src="fees.js?v=0.20.0"></script>
+  <script src="record.js?v=0.20.0"></script>
+  <script src="xlsx.js?v=0.20.0"></script>
+  <script src="payer-knowledge.js?v=0.20.0"></script>
+  <script src="excel.js?v=0.20.0"></script>
+  <script src="app.js?v=0.20.0"></script>
 </body>
 </html>

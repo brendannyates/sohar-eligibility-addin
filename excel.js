@@ -72,6 +72,8 @@
     tblClinicWorkApplied: { sheet: 'Clinic Work Applied', hidden: true },
     // Esketamine payer credential rules (R13): imported from the shared CSV in OneDrive, visible and editable. No patient data.
     tblPayerCredRules: { sheet: 'Payer Credential Rules' },
+    // v0.20: Sohar Flow results (the Flow's results CSV, record.FLOW_SHEET_COLS): LASFIR and MRN, no names. Hidden.
+    tblFlowResults: { sheet: 'Flow Results', hidden: true },
   };
   // Fee estimate tables by short name (app.js uses readFee / writeFee with these).
   const FEE_TABLES = { schedule: 'tblFeeSchedule', meta: 'tblFeeMeta', locations: 'tblFeeLocations', homes: 'tblProviderHome',
@@ -573,6 +575,9 @@
   const writePayerTests = (cols, rows) => writeAddinTable('Payer Tests', 'tblPayerTests', cols, rows, false); // hidden: OWNED
   const writePayerMapping = (cols, rows) => writeAddinTable('Payer Mapping', 'tblPayerMapping', cols, rows, false);
   const readPayerMapping = () => readOwned('tblPayerMapping');
+  // v0.20: Sohar Flow results, one row per visit's Run (record.mergeFlow keeps the latest).
+  const readFlowResults = () => readOwned('tblFlowResults');
+  const writeFlowResults = (cols, rows) => writeAddinTable('Flow Results', 'tblFlowResults', cols, rows, false); // hidden: OWNED
   const writePayerMetrics = (cols, rows) => writeAddinTable('Payer Metrics', 'tblPayerMetrics', cols, rows, false);
   const readPayerMetricHistory = () => readOwned('tblPayerMetricHistory');
   const writePayerMetricHistory = (cols, rows) => writeAddinTable('Payer Metrics History', 'tblPayerMetricHistory', cols, rows, false);
@@ -894,7 +899,7 @@
     readPayerEvidence, writePayerEvidence, tableExists, readClinicFile, ensureConfigRows,
     readPayerOutcomes, writePayerOutcomes, readPayerMapLog, writePayerMapLog, appendPayerMapLog, writePayerLearning,
     readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests, FEE_TABLES, readFee, writeFee,
-    readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, writePayerMetrics,
+    readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, readFlowResults, writeFlowResults, writePayerMetrics,
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
     INBOX, readClinicInbox, createClinicInbox, writeImportRows, importXlsx, lockNameSheets, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,

@@ -632,12 +632,14 @@ test('fix: changing one toggle remembers only that toggle; a $0-copay patient ne
   const d3 = F.rememberDefaults(d1, 'Blue Shield', { copay: 'None' }, 't3');
   assert.equal(prep({ results: res, defaults: d3 }).contexts[8].defaults.copay, 'None');
   const dash = readFileSync(new URL('../dashboard.js', import.meta.url), 'utf8');
-  assert.match(dash, /toggles: \{ \[s\.dataset\.etoggle\]: s\.value \}/, 'the full-screen panel sends only the toggle changed');
+  // v0.20: the calculator panel saves only a charge-mode change staff make (its three toggles), never a patient's derived defaults.
+  assert.match(dash, /if \(k === 'mode'\) \{[\s\S]*?toggles: F\.CALC_MODE_TOGGLES\[s\.value\]/, 'only a mode change staff make is sent');
+  assert.doesNotMatch(dash, /type: 'fee-defaults'[^\n]*ctx\.defaults/, 'derived defaults are never sent');
 });
 
 test('fix: the panel says toggles are not remembered when no fee payer is mapped (out of network)', () => {
   const dash = readFileSync(new URL('../dashboard.js', import.meta.url), 'utf8');
-  assert.match(dash, /no fee payer column is mapped for this patient, so they are not remembered/);
+  assert.match(dash, /No fee payer column is mapped for this patient, so changes are for this estimate only and are not remembered/);
   assert.equal(prep().contexts[4].feePayer, '', 'the OON synthetic patient has no fee payer');
 });
 

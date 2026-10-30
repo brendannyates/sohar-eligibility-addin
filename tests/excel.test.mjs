@@ -5,6 +5,7 @@ import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { createMock } from './helpers/excel-mock.mjs';
 const C = createRequire(import.meta.url)('../core.js');
+const REC = createRequire(import.meta.url)('../record.js');
 
 // Runs the real excel.js against tests/helpers/excel-mock.mjs. Synthetic data only.
 // The fail-safe sweeps fail a save at every op / sync / Excel close and check nothing is ever lost.
@@ -38,6 +39,8 @@ const credRules = (n, tag) => Array.from({ length: n }, (_, i) => ({ Payer: `${t
 const clinicNotes = (n, tag) => Array.from({ length: n }, (_, i) => ({ MRN: `00900${i}`, Location: `${tag} Clinic`, Note: `${tag} note ${i}`, By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z` }));
 const clinicPayerNotes = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'NextGen Payer': `${tag} Payer ${i}`, Location: `${tag} Clinic`, 'Card Says': `${tag} PPO ${i}`,
   Note: i % 3 ? '' : 'new card', By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z` }));
+// v0.20 Sohar Flow results: made-up runs, LASFIR-style tags, no names.
+const flowRows = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(REC.FLOW_SHEET_COLS.map((c) => [c, c === 'Key' ? `${tag}-run-${i}` : c === 'MRN' ? `00800${i}` : `${tag} ${c} ${i}`])));
 const clinicApplied = (n, tag) => Array.from({ length: n }, (_, i) => ({ Location: `${tag} Clinic`, Kind: 'Task done', Key: `00900${i}|Fix member ID in NextGen`, When: `2026-10-22T1${i % 10}:00:00.000Z` }));
 
 // ---------- happy path ----------
@@ -391,6 +394,7 @@ const CASES = {
   credRules: { write: (X, rows) => X.writePayerCredRules(PR.HEADERS, rows), read: (X) => X.readPayerCredRules(), cols: PR.HEADERS, make: credRules, sheet: 'Payer Credential Rules', hidden: false },
   clinicNotes: { write: (X, rows) => X.writeClinicNotes(RL.CLINIC_NOTE_COLS, rows), read: (X) => X.readClinicNotes(), cols: RL.CLINIC_NOTE_COLS, make: clinicNotes, sheet: 'Clinic Notes', hidden: false },
   clinicPayerNotes: { write: (X, rows) => X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, rows), read: (X) => X.readClinicPayerNotes(), cols: RL.CLINIC_PAYER_NOTE_COLS, make: clinicPayerNotes, sheet: 'Clinic Payer Notes', hidden: false },
+  flow: { write: (X, rows) => X.writeFlowResults(REC.FLOW_SHEET_COLS, rows), read: (X) => X.readFlowResults(), cols: REC.FLOW_SHEET_COLS, make: flowRows, sheet: 'Flow Results', hidden: true },
   clinicApplied: { write: (X, rows) => X.writeClinicWorkApplied(RL.CLINIC_APPLIED_COLS, rows), read: (X) => X.readClinicWorkApplied(), cols: RL.CLINIC_APPLIED_COLS, make: clinicApplied, sheet: 'Clinic Work Applied', hidden: true },
 };
 const KNOBS = { op: 'failAtOp', sync: 'failAtSync', kill: 'killAfterSync' };
