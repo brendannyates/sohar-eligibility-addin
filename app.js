@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.21.0';
+  const VERSION = '0.21.1';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -80,15 +80,17 @@
   async function autoRefresh() {
     await lockNames();
     try {
+      step('reading the Import sheet');
       const rows = await X.readImportRows();
       const det = C.detectHeader(rows);
-      if (!det || det.missing.length || det.dataEnd <= det.headerRow + 1) { await loadInbox(); return; }
+      if (!det || det.missing.length || det.dataEnd <= det.headerRow + 1) { step(''); await loadInbox(); return; }
       setStatus('Loading what is already in this workbook…', '');
       await loadConfig();
       await refreshAll();
     } catch (e) {
       console.error(e);
-      setStatus(`Opened, but loading stopped: ${e.message}`, 'bad');
+      setStatus(`Opened, but loading stopped${state.step ? ` while ${state.step}` : ''}: ${errText(e)}`, 'bad');
+      state.step = '';
       await loadInbox(); // its own errors stay in its box
     }
   }
@@ -96,26 +98,28 @@
   /** Scan the Import sheet, build the patient list and Sohar imports, then re-match saved Sohar and IR uploads. */
   async function refreshAll() {
     if (state.fees) state.fees.loaded = false; // fee estimates (On only): pick up edits made on the fee sheets
-    await loadPayerRules(); // esketamine payer credential rules: pick up edits made on the sheet
-    await loadClinicNotes();
-    await scan();
-    if ($('btnBuild').disabled) { await loadInbox(); return; }
-    await build({ deferRules: true });
-    const saved = await X.readUploads();
+    // state.step names the step running, so an error says where loading stopped (errText).
+    step('reading the payer credential rules'); await loadPayerRules(); // esketamine payer credential rules: pick up edits made on the sheet
+    step('reading the clinic notes'); await loadClinicNotes();
+    step('reading the report on the Import sheet'); await scan();
+    if ($('btnBuild').disabled) { step(''); await loadInbox(); return; }
+    step('building the patient list and Sohar imports'); await build({ deferRules: true });
+    step('reading the saved Sohar results'); const saved = await X.readUploads();
     let did = 'patient list and Sohar imports built';
     if (saved.length) {
       $('resultsResult').innerHTML = '';
-      const html = await processResults([]);
+      step('matching the saved Sohar results'); const html = await processResults([]);
       if (html) $('resultsResult').insertAdjacentHTML('beforeend', html); foldProgress();
       did += `; ${saved.length} saved Sohar result${saved.length === 1 ? '' : 's'} matched`;
-      const ir = await X.readIrUploads();
+      step('re-running the IR cross-check'); const ir = await X.readIrUploads();
       if (ir.length) { await runIr(ir); did += '; IR cross-check re-run'; }
     } else if (!state.demo && await X.tableRowCount('tblSoharResults').catch(() => 0)) {
       // Results written by an older version, before uploads were saved in the workbook: they cannot be re-matched.
       note('resultsResult', 'The Sohar Results sheet has results from an earlier version of this add-in, but the Sohar files themselves were not saved in this workbook. Drop the Sohar outputs here again so follow-ups and benefits are current.', 'warn');
     }
-    await refreshRules();
-    await loadInbox(); // after the tasks are built: its count is a dry run of the merge against them
+    step('checking the rules'); await refreshRules();
+    step('reading the clinic inbox'); await loadInbox(); // after the tasks are built: its count is a dry run of the merge against them
+    step('');
     const last = saved.map((s) => String(s.Uploaded || '')).sort().pop();
     state.lastSohar = last || ''; // the "Last updated" pill in full screen
     await stampUpdated(`${did}${last ? `. Last Sohar upload ${fmtStamp(new Date(last))}` : ''}`);
@@ -283,8 +287,10 @@
     if (!isCSV(file) && !isXlsx(file)) throw new Error(`${file.name} is not .xlsx or .csv. Open it in Excel, File > Save As > Excel Workbook (.xlsx), then upload that.`);
     dropBusy('dropReport', `Loading ${file.name}…`);
     try {
+      step(`copying ${file.name} onto the Import sheet`);
       if (isCSV(file)) await X.writeImportRows(C.parseCSV(await readText(file)));
       else await X.importXlsx(await readBase64(file));
+      step('');
       // v0.20: when the report came in, for the "Last updated" pill in full screen.
       state.reportUploaded = utcStamp(new Date());
       if (!state.demo) await X.setConfigValue('Report uploaded', state.reportUploaded).catch((e) => console.warn('Report uploaded not stamped', e));
@@ -1992,7 +1998,7 @@
       guarantor: { count: (state.guarantorCandidates || []).length, noDob: (state.guarantorCandidates || []).filter((x) => !x.hasDob).length },
       // v0.20 patient record: Sohar Flow results and the Payer Outcomes ledger (older checks, for the timeline), trimmed.
       flow: await currentFlow(), outcomes: await timelineOutcomes(), profiles: await patientProfiles(),
-      visits: await patientVisits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
+      visits: await patientVisits(), notes: await patientNotesByKey(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -2061,19 +2067,25 @@
     const saved = await currentPrecheck();
     for (const [per, vs] of REC.reportVisits(state.rows, det, pers, state.resultsAsOf || localToday())) {
       const key = keyByPer.get(per);
-      if (key) out[per] = vs.map((v) => ({ ...v, key, lasfir: tagByPer.get(per) || '', items: REC.precheckItems(v, key, saved), notes: REC.precheckNotes(v, key, saved) }));
+      if (key) out[per] = vs.map((v) => ({ ...v, key, lasfir: tagByPer.get(per) || '', items: REC.precheckItems(v, key, saved) }));
     }
     return out;
   }
+  /** Patient key (MRN) -> the patient's notes (record.patientNotes, one list per patient), for patients with a Sohar result. */
+  async function patientNotesByKey() {
+    const saved = await currentPrecheck(), out = {};
+    for (const r of state.results || []) { const k = C.keyOf(r); if (k && !out[k]) { const n = REC.patientNotes(k, saved); if (n.length) out[k] = n; } }
+    return out;
+  }
   /**
-   * One pre-check tick or note from full screen, saved in order (two quick ticks never overwrite each other). The
-   * admin's name and the patient's LASFIR go on the row; the time is the pane's.
+   * One pre-check tick (a visit) or patient note from full screen, saved in order (two quick ticks never overwrite
+   * each other). The admin's name and the patient's LASFIR go on the row; the time is the pane's.
    */
   function savePrecheck(m) {
     state.precheckQueue = (state.precheckQueue || Promise.resolve()).catch(() => {}).then(async () => {
       const t = { key: m.key, lasfir: m.lasfir, date: m.date, time: m.time, by: m.by, when: fmtStamp(new Date()) };
       const before = await currentPrecheck(true);
-      const next = m.type === 'precheck-note' ? REC.addPrecheckNote(before, { ...t, note: m.note }) : REC.setPrecheck(before, { ...t, item: m.item, done: !!m.done });
+      const next = m.type === 'precheck-note' ? REC.addPatientNote(before, { ...t, note: m.note }) : REC.setPrecheck(before, { ...t, item: m.item, done: !!m.done });
       const rows = REC.prunePrecheck(next, localToday());
       await X.writePreCheck(REC.PRECHECK_COLS, rows);
       state.precheck = rows;
@@ -2257,11 +2269,24 @@
       resName: 'Resource', finClass: 'Fin class', finClassLstEnc: 'Fin class (last enc)', secPayerLstEnc: 'Secondary (last enc)', authCd: 'Auth code', authCdLstEnc: 'Auth code (last enc)' }[f] || f;
   }
   /** Run fn; show any error next to the step that failed (boxId) as well as in the header. */
+  /** The step running now, for error messages (blank when none). */
+  function step(what) { state.step = what; }
+  /**
+   * An error's message plus where Excel says it failed (Office.js debugInfo: e.g. "WorksheetCollection.getItem"),
+   * so an error like "the specified worksheet cannot be found" says which call it was.
+   */
+  function errText(e) {
+    const msg = e && e.message ? e.message : String(e);
+    const di = e && e.debugInfo;
+    const at = di && (di.errorLocation || di.statement) ? ` [Excel: ${[di.errorLocation, di.statement].filter(Boolean).join(' · ').slice(0, 200)}]` : '';
+    return `${msg}${at}`;
+  }
   async function guard(fn, boxId) {
     try { await fn(); }
     catch (e) {
       console.error(e);
-      const msg = e && e.message ? e.message : String(e);
+      const msg = `${state.step ? `While ${state.step}: ` : ''}${errText(e)}`;
+      state.step = '';
       setStatus(`Something went wrong: ${msg}`, 'bad');
       if (boxId) note(boxId, `Something went wrong: ${msg}${e && e.code ? ` (${e.code})` : ''}`, 'bad');
     }
