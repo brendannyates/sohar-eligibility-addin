@@ -256,15 +256,17 @@
     const s = sub && letters(sub.lastName) ? sub : null;
     const g = prof && prof.guarantor && letters(prof.guarantor.lastName) ? prof.guarantor : null;
     const pt = prof && prof.patient;
-    if (!s) return { status: 'No subscriber from Sohar', severity: '', text: g ? `NextGen guarantor ${prof.guarantorSelf ? 'is the patient' : tag(g)}; Sohar returned no subscriber to compare.` : '' };
-    if (!g) return { status: 'No guarantor on the report', severity: '', text: `Sohar subscriber ${samePerson(s, pt, prof && prof.prevLastName) ? 'is the patient' : tag(s)}; the report has no guarantor to compare.` };
+    // Always LASFIR: the patient is named too ("RIVANA, the patient").
+    const me = tag(pt) ? `${tag(pt)}, the patient` : 'the patient';
+    if (!s) return { status: 'No subscriber from Sohar', severity: '', text: g ? `NextGen guarantor is ${prof.guarantorSelf ? me : tag(g)}; Sohar returned no subscriber to compare.` : '' };
+    if (!g) return { status: 'No guarantor on the report', severity: '', text: `Sohar subscriber is ${samePerson(s, pt, prof && prof.prevLastName) ? me : tag(s)}; the report has no guarantor to compare.` };
     const subIsPt = samePerson(s, pt, prof.prevLastName), gIsPt = prof.guarantorSelf;
-    if (samePerson(g, s, prof.prevLastName)) return { status: 'Match', severity: '', text: `NextGen guarantor and Sohar subscriber match (${gIsPt ? 'the patient' : tag(g)}).` };
-    if (subIsPt) return { status: 'Subscriber is the patient, guarantor is not', severity: 'low', text: `Sohar subscriber is the patient; NextGen guarantor is ${tag(g)}. Normal when someone else pays; confirm the policy's insured is the patient in NextGen.` };
+    if (samePerson(g, s, prof.prevLastName)) return { status: 'Match', severity: '', text: `NextGen guarantor and Sohar subscriber match (${gIsPt ? me : tag(g)}).` };
+    if (subIsPt) return { status: 'Subscriber is the patient, guarantor is not', severity: 'low', text: `Sohar subscriber is ${me}; NextGen guarantor is ${tag(g)}. Normal when someone else pays; confirm the policy's insured is ${tag(pt) || 'the patient'} in NextGen.` };
     // Common and often fine (an adult on a partner's plan pays their own bill), but the NextGen policy's insured must be
     // the subscriber, and the report has no insured column: a check, not an error.
-    if (gIsPt) return { status: 'Guarantor is the patient, subscriber is not', severity: 'medium', text: `Sohar subscriber is ${tag(s)}, not the patient; NextGen's guarantor is the patient. Check that the NextGen policy's insured is ${tag(s)} (the guarantor can stay the patient).` };
-    return { status: 'Different people', severity: 'high', text: `NextGen guarantor ${tag(g)} and Sohar subscriber ${tag(s)} are different people. Check the guarantor and the policy's insured in NextGen.` };
+    if (gIsPt) return { status: 'Guarantor is the patient, subscriber is not', severity: 'medium', text: `Sohar subscriber is ${tag(s)}, not ${me}; NextGen's guarantor is ${tag(pt) || 'the patient'}. Check that the NextGen policy's insured is ${tag(s)} (the guarantor can stay ${tag(pt) || 'the patient'}).` };
+    return { status: 'Different people', severity: 'high', text: `NextGen guarantor ${tag(g)} and Sohar subscriber ${tag(s)} are different people (patient ${tag(pt) || 'unknown'}). Check the guarantor and the policy's insured in NextGen.` };
   }
   /** Subscriber from a saved Sohar record (lower-case Sohar headers), or null. */
   function subscriberOf(rec) {
@@ -274,20 +276,26 @@
   }
 
   // ---------- visit pre-check (v0.20) ----------
-  // The report's "Appointment Pre-Check Complete" (Yes / No / blank) per visit, plus a checklist staff tick in full
-  // screen. Ticks are saved on the hidden Pre-Check sheet (PRECHECK_COLS, MRN key, no names); a tick wins over the
-  // report's value. The add-in never writes to NextGen: "Updated in NextGen" is the person saying they did it.
+  // The report's "Appointment Pre-Check Complete" (Yes / No / blank) per visit, plus a checklist and notes staff add in
+  // full screen. Saved on the hidden Pre-Check sheet (PRECHECK_COLS: MRN key, the patient's LASFIR, the admin's name);
+  // a tick wins over the report's value. The add-in never writes to NextGen: "Updated in NextGen" is the person saying
+  // they did it. Admins pick their name from Config "Admin names" (Excel does not give the add-in the signed-in user).
   const PRECHECK_HEADERS = ['Appointment Pre-Check Complete', 'Pre-Check Complete', 'Precheck Complete', 'Pre-Check', 'Precheck'];
   const PRECHECK_ITEMS = [
     { id: 'precheck', label: 'Pre-check complete' },
     { id: 'nextgen', label: 'Updated in NextGen' },
-    { id: 'estimate', label: 'Cost estimate shared with patient' },
   ];
-  const PRECHECK_COLS = ['Key', 'MRN', 'Appt Date', 'Time', 'Item', 'Done', 'When'];
+  const PRECHECK_COLS = ['Key', 'MRN', 'LASFIR', 'Appt Date', 'Time', 'Item', 'Done', 'Note', 'By', 'When'];
+  const PRECHECK_CONFIG_ROWS = [
+    { setting: 'Admin names', value: '', what: 'Pre-check (full screen): the names admins pick from when they tick a visit or add a note, separated by ; (e.g. Jordan Lee; Sam Ortiz). Saved with each tick and note.' },
+  ];
+  const NOTE_MAX = 500;
   const yes = (v) => /^(y|yes|true|1|x|complete|completed|done)$/i.test(str(v));
   const no = (v) => /^(n|no|false|0)$/i.test(str(v));
   /** One visit's key: patient key (MRN) | appointment date | time. */
   const visitKey = (key, date, time) => `${str(key)}|${str(date)}|${str(time)}`;
+  /** Config "Admin names" -> a clean, de-duplicated list. */
+  const adminNames = (v) => [...new Set(str(v).split(/[;\n]/).map((s) => s.trim()).filter(Boolean))];
   /**
    * Per Nbr -> visits on the report from `from` (a day; all when null), soonest first:
    * [{date, time, event, loc, provider, status, precheck: 'Yes' | 'No' | '', hasPrecheck}]. Read by header name; hasPrecheck is
@@ -316,26 +324,43 @@
     return out;
   }
   /**
-   * The checklist for one visit: [{id, label, done, source, when}]. A saved tick wins; with none, "Pre-check complete"
-   * follows the report (source 'NextGen report'). saved: Pre-Check sheet rows.
+   * The checklist for one visit: [{id, label, done, source, when, by}]. A saved tick wins; with none, "Pre-check
+   * complete" follows the report (source 'NextGen report'). saved: Pre-Check sheet rows.
    */
   function precheckItems(visit, key, saved) {
     const vk = visitKey(key, visit.date, visit.time);
-    const mine = new Map((saved || []).filter((r) => str(r.Key) === vk).map((r) => [str(r.Item), r]));
+    const mine = new Map((saved || []).filter((r) => str(r.Key) === vk && str(r.Item) !== 'note').map((r) => [str(r.Item), r]));
     return PRECHECK_ITEMS.map((it) => {
       const s = mine.get(it.id);
-      if (s) return { ...it, done: yes(s.Done), source: 'Marked here', when: str(s.When) };
-      if (it.id === 'precheck' && visit.precheck) return { ...it, done: visit.precheck === 'Yes', source: 'NextGen report', when: '' };
-      return { ...it, done: false, source: '', when: '' };
+      if (s) return { ...it, done: yes(s.Done), source: 'Marked here', when: str(s.When), by: str(s.By) };
+      if (it.id === 'precheck' && visit.precheck) return { ...it, done: visit.precheck === 'Yes', source: 'NextGen report', when: '', by: '' };
+      return { ...it, done: false, source: '', when: '', by: '' };
     });
   }
-  /** Save one tick: replaces the visit's row for that item. Returns the new rows (PRECHECK_COLS). */
+  /** One visit's notes, newest first: [{note, by, when}]. */
+  function precheckNotes(visit, key, saved) {
+    const vk = visitKey(key, visit.date, visit.time);
+    return (saved || []).map((r, i) => ({ r, i })).filter(({ r }) => str(r.Key) === vk && str(r.Item) === 'note' && str(r.Note))
+      .sort((a, b) => b.i - a.i).map(({ r }) => ({ note: str(r.Note), by: str(r.By), when: str(r.When) }));
+  }
+  const rowOf = (t, item, extra) => ({ Key: visitKey(t.key, t.date, t.time), MRN: str(t.key), LASFIR: str(t.lasfir), 'Appt Date': str(t.date), Time: str(t.time),
+    Item: item, Done: '', Note: '', By: str(t.by), When: str(t.when), ...extra });
+  const needBy = (t) => { if (!str(t.by)) throw new Error('Pick your name first (Config "Admin names" lists them).'); };
+  /** Save one tick: replaces the visit's row for that item. t: {key, lasfir, date, time, item, done, by, when}. */
   function setPrecheck(saved, t) {
     if (!PRECHECK_ITEMS.some((i) => i.id === t.item)) throw new Error(`Unknown pre-check item "${t.item}".`);
+    needBy(t);
     const vk = visitKey(t.key, t.date, t.time);
     const rows = (saved || []).filter((r) => !(str(r.Key) === vk && str(r.Item) === t.item));
-    rows.push({ Key: vk, MRN: str(t.key), 'Appt Date': str(t.date), Time: str(t.time), Item: t.item, Done: t.done ? 'Yes' : 'No', When: str(t.when) });
+    rows.push(rowOf(t, t.item, { Done: t.done ? 'Yes' : 'No' }));
     return rows;
+  }
+  /** Add a note to a visit (kept with every earlier note). Trimmed, at most NOTE_MAX characters. */
+  function addPrecheckNote(saved, t) {
+    needBy(t);
+    const note = str(t.note).replace(/\s+/g, ' ').slice(0, NOTE_MAX);
+    if (!note) throw new Error('The note is empty.');
+    return (saved || []).concat(rowOf(t, 'note', { Note: note }));
   }
   /** Drop ticks for visits before `from` (a day), so the sheet does not grow forever. */
   function prunePrecheck(saved, from) {
@@ -364,5 +389,6 @@
 
   return { FLOW_COLS, FLOW_SHEET_COLS, isFlowFile, flowRecords, mergeFlow, flowFor, flowAmount, isSandbox, patientRecord, byPatient, upcomingOf, leadOf,
     PROFILE_HEADERS, profiles, samePerson, guarantorCheck, subscriberOf,
-    PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, visitKey, reportVisits, precheckItems, setPrecheck, prunePrecheck, freshness };
+    PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, precheckNotes, setPrecheck,
+    addPrecheckNote, prunePrecheck, freshness };
 });

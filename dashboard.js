@@ -21,7 +21,7 @@
   const REC = window.SoharRecord;
   let flow = [], outcomes = [], profiles = {};
   // Per Nbr -> upcoming visits with the report's Pre-Check Complete and the checklist; when each source last came in.
-  let visits = {}, lastUpdated = null;
+  let visits = {}, lastUpdated = null, admins = []; // admins: Config "Admin names"
   const take = C.messageAssembler();
   // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
   const PILL_COLOR = new Map(((window.SoharRules && window.SoharRules.PILLS) || []).map((p) => [p.label, p.color]));
@@ -61,7 +61,7 @@
     rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; verFailed = m.verifyFailed || []; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
     flow = m.flow || []; outcomes = m.outcomes || []; profiles = m.profiles || {};
-    visits = m.visits || {}; lastUpdated = m.lastUpdated || null;
+    visits = m.visits || {}; lastUpdated = m.lastUpdated || null; admins = m.admins || [];
     fees = F && m.fees && m.fees.on ? m.fees : null;
     renderFeeBar(); renderUpdated();
     const people = REC.byPatient(rows).length;
@@ -307,35 +307,87 @@
   function hideDetail() { $('detail').hidden = true; estOver = null; detailKey = ''; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
 
   /**
-   * Upcoming visits from the report, each with the NextGen Pre-Check Complete value and the checklist staff tick here
-   * (saved on the hidden Pre-Check sheet). Without report visits: the visit summary from the Sohar result.
+   * Upcoming visits from the report, each with the NextGen Pre-Check Complete value, the checklist and notes admins add
+   * here (saved on the hidden Pre-Check sheet with their name). Without report visits: the visit summary from the Sohar
+   * result. The admin's name comes from Config "Admin names" and is remembered on this computer.
    */
+  const NAME_KEY = 'sohar.precheck.by';
+  let adminName = (() => { try { return localStorage.getItem(NAME_KEY) || ''; } catch (e) { return ''; } })();
   function visitsHtml(r, rec) {
     const vs = visits[String(r['Per Nbr'] || '')] || [];
     if (!vs.length) return rec && rec.upcoming.length ? `<ul class="visits">${rec.upcoming.map((v) => `<li>${esc(v)}</li>`).join('')}</ul>` : '<p class="hint">None scheduled</p>';
-    return `<ul class="visits pc">${vs.map((v, i) => `<li>
+    const names = admins.includes(adminName) || !adminName ? admins : [adminName, ...admins];
+    const picker = `<label class="inline pcby">Your name
+      ${names.length ? `<select id="pcBy"><option value="">Pick your name</option>${names.map((n) => `<option${n === adminName ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`
+        : `<input id="pcBy" value="${esc(adminName)}" placeholder="Your name" maxlength="60">`}</label>
+      ${names.length ? '' : '<span class="hint">Add the admin names to Config "Admin names" (separated by ;) to pick from a list.</span>'}`;
+    return `${picker}<ul class="visits pc">${vs.map((v, i) => `<li>
       <b>${esc([v.date, v.time].filter(Boolean).join(' '))}</b> ${esc([v.event, v.loc].filter(Boolean).join(' · '))}${v.provider ? ` <span class="hint">${esc(v.provider)}</span>` : ''}
-      <br><span class="hint">NextGen pre-check: ${esc(v.precheck || 'not on the report')}</span>
+      <br><span class="hint">${esc(v.lasfir || name(r))} · NextGen pre-check: ${esc(v.precheck || 'not on the report')}</span>
       <div class="pcheck">${v.items.map((it) => `<label class="inline"><input type="checkbox" data-pc="${i}" data-pc-item="${esc(it.id)}"${it.done ? ' checked' : ''}> ${esc(it.label)}
-        <span class="hint" data-pc-note="${i}|${esc(it.id)}">${esc(pcNote(it))}</span></label>`).join('')}</div></li>`).join('')}</ul>
-      <p class="hint">Ticks are saved in this workbook. The add-in does not change NextGen: "Updated in NextGen" means you made the change there.</p>`;
+        <span class="hint" data-pc-note="${i}|${esc(it.id)}">${esc(pcNote(it))}</span></label>`).join('')}</div>
+      <div class="pnotes">${(v.notes || []).map((n) => `<p class="pnote">${esc(n.note)} <span class="hint">${esc([n.by, n.when].filter(Boolean).join(', '))}</span></p>`).join('')}
+        <div class="pnote-add"><input data-pn="${i}" maxlength="${REC.NOTE_MAX}" placeholder="Add a note for this visit" aria-label="Note for the ${esc(v.date)} visit"> <button class="small" data-pn-add="${i}">Add note</button></div></div></li>`).join('')}</ul>
+      <p class="hint">Ticks and notes are saved in this workbook with your name. The add-in does not change NextGen: "Updated in NextGen" means you made the change there.</p>`;
   }
-  const pcNote = (it) => (it.source === 'NextGen report' ? '(from the report)' : it.source === 'Marked here' && it.when ? `(${it.when})` : '');
+  const pcNote = (it) => (it.source === 'NextGen report' ? '(from the report)' : it.source === 'Marked here' ? `(${[it.by, it.when].filter(Boolean).join(', ')})` : '');
+  const stamp = () => { const now = new Date(); return `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`; };
+  const detailVisit = (i) => {
+    const r = rows.find((x) => keyOf(x) === detailKey) || rows.find((x) => `ref:${x['Sohar Ref']}` === detailKey);
+    return r ? { r, v: (visits[String(r['Per Nbr'] || '')] || [])[+i] } : {};
+  };
+  /** The admin's name, or a notice and null when none is picked. */
+  function byOrAsk() {
+    if (adminName) return adminName;
+    notice('Pick your name first (top of Upcoming visits). It is saved with each tick and note.', false);
+    const el = $('pcBy'); if (el) el.focus();
+    return null;
+  }
   $('detail').addEventListener('change', (e) => {
+    if (e.target.id === 'pcBy') {
+      adminName = e.target.value.trim();
+      try { localStorage.setItem(NAME_KEY, adminName); } catch (err) { /* storage blocked: remembered for this window only */ }
+      return;
+    }
     const c = e.target.closest('input[data-pc]');
     if (!c || !detailKey) return;
-    const r = rows.find((x) => keyOf(x) === detailKey) || rows.find((x) => `ref:${x['Sohar Ref']}` === detailKey);
-    const v = r && (visits[String(r['Per Nbr'] || '')] || [])[+c.dataset.pc];
+    const { r, v } = detailVisit(c.dataset.pc);
     const it = v && v.items.find((x) => x.id === c.dataset.pcItem);
     if (!it) return;
-    const now = new Date();
-    Object.assign(it, { done: c.checked, source: 'Marked here', when: `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` });
+    const by = byOrAsk();
+    if (!by) { c.checked = !c.checked; return; }
+    Object.assign(it, { done: c.checked, source: 'Marked here', when: stamp(), by });
     const note = $('detail').querySelector(`[data-pc-note="${c.dataset.pc}|${it.id}"]`);
     if (note) note.textContent = pcNote(it);
-    toPane({ type: 'precheck', key: v.key, date: v.date, time: v.time, item: it.id, done: c.checked });
+    toPane({ type: 'precheck', key: v.key, lasfir: v.lasfir || name(r), date: v.date, time: v.time, item: it.id, done: c.checked, by });
     renderPrep(); renderWorklist(); // the list pills follow
   });
-
+  $('detail').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pn-add]');
+    if (!b || !detailKey) return;
+    const { r, v } = detailVisit(b.dataset.pnAdd);
+    const input = $('detail').querySelector(`input[data-pn="${b.dataset.pnAdd}"]`);
+    const text = input ? input.value.replace(/\s+/g, ' ').trim() : '';
+    if (!v || !text) return;
+    const by = byOrAsk();
+    if (!by) return;
+    const n = { note: text.slice(0, REC.NOTE_MAX), by, when: stamp() };
+    v.notes = [n, ...(v.notes || [])];
+    input.value = '';
+    input.closest('.pnotes').insertAdjacentHTML('afterbegin', `<p class="pnote">${esc(n.note)} <span class="hint">${esc(`${n.by}, ${n.when}`)}</span></p>`);
+    toPane({ type: 'precheck-note', key: v.key, lasfir: v.lasfir || name(r), date: v.date, time: v.time, note: n.note, by });
+  });
+  $('detail').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const i = e.target.closest('input[data-pn]');
+    if (i) { e.preventDefault(); const b = $('detail').querySelector(`[data-pn-add="${i.dataset.pn}"]`); if (b) b.click(); }
+  });
+  // Free-text name (no Config list yet): remembered as it is typed.
+  $('detail').addEventListener('input', (e) => {
+    if (e.target.id !== 'pcBy') return;
+    adminName = e.target.value.trim();
+    try { localStorage.setItem(NAME_KEY, adminName); } catch (err) { /* storage blocked */ }
+  });
   /** Sohar Flow cost estimates, one card per visit (soonest first). Sandbox files say so. */
   function flowHtml(list) {
     if (!list || !list.length) return '';
@@ -797,15 +849,16 @@
       'Policy vs NextGen': 'Same policy as NextGen', 'Estimate Policy': 'NextGen', Network: 'INN', 'Sohar Payer': 'UMR', 'Fee Tab': 'Marin', File: 'Flow Results (SANDBOX).csv', ...o });
     const demoFlow = [fl({ Key: 'd1', 'Appt Date': '10/20/2026', Time: '9:00 AM', Event: 'TMS Treatment Unilateral', 'Rate Level': 'NP', 'Est Codes': '', 'Estimate Note': 'TMS (intervention): no estimate; verify deductible, OOP max and insurance status' }),
       fl({ Key: 'd2', 'Appt Date': '10/27/2026', Time: '9:00 AM', Event: 'Med Management In-Office', 'Rate Level': 'NP', 'Est Codes': '99214', 'Sohar Est Patient': '71.11', 'Sohar Est Plan Pays': '100.00' })];
-    const demoProfiles = { 100100: { pronouns: 'They, Them, Theirs', genderIdentity: '', currentGender: 'Female', guarantor: 'Patient', checks: [
+    const demoProfiles = { 100100: { pronouns: 'They, Them, Theirs', genderIdentity: '', currentGender: 'Female', guarantor: 'RIVANA (the patient)', checks: [
       { sentAs: 'Verification', payer: 'UMR', date: '2026-10-18', ...REC.guarantorCheck({ patient: { firstName: 'Ana', lastName: 'Rivera' }, guarantor: { firstName: 'Ana', lastName: 'Rivera' }, guarantorSelf: true }, { firstName: 'Luis', lastName: 'Rivera' }) }] } };
     // Report visits with Pre-Check Complete (made up): Rivera's first visit done in NextGen, Lindqvist's not.
     const dv = (key, date, time, event, loc, pc, ticks) => {
       const v = { date, time, event, loc, provider: '', status: '', precheck: pc, hasPrecheck: true, key };
-      return { ...v, items: REC.precheckItems(v, key, ticks || []) };
+      return { ...v, lasfir: '', items: REC.precheckItems(v, key, ticks || []), notes: REC.precheckNotes(v, key, ticks || []) };
     };
     const demoVisits = {
-      100100: [dv('80100', '10/20/2026', '9:00 AM', 'TMS Treatment Unilateral', 'San Rafael', 'Yes', [{ Key: '80100|10/20/2026|9:00 AM', Item: 'nextgen', Done: 'Yes', When: '10/19/2026 4:10 PM' }]),
+      100100: [dv('80100', '10/20/2026', '9:00 AM', 'TMS Treatment Unilateral', 'San Rafael', 'Yes', [{ Key: '80100|10/20/2026|9:00 AM', Item: 'nextgen', Done: 'Yes', By: 'Jordan Lee', When: '10/19/2026 4:10 PM' },
+        { Key: '80100|10/20/2026|9:00 AM', Item: 'note', Note: 'New card scanned; plan unchanged', By: 'Jordan Lee', When: '10/19/2026 4:12 PM' }]),
         dv('80100', '10/27/2026', '9:00 AM', 'Med Management In-Office', 'San Rafael', '')],
       100102: [dv('PER-100102', '10/22/2026', '10:00 AM', 'Med Management In-Office', 'Walnut Creek', 'No')],
     };
@@ -839,7 +892,7 @@
     const demoTasks = C.buildTasks(res).map((t, i) => (i === 0 ? { ...t, Done: `Yes (clinic ${t['Next Location']})`, 'Clinic Note': `Called the patient, new card scanned (Front desk, ${t['Next Location']}, 10/19)` } : t));
     load({ results: res, tasks: demoTasks, exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees,
       clinic: demoClinic, skipped: demoSkipped, skipCols: ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'], learning: demoLearning, guarantor: { count: 2, noDob: 1 },
-      flow: demoFlow, outcomes: demoOutcomes, profiles: demoProfiles, visits: demoVisits,
+      flow: demoFlow, outcomes: demoOutcomes, profiles: demoProfiles, visits: demoVisits, admins: ['Jordan Lee', 'Sam Ortiz'],
       lastUpdated: { report: new Date(Date.now() - 2 * 36e5).toISOString(), sohar: new Date(Date.now() - 3 * 864e5).toISOString(), flow: new Date().toISOString() } });
     // #patient opens the first demo patient's record (for checking the layout); other hashes pick a tab.
     if (location.hash === '#patient') showDetail(`${keyOf(res[0])}|${res[0]['Sohar Ref']}`);

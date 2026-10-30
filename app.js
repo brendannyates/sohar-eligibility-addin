@@ -518,7 +518,7 @@
         const feeRows = F ? (feesOn() ? F.FEE_CONFIG_ROWS : F.FEE_CONFIG_ROWS.slice(0, 1)) : [];
         // "MRN ids since": Sohar checks created before this time carry the Per Nbr as their id, later ones the MRN.
         const since = { setting: 'MRN ids since', value: utcStamp(new Date()), what: 'When this workbook started sending the MRN (not the Per Nbr) as the Sohar id. Sohar results created before then are matched by Per Nbr. Set by the add-in; do not change.' };
-        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
+        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
         if (!String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
       }
       const learn = state.cfg.learning || C.LEARN_DEFAULTS;
@@ -1971,7 +1971,7 @@
       guarantor: { count: (state.guarantorCandidates || []).length, noDob: (state.guarantorCandidates || []).filter((x) => !x.hasDob).length },
       // v0.20 patient record: Sohar Flow results and the Payer Outcomes ledger (older checks, for the timeline), trimmed.
       flow: await currentFlow(), outcomes: await timelineOutcomes(), profiles: await patientProfiles(),
-      visits: await patientVisits(), lastUpdated: await lastUpdatedStamps(),
+      visits: await patientVisits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -1999,7 +1999,8 @@
     for (const s of await X.readUploads().catch((e) => { console.error(e); return []; })) records.set(String(s.Key), s.Record);
     for (const [per, p] of prof) {
       out[per] = { genderIdentity: p.genderIdentity, currentGender: p.currentGender, pronouns: p.pronouns, prevLastName: p.prevLastName ? 'on file' : '',
-        guarantor: !p.guarantor ? '' : p.guarantorSelf ? 'Patient' : C.lasfir(p.guarantor.lastName, p.guarantor.firstName), guarantorDob: p.guarantor && p.guarantor.dob ? 'on file' : '', checks: [] };
+        // Always LASFIR, the patient's too when they are their own guarantor.
+        guarantor: !p.guarantor ? '' : p.guarantorSelf ? `${C.lasfir(p.guarantor.lastName, p.guarantor.firstName)} (the patient)` : C.lasfir(p.guarantor.lastName, p.guarantor.firstName), guarantorDob: p.guarantor && p.guarantor.dob ? 'on file' : '', checks: [] };
     }
     for (const r of state.results) {
       const per = String(r['Per Nbr'] || '');
@@ -2029,20 +2030,30 @@
     const out = {};
     const det = state.detection || (state.rows && C.detectHeader(state.rows));
     if (!det || !state.rows || !state.results) return out;
-    const keyByPer = new Map();
-    for (const r of [...(state.patients || []), ...state.results]) { const per = String(r['Per Nbr'] || ''); if (per && !keyByPer.has(per) && C.keyOf(r)) keyByPer.set(per, C.keyOf(r)); }
+    const keyByPer = new Map(), tagByPer = new Map();
+    for (const r of [...(state.patients || []), ...state.results]) {
+      const per = String(r['Per Nbr'] || '');
+      if (per && !keyByPer.has(per) && C.keyOf(r)) keyByPer.set(per, C.keyOf(r));
+      if (per && !tagByPer.has(per) && C.tagOf(r)) tagByPer.set(per, C.tagOf(r));
+    }
     const pers = new Set(state.results.map((r) => String(r['Per Nbr'] || '')).filter(Boolean));
     const saved = await currentPrecheck();
     for (const [per, vs] of REC.reportVisits(state.rows, det, pers, state.resultsAsOf || localToday())) {
       const key = keyByPer.get(per);
-      if (key) out[per] = vs.map((v) => ({ ...v, key, items: REC.precheckItems(v, key, saved) }));
+      if (key) out[per] = vs.map((v) => ({ ...v, key, lasfir: tagByPer.get(per) || '', items: REC.precheckItems(v, key, saved), notes: REC.precheckNotes(v, key, saved) }));
     }
     return out;
   }
-  /** One pre-check tick from full screen, saved in order (two quick ticks never overwrite each other). */
+  /**
+   * One pre-check tick or note from full screen, saved in order (two quick ticks never overwrite each other). The
+   * admin's name and the patient's LASFIR go on the row; the time is the pane's.
+   */
   function savePrecheck(m) {
     state.precheckQueue = (state.precheckQueue || Promise.resolve()).catch(() => {}).then(async () => {
-      const rows = REC.prunePrecheck(REC.setPrecheck(await currentPrecheck(true), { key: m.key, date: m.date, time: m.time, item: m.item, done: !!m.done, when: fmtStamp(new Date()) }), localToday());
+      const t = { key: m.key, lasfir: m.lasfir, date: m.date, time: m.time, by: m.by, when: fmtStamp(new Date()) };
+      const before = await currentPrecheck(true);
+      const next = m.type === 'precheck-note' ? REC.addPrecheckNote(before, { ...t, note: m.note }) : REC.setPrecheck(before, { ...t, item: m.item, done: !!m.done });
+      const rows = REC.prunePrecheck(next, localToday());
       await X.writePreCheck(REC.PRECHECK_COLS, rows);
       state.precheck = rows;
     });
@@ -2104,8 +2115,8 @@
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
-    } else if (m.type === 'precheck') {
-      try { await savePrecheck(m); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Pre-check not saved: ${e.message}` }); throw e; }
+    } else if (m.type === 'precheck' || m.type === 'precheck-note') {
+      try { await savePrecheck(m); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `${m.type === 'precheck' ? 'Pre-check' : 'Note'} not saved: ${e.message}` }); throw e; }
     } else if (m.type === 'fee-upload' && feesOn()) {
       // Fee schedule picked on the full-screen Benefits tab: it arrives as base64 and is read here (pure JS, no Excel sheets).
       try {

@@ -245,18 +245,32 @@ test('reportVisits reads Appointment Pre-Check Complete by header; precheckItems
   assert.equal(noCol.get('9203')[0].hasPrecheck, false);
   const first = v.get('9201')[0];
   let items = REC.precheckItems(first, '720001', []);
-  assert.deepEqual(items.map((i) => [i.id, i.done, i.source]), [['precheck', true, 'NextGen report'], ['nextgen', false, ''], ['estimate', false, '']]);
-  let saved = REC.setPrecheck([], { key: '720001', date: first.date, time: first.time, item: 'precheck', done: false, when: '10/30/2026 9:00 AM' });
-  saved = REC.setPrecheck(saved, { key: '720001', date: first.date, time: first.time, item: 'nextgen', done: true, when: '10/30/2026 9:01 AM' });
-  saved = REC.setPrecheck(saved, { key: '720001', date: first.date, time: first.time, item: 'nextgen', done: true, when: '10/30/2026 9:02 AM' });
+  assert.deepEqual(items.map((i) => [i.id, i.done, i.source]), [['precheck', true, 'NextGen report'], ['nextgen', false, '']], 'two items: no cost-estimate item');
+  const t = { key: '720001', lasfir: 'SYNPAT', date: first.date, time: first.time, by: 'Jordan Lee' };
+  let saved = REC.setPrecheck([], { ...t, item: 'precheck', done: false, when: '10/30/2026 9:00 AM' });
+  saved = REC.setPrecheck(saved, { ...t, item: 'nextgen', done: true, when: '10/30/2026 9:01 AM' });
+  saved = REC.setPrecheck(saved, { ...t, item: 'nextgen', done: true, when: '10/30/2026 9:02 AM', by: 'Sam Ortiz' });
   assert.equal(saved.length, 2, 'one row per visit and item');
+  assert.deepEqual([saved[0].LASFIR, saved[0].By], ['SYNPAT', 'Jordan Lee'], 'every row carries the LASFIR and the admin');
   items = REC.precheckItems(first, '720001', saved);
-  assert.deepEqual(items.map((i) => [i.id, i.done, i.source]), [['precheck', false, 'Marked here'], ['nextgen', true, 'Marked here'], ['estimate', false, '']]);
-  assert.equal(items[1].when, '10/30/2026 9:02 AM');
-  assert.throws(() => REC.setPrecheck([], { key: 'x', item: 'nope' }), /Unknown pre-check item/);
-  for (const c of REC.PRECHECK_COLS) assert.doesNotMatch(c, /name|dob|birth/i);
-  const old = REC.setPrecheck(saved, { key: '720001', date: '10/01/2026', time: '9:00 AM', item: 'precheck', done: true, when: '' });
-  assert.equal(REC.prunePrecheck(old, '10/30/2026').length, 2, 'ticks for past visits are dropped');
+  assert.deepEqual(items.map((i) => [i.id, i.done, i.source]), [['precheck', false, 'Marked here'], ['nextgen', true, 'Marked here']]);
+  assert.deepEqual([items[1].when, items[1].by], ['10/30/2026 9:02 AM', 'Sam Ortiz']);
+  assert.throws(() => REC.setPrecheck([], { ...t, item: 'nope' }), /Unknown pre-check item/);
+  assert.throws(() => REC.setPrecheck([], { ...t, by: '', item: 'precheck', done: true }), /Pick your name/);
+  // Notes: every note kept, newest first, with the admin; ticks are not notes.
+  saved = REC.addPrecheckNote(saved, { ...t, note: '  Called,   left message ', when: '10/30/2026 9:05 AM' });
+  saved = REC.addPrecheckNote(saved, { ...t, by: 'Sam Ortiz', note: 'Patient called back', when: '10/30/2026 9:30 AM' });
+  assert.deepEqual(REC.precheckNotes(first, '720001', saved), [{ note: 'Patient called back', by: 'Sam Ortiz', when: '10/30/2026 9:30 AM' }, { note: 'Called, left message', by: 'Jordan Lee', when: '10/30/2026 9:05 AM' }]);
+  assert.equal(REC.precheckItems(first, '720001', saved).length, 2, 'notes are not checklist items');
+  assert.throws(() => REC.addPrecheckNote(saved, { ...t, note: '   ' }), /empty/);
+  assert.throws(() => REC.addPrecheckNote(saved, { ...t, by: '', note: 'x' }), /Pick your name/);
+  assert.equal(REC.addPrecheckNote([], { ...t, note: 'x'.repeat(900) })[0].Note.length, REC.NOTE_MAX);
+  assert.deepEqual(REC.PRECHECK_COLS, ['Key', 'MRN', 'LASFIR', 'Appt Date', 'Time', 'Item', 'Done', 'Note', 'By', 'When']);
+  for (const c of REC.PRECHECK_COLS) assert.doesNotMatch(c, /first|last name|dob|birth/i);
+  assert.deepEqual(REC.adminNames(' Jordan Lee; Sam Ortiz ;;Jordan Lee\nAlex Kim'), ['Jordan Lee', 'Sam Ortiz', 'Alex Kim']);
+  assert.equal(REC.PRECHECK_CONFIG_ROWS[0].setting, 'Admin names');
+  const old = REC.setPrecheck(saved, { ...t, date: '10/01/2026', time: '9:00 AM', item: 'precheck', done: true, when: '' });
+  assert.equal(REC.prunePrecheck(old, '10/30/2026').length, 4, 'ticks and notes for past visits are dropped');
 });
 
 test('freshness: newest source time; fresh within a day, aging after, stale after 7 days', () => {
@@ -270,4 +284,12 @@ test('freshness: newest source time; fresh within a day, aging after, stale afte
   assert.equal(REC.freshness({ report: h(2), sohar: h(24 * 8) }, now).level, 'stale');
   assert.equal(REC.freshness({ report: h(2) }, now).level, 'stale', 'no Sohar results at all');
   assert.equal(REC.freshness({ report: '2026-10-30 16:00 UTC', sohar: h(3) }, now).level, 'fresh', 'the Config UTC stamp is read');
+});
+
+test('guarantor text always names the patient by LASFIR', () => {
+  const pt = { firstName: 'Ada', lastName: 'Okafor' };
+  const c = REC.guarantorCheck({ patient: pt, guarantor: pt, guarantorSelf: true }, { firstName: 'Ben', lastName: 'Okafor' });
+  assert.match(c.text, /OKAADA, the patient/);
+  assert.match(REC.guarantorCheck({ patient: pt, guarantor: pt, guarantorSelf: true }, pt).text, /match \(OKAADA, the patient\)/);
+  assert.match(REC.guarantorCheck({ patient: pt, guarantor: { firstName: 'Cy', lastName: 'Moss' } }, { firstName: 'Di', lastName: 'Park' }).text, /patient OKAADA/);
 });
