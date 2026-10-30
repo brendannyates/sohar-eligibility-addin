@@ -15,7 +15,7 @@ Hard rules:
   current gender, pronouns, guarantor) read by header, and the guarantor vs Sohar subscriber check. Profiles and checks
   reach the full-screen window as LASFIR and text only, and never go on a sheet. `Flow Results` (hidden) holds the
   Flow's CSV, which has LASFIR and MRN but no names.
-  `Pre-Check` (hidden) holds the visit checklist ticks and notes (MRN key, LASFIR, the admin's name from Config "Admin
+  `Pre-Check` (hidden) holds the visit checklist ticks and the patient notes (one list per patient, never pruned; MRN key, LASFIR, the admin's name from Config "Admin
   names"); a tick wins over the report's "Appointment Pre-Check Complete". The add-in never writes to NextGen. Config "Report uploaded" stamps each report upload for the "Last
   updated" pill.
 - The West Coast Patient Responsibility Calculator's code lives in `fees.js` (`calcEstimate`, `calcInputs`,

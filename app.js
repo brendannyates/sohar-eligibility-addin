@@ -1998,7 +1998,7 @@
       guarantor: { count: (state.guarantorCandidates || []).length, noDob: (state.guarantorCandidates || []).filter((x) => !x.hasDob).length },
       // v0.20 patient record: Sohar Flow results and the Payer Outcomes ledger (older checks, for the timeline), trimmed.
       flow: await currentFlow(), outcomes: await timelineOutcomes(), profiles: await patientProfiles(),
-      visits: await patientVisits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
+      visits: await patientVisits(), notes: await patientNotesByKey(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -2067,19 +2067,25 @@
     const saved = await currentPrecheck();
     for (const [per, vs] of REC.reportVisits(state.rows, det, pers, state.resultsAsOf || localToday())) {
       const key = keyByPer.get(per);
-      if (key) out[per] = vs.map((v) => ({ ...v, key, lasfir: tagByPer.get(per) || '', items: REC.precheckItems(v, key, saved), notes: REC.precheckNotes(v, key, saved) }));
+      if (key) out[per] = vs.map((v) => ({ ...v, key, lasfir: tagByPer.get(per) || '', items: REC.precheckItems(v, key, saved) }));
     }
     return out;
   }
+  /** Patient key (MRN) -> the patient's notes (record.patientNotes, one list per patient), for patients with a Sohar result. */
+  async function patientNotesByKey() {
+    const saved = await currentPrecheck(), out = {};
+    for (const r of state.results || []) { const k = C.keyOf(r); if (k && !out[k]) { const n = REC.patientNotes(k, saved); if (n.length) out[k] = n; } }
+    return out;
+  }
   /**
-   * One pre-check tick or note from full screen, saved in order (two quick ticks never overwrite each other). The
-   * admin's name and the patient's LASFIR go on the row; the time is the pane's.
+   * One pre-check tick (a visit) or patient note from full screen, saved in order (two quick ticks never overwrite
+   * each other). The admin's name and the patient's LASFIR go on the row; the time is the pane's.
    */
   function savePrecheck(m) {
     state.precheckQueue = (state.precheckQueue || Promise.resolve()).catch(() => {}).then(async () => {
       const t = { key: m.key, lasfir: m.lasfir, date: m.date, time: m.time, by: m.by, when: fmtStamp(new Date()) };
       const before = await currentPrecheck(true);
-      const next = m.type === 'precheck-note' ? REC.addPrecheckNote(before, { ...t, note: m.note }) : REC.setPrecheck(before, { ...t, item: m.item, done: !!m.done });
+      const next = m.type === 'precheck-note' ? REC.addPatientNote(before, { ...t, note: m.note }) : REC.setPrecheck(before, { ...t, item: m.item, done: !!m.done });
       const rows = REC.prunePrecheck(next, localToday());
       await X.writePreCheck(REC.PRECHECK_COLS, rows);
       state.precheck = rows;
