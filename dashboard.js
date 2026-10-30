@@ -20,6 +20,8 @@
   // pronouns, gender, guarantor LASFIR and checks), all from the pane.
   const REC = window.SoharRecord;
   let flow = [], outcomes = [], profiles = {};
+  // Per Nbr -> upcoming visits with the report's Pre-Check Complete and the checklist; when each source last came in.
+  let visits = {}, lastUpdated = null;
   const take = C.messageAssembler();
   // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
   const PILL_COLOR = new Map(((window.SoharRules && window.SoharRules.PILLS) || []).map((p) => [p.label, p.color]));
@@ -59,8 +61,9 @@
     rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; verFailed = m.verifyFailed || []; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
     flow = m.flow || []; outcomes = m.outcomes || []; profiles = m.profiles || {};
+    visits = m.visits || {}; lastUpdated = m.lastUpdated || null;
     fees = F && m.fees && m.fees.on ? m.fees : null;
-    renderFeeBar();
+    renderFeeBar(); renderUpdated();
     const people = REC.byPatient(rows).length;
     const gFlags = Object.values(profiles).filter((p) => (p.checks || []).some((c) => /^(high|medium)$/.test(c.severity))).length;
     $('dStatus').textContent = rows.length
@@ -92,6 +95,34 @@
   }
 
   const open = (t) => !String(t.Done || '').trim();
+
+  /** "Last updated" pill: the newest source time, colored by freshness; the title lists each source. */
+  function renderUpdated() {
+    const el = $('dUpdated');
+    const f = REC.freshness(lastUpdated || {}, new Date());
+    if (f.level === 'none') { el.hidden = true; return; }
+    const when = (t) => new Date(t).toLocaleString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+    // Not fresh: name the oldest of the report and the Sohar results, and how old it is.
+    const old = f.parts.filter((p) => p.key !== 'flow').sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity))[0];
+    const days = old && old.time != null ? Math.floor((Date.now() - old.time) / 864e5) : null;
+    const word = f.level === 'fresh' ? '' : ` · ${old.label} ${days == null ? 'never uploaded' : `${days} day${days === 1 ? '' : 's'} old`}${f.level === 'stale' ? ', upload again' : ''}`;
+    el.className = `pill upd ${{ fresh: 'p-blue', aging: 'p-amber', stale: 'p-red' }[f.level]}`;
+    el.textContent = `Last updated ${when(f.newest)}${word}`;
+    const detail = f.parts.map((p) => `${p.label}: ${p.time == null ? 'never' : when(p.time)}`).join('\n');
+    el.title = detail;
+    el.setAttribute('aria-label', `Last updated ${when(f.newest)}${word}. ${detail.replace(/\n/g, '. ')}`);
+    el.hidden = false;
+  }
+  /** The next visit's pre-check state for the lists: 'done', 'open' or '' (no report visit). */
+  function precheckOf(r) {
+    const v = (visits[String(r['Per Nbr'] || '')] || [])[0];
+    if (!v) return '';
+    const pc = v.items.find((i) => i.id === 'precheck');
+    if (pc && pc.done) return 'done';
+    // A report without the Pre-Check column says nothing: no pill until someone ticks it.
+    return v.hasPrecheck || (pc && pc.source) ? 'open' : '';
+  }
+  const precheckPill = (r) => ({ done: ' <span class="pill p-blue">Pre-check ✓</span>', open: ' <span class="pill p-amber">Pre-check open</span>' }[precheckOf(r)] || '');
   /** A red pill when the NextGen guarantor and a Sohar subscriber are different people (record.guarantorCheck, high). */
   // Amber when the patient is the guarantor but Sohar's subscriber is someone else (check the policy's insured).
   const guarFlag = (r) => {
@@ -186,7 +217,7 @@
         <table class="prep"><tbody>${day.map((r) => {
           const n = byPer.get(keyOf(r) || `ref:${r['Sohar Ref']}`) || 0;
           return `<tr class="q-${queueClass(r['Work Queue'])}" data-key="${esc(keyOf(r) + '|' + r['Sohar Ref'])}" tabindex="0">
-            ${cell(r['Next Time'])}<td><b>${esc(name(r))}</b><br><span class="hint">${esc(idText(r))}${esc(moreText(gOf.get(r)))}${r['Searched As'] && r['Searched As'] !== 'Patient' ? ` · searched as ${esc(r['Searched As'].toLowerCase())}` : ''}</span>${pillsOf(r).length || guarFlag(r) ? `<div class="pills">${pillsHtml(r)}${guarFlag(r)}</div>` : ''}</td>
+            ${cell(r['Next Time'])}<td><b>${esc(name(r))}</b><br><span class="hint">${esc(idText(r))}${esc(moreText(gOf.get(r)))}${r['Searched As'] && r['Searched As'] !== 'Patient' ? ` · searched as ${esc(r['Searched As'].toLowerCase())}` : ''}</span>${pillsOf(r).length || guarFlag(r) || precheckPill(r) ? `<div class="pills">${pillsHtml(r)}${guarFlag(r)}${precheckPill(r)}</div>` : ''}</td>
             <td>${esc(r['Next Event'])}<br><span class="hint">${esc([r['Next Location'], r['Next Provider']].filter(Boolean).join(' · '))}</span></td>
             <td><span class="pill ${r['Sent As'] === 'Discovery' ? 'd' : 'v'}">${esc(r['Sent As'])}</span><br><span class="hint">${esc(r['Sohar Status'])}</span></td>
             <td>${esc(r['Benefit Flag'] || (r['Sent As'] === 'Verification' ? '' : ''))}${r.Copay !== '' && r.Copay != null ? `<br><span class="hint">Copay ${esc(r.Copay)}${r.Coinsurance ? ` · ${esc(r.Coinsurance)}` : ''}</span>` : ''}</td>
@@ -203,7 +234,7 @@
     $('shown').textContent = `Showing ${list.length} of ${REC.byPatient(rows).length} patients (${rows.length} Sohar results; the most recent result stands for each patient)`;
     const st = (s) => ({ Met: 'met', Approaching: 'appr' }[s] || '');
     $('tbl').querySelector('tbody').innerHTML = list.map((r) => `<tr class="q-${queueClass(r['Work Queue'])}" data-key="${esc(keyOf(r) + '|' + r['Sohar Ref'])}" tabindex="0">
-      ${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r['Next Location'])}${cell(name(r))}${cell(idText(r))}<td class="pillc">${pillsHtml(r)}${guarFlag(r)}</td>${cell(r['Sent As'] + moreText(gOf.get(r)))}
+      ${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r['Next Location'])}${cell(name(r))}${cell(idText(r))}<td class="pillc">${pillsHtml(r)}${guarFlag(r)}${precheckPill(r)}</td>${cell(r['Sent As'] + moreText(gOf.get(r)))}
       ${cell(r['Sohar Status'])}${cell(r['Work Queue'])}${cell(r.Action, 'wide')}${cell(r['Choose in NextGen'], 'mid')}
       ${cell(r['Benefit Flag'])}${cell(r.Copay)}${cell(r.Coinsurance)}
       ${cell(left(r['Deductible Remaining'], r.Deductible), st(r['Deductible Status']))}${cell(left(r['OOP Remaining'], r['OOP Max']), st(r['OOP Status']))}
@@ -255,7 +286,7 @@
             ['Coverage', [r['Coverage Start'], r['Coverage End']].some(Boolean) ? `${r['Coverage Start'] || '?'} to ${r['Coverage End'] || 'open'}` : ''], ['Member ID', r['Sohar Member ID'] || r['NextGen Member ID']],
             ['Searched as', r['Searched As'] && r['Searched As'] !== 'Patient' ? r['Searched As'] : ''], ['Match', r.Match], ['Sohar', link(r['Sohar Link']), true]])}
           ${pillsOf(r).length ? `<div class="pills">${pillsHtml(r)}</div>` : ''}</div>
-        <div class="dgroup"><h3>Upcoming visits</h3>${rec && rec.upcoming.length ? `<ul class="visits">${rec.upcoming.map((v) => `<li>${esc(v)}</li>`).join('')}</ul>` : '<p class="hint">None scheduled</p>'}
+        <div class="dgroup" id="visitBox"><h3>Upcoming visits and pre-check</h3>${visitsHtml(r, rec)}
           ${r['Next Provider'] ? `<p class="hint">Next with ${esc(r['Next Provider'])}</p>` : ''}</div>
         <div class="dgroup"><h3>Financial progress</h3>${financialHtml(rec && rec.financial, r)}</div>
       </div>
@@ -274,6 +305,36 @@
   }
   // the detail card floats over the dashboard; everything behind it is blurred
   function hideDetail() { $('detail').hidden = true; estOver = null; detailKey = ''; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
+
+  /**
+   * Upcoming visits from the report, each with the NextGen Pre-Check Complete value and the checklist staff tick here
+   * (saved on the hidden Pre-Check sheet). Without report visits: the visit summary from the Sohar result.
+   */
+  function visitsHtml(r, rec) {
+    const vs = visits[String(r['Per Nbr'] || '')] || [];
+    if (!vs.length) return rec && rec.upcoming.length ? `<ul class="visits">${rec.upcoming.map((v) => `<li>${esc(v)}</li>`).join('')}</ul>` : '<p class="hint">None scheduled</p>';
+    return `<ul class="visits pc">${vs.map((v, i) => `<li>
+      <b>${esc([v.date, v.time].filter(Boolean).join(' '))}</b> ${esc([v.event, v.loc].filter(Boolean).join(' · '))}${v.provider ? ` <span class="hint">${esc(v.provider)}</span>` : ''}
+      <br><span class="hint">NextGen pre-check: ${esc(v.precheck || 'not on the report')}</span>
+      <div class="pcheck">${v.items.map((it) => `<label class="inline"><input type="checkbox" data-pc="${i}" data-pc-item="${esc(it.id)}"${it.done ? ' checked' : ''}> ${esc(it.label)}
+        <span class="hint" data-pc-note="${i}|${esc(it.id)}">${esc(pcNote(it))}</span></label>`).join('')}</div></li>`).join('')}</ul>
+      <p class="hint">Ticks are saved in this workbook. The add-in does not change NextGen: "Updated in NextGen" means you made the change there.</p>`;
+  }
+  const pcNote = (it) => (it.source === 'NextGen report' ? '(from the report)' : it.source === 'Marked here' && it.when ? `(${it.when})` : '');
+  $('detail').addEventListener('change', (e) => {
+    const c = e.target.closest('input[data-pc]');
+    if (!c || !detailKey) return;
+    const r = rows.find((x) => keyOf(x) === detailKey) || rows.find((x) => `ref:${x['Sohar Ref']}` === detailKey);
+    const v = r && (visits[String(r['Per Nbr'] || '')] || [])[+c.dataset.pc];
+    const it = v && v.items.find((x) => x.id === c.dataset.pcItem);
+    if (!it) return;
+    const now = new Date();
+    Object.assign(it, { done: c.checked, source: 'Marked here', when: `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}` });
+    const note = $('detail').querySelector(`[data-pc-note="${c.dataset.pc}|${it.id}"]`);
+    if (note) note.textContent = pcNote(it);
+    toPane({ type: 'precheck', key: v.key, date: v.date, time: v.time, item: it.id, done: c.checked });
+    renderPrep(); renderWorklist(); // the list pills follow
+  });
 
   /** Sohar Flow cost estimates, one card per visit (soonest first). Sandbox files say so. */
   function flowHtml(list) {
@@ -738,7 +799,17 @@
       fl({ Key: 'd2', 'Appt Date': '10/27/2026', Time: '9:00 AM', Event: 'Med Management In-Office', 'Rate Level': 'NP', 'Est Codes': '99214', 'Sohar Est Patient': '71.11', 'Sohar Est Plan Pays': '100.00' })];
     const demoProfiles = { 100100: { pronouns: 'They, Them, Theirs', genderIdentity: '', currentGender: 'Female', guarantor: 'Patient', checks: [
       { sentAs: 'Verification', payer: 'UMR', date: '2026-10-18', ...REC.guarantorCheck({ patient: { firstName: 'Ana', lastName: 'Rivera' }, guarantor: { firstName: 'Ana', lastName: 'Rivera' }, guarantorSelf: true }, { firstName: 'Luis', lastName: 'Rivera' }) }] } };
-    const demoPills ={ 100100: 'NP-TMS', 100101: 'Medi-Cal; New Medi-Cal; Re-verify', 100102: 'Kaiser/VA MM no auth; Kaiser/VA MM', 100103: 'QMB' };
+    // Report visits with Pre-Check Complete (made up): Rivera's first visit done in NextGen, Lindqvist's not.
+    const dv = (key, date, time, event, loc, pc, ticks) => {
+      const v = { date, time, event, loc, provider: '', status: '', precheck: pc, hasPrecheck: true, key };
+      return { ...v, items: REC.precheckItems(v, key, ticks || []) };
+    };
+    const demoVisits = {
+      100100: [dv('80100', '10/20/2026', '9:00 AM', 'TMS Treatment Unilateral', 'San Rafael', 'Yes', [{ Key: '80100|10/20/2026|9:00 AM', Item: 'nextgen', Done: 'Yes', When: '10/19/2026 4:10 PM' }]),
+        dv('80100', '10/27/2026', '9:00 AM', 'Med Management In-Office', 'San Rafael', '')],
+      100102: [dv('PER-100102', '10/22/2026', '10:00 AM', 'Med Management In-Office', 'Walnut Creek', 'No')],
+    };
+    const demoPills = { 100100: 'NP-TMS', 100101: 'Medi-Cal; New Medi-Cal; Re-verify', 100102: 'Kaiser/VA MM no auth; Kaiser/VA MM', 100103: 'QMB' };
     for (const r of res) r.Pills = demoPills[r['Per Nbr']] || '';
     // ?fees=1: fee estimates with the made-up demo fee schedule (fees.js), as the pane would send them.
     let demoFees = null;
@@ -768,7 +839,8 @@
     const demoTasks = C.buildTasks(res).map((t, i) => (i === 0 ? { ...t, Done: `Yes (clinic ${t['Next Location']})`, 'Clinic Note': `Called the patient, new card scanned (Front desk, ${t['Next Location']}, 10/19)` } : t));
     load({ results: res, tasks: demoTasks, exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees,
       clinic: demoClinic, skipped: demoSkipped, skipCols: ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'], learning: demoLearning, guarantor: { count: 2, noDob: 1 },
-      flow: demoFlow, outcomes: demoOutcomes, profiles: demoProfiles });
+      flow: demoFlow, outcomes: demoOutcomes, profiles: demoProfiles, visits: demoVisits,
+      lastUpdated: { report: new Date(Date.now() - 2 * 36e5).toISOString(), sohar: new Date(Date.now() - 3 * 864e5).toISOString(), flow: new Date().toISOString() } });
     // #patient opens the first demo patient's record (for checking the layout); other hashes pick a tab.
     if (location.hash === '#patient') showDetail(`${keyOf(res[0])}|${res[0]['Sohar Ref']}`);
     else if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));

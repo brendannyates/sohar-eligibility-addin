@@ -117,6 +117,7 @@
     await refreshRules();
     await loadInbox(); // after the tasks are built: its count is a dry run of the merge against them
     const last = saved.map((s) => String(s.Uploaded || '')).sort().pop();
+    state.lastSohar = last || ''; // the "Last updated" pill in full screen
     await stampUpdated(`${did}${last ? `. Last Sohar upload ${fmtStamp(new Date(last))}` : ''}`);
   }
 
@@ -283,6 +284,9 @@
     try {
       if (isCSV(file)) await X.writeImportRows(C.parseCSV(await readText(file)));
       else await X.importXlsx(await readBase64(file));
+      // v0.20: when the report came in, for the "Last updated" pill in full screen.
+      state.reportUploaded = utcStamp(new Date());
+      if (!state.demo) await X.setConfigValue('Report uploaded', state.reportUploaded).catch((e) => console.warn('Report uploaded not stamped', e));
       await lockNames();
       await refreshAll();
     } finally { dropBusy('dropReport'); }
@@ -1476,6 +1480,7 @@
     if (list.length) {
       step(`${acc.added} new result${acc.added === 1 ? '' : 's'}${acc.replaced ? `, ${acc.replaced} replaced` : ''}; ${acc.saved.length} saved in this workbook.`);
       await X.writeUploads(C.UPLOAD_COLS, cr.saved); // saved even when the report is missing: it matches once it is back
+      state.lastSohar = new Date().toISOString();
     }
     if (res.error) throw new Error(res.error);
     const learnedRefs = cr.refs;
@@ -1966,6 +1971,7 @@
       guarantor: { count: (state.guarantorCandidates || []).length, noDob: (state.guarantorCandidates || []).filter((x) => !x.hasDob).length },
       // v0.20 patient record: Sohar Flow results and the Payer Outcomes ledger (older checks, for the timeline), trimmed.
       flow: await currentFlow(), outcomes: await timelineOutcomes(), profiles: await patientProfiles(),
+      visits: await patientVisits(), lastUpdated: await lastUpdatedStamps(),
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -2005,6 +2011,48 @@
     }
     state.profileCache = { results: state.results, rows: state.rows, out };
     return out;
+  }
+  /** Today as MM/DD/YYYY in local time (an evening in the US is still today, not tomorrow's UTC date). */
+  const localToday = () => { const d = new Date(); return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`; };
+  /** Saved pre-check ticks (hidden Pre-Check sheet), read once per pane session. fresh: read again, errors throw. */
+  async function currentPrecheck(fresh) {
+    if (state.demo) return state.precheck || [];
+    if (fresh) return (state.precheck = await X.readPreCheck());
+    if (!state.precheck) state.precheck = await X.readPreCheck().catch((e) => { console.error(e); return null; });
+    return state.precheck || [];
+  }
+  /**
+   * Per Nbr -> upcoming visits on the report (from the as-of date, else today) with the report's Pre-Check Complete
+   * and the checklist (record.precheckItems). Patients with a Sohar result only.
+   */
+  async function patientVisits() {
+    const out = {};
+    const det = state.detection || (state.rows && C.detectHeader(state.rows));
+    if (!det || !state.rows || !state.results) return out;
+    const keyByPer = new Map();
+    for (const r of [...(state.patients || []), ...state.results]) { const per = String(r['Per Nbr'] || ''); if (per && !keyByPer.has(per) && C.keyOf(r)) keyByPer.set(per, C.keyOf(r)); }
+    const pers = new Set(state.results.map((r) => String(r['Per Nbr'] || '')).filter(Boolean));
+    const saved = await currentPrecheck();
+    for (const [per, vs] of REC.reportVisits(state.rows, det, pers, state.resultsAsOf || localToday())) {
+      const key = keyByPer.get(per);
+      if (key) out[per] = vs.map((v) => ({ ...v, key, items: REC.precheckItems(v, key, saved) }));
+    }
+    return out;
+  }
+  /** One pre-check tick from full screen, saved in order (two quick ticks never overwrite each other). */
+  function savePrecheck(m) {
+    state.precheckQueue = (state.precheckQueue || Promise.resolve()).catch(() => {}).then(async () => {
+      const rows = REC.prunePrecheck(REC.setPrecheck(await currentPrecheck(true), { key: m.key, date: m.date, time: m.time, item: m.item, done: !!m.done, when: fmtStamp(new Date()) }), localToday());
+      await X.writePreCheck(REC.PRECHECK_COLS, rows);
+      state.precheck = rows;
+    });
+    return state.precheckQueue;
+  }
+  /** When each source was last brought in, for the full-screen "Last updated" pill. */
+  async function lastUpdatedStamps() {
+    const flowRows = await currentFlow();
+    const flowLast = flowRows.map((r) => String(r['Last Updated'] || r.Uploaded || '')).filter(Boolean).sort().pop() || '';
+    return { report: state.reportUploaded || (state.cfg && state.cfg.reportUploaded) || '', sohar: state.lastSohar || '', flow: flowLast };
   }
   async function sendToDialog(obj) {
     if (!dlg) return;
@@ -2056,6 +2104,8 @@
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
+    } else if (m.type === 'precheck') {
+      try { await savePrecheck(m); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Pre-check not saved: ${e.message}` }); throw e; }
     } else if (m.type === 'fee-upload' && feesOn()) {
       // Fee schedule picked on the full-screen Benefits tab: it arrives as base64 and is read here (pure JS, no Excel sheets).
       try {
@@ -2389,6 +2439,7 @@
       async readPayerCredRules() { return credRules; }, async writePayerCredRules(c, r) { credRules = r; return r.length; },
       async readFee(kind) { return feeStore[kind] || []; }, async writeFee(kind, c, r) { feeStore[kind] = r; return r.length; },
       async readFlowResults() { return state.flow || []; }, async writeFlowResults(c, r) { state.flow = r; return r.length; },
+      async readPreCheck() { return state.precheck || []; }, async writePreCheck(c, r) { state.precheck = r; return r.length; },
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
       async writeImportRows(r) { rows = r; },

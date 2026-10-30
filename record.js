@@ -273,6 +273,96 @@
     return firstName || lastName ? { firstName, lastName, dob: str(rec.subscriberdateofbirth) } : null;
   }
 
+  // ---------- visit pre-check (v0.20) ----------
+  // The report's "Appointment Pre-Check Complete" (Yes / No / blank) per visit, plus a checklist staff tick in full
+  // screen. Ticks are saved on the hidden Pre-Check sheet (PRECHECK_COLS, MRN key, no names); a tick wins over the
+  // report's value. The add-in never writes to NextGen: "Updated in NextGen" is the person saying they did it.
+  const PRECHECK_HEADERS = ['Appointment Pre-Check Complete', 'Pre-Check Complete', 'Precheck Complete', 'Pre-Check', 'Precheck'];
+  const PRECHECK_ITEMS = [
+    { id: 'precheck', label: 'Pre-check complete' },
+    { id: 'nextgen', label: 'Updated in NextGen' },
+    { id: 'estimate', label: 'Cost estimate shared with patient' },
+  ];
+  const PRECHECK_COLS = ['Key', 'MRN', 'Appt Date', 'Time', 'Item', 'Done', 'When'];
+  const yes = (v) => /^(y|yes|true|1|x|complete|completed|done)$/i.test(str(v));
+  const no = (v) => /^(n|no|false|0)$/i.test(str(v));
+  /** One visit's key: patient key (MRN) | appointment date | time. */
+  const visitKey = (key, date, time) => `${str(key)}|${str(date)}|${str(time)}`;
+  /**
+   * Per Nbr -> visits on the report from `from` (a day; all when null), soonest first:
+   * [{date, time, event, loc, provider, status, precheck: 'Yes' | 'No' | '', hasPrecheck}]. Read by header name; hasPrecheck is
+   * false when the report has no Pre-Check column.
+   */
+  function reportVisits(rows, det, pers, from) {
+    const out = new Map();
+    if (!det || !rows) return out;
+    const hdr = (rows[det.headerRow] || []).map(norm);
+    const pc = PRECHECK_HEADERS.map(norm).map((h) => hdr.indexOf(h)).find((i) => i >= 0);
+    const cm = det.colMap || {};
+    const t0 = from ? C.parseDate(from instanceof Date ? from : String(from)) : null;
+    for (let r = det.headerRow + 1; r < (det.dataEnd || rows.length); r++) {
+      const row = rows[r] || [];
+      const per = str(row[cm.perNbr]);
+      if (!per || (pers && !pers.has(per))) continue;
+      const d = C.parseDate(row[cm.apptDt]);
+      if (!d || (t0 && d < t0)) continue;
+      const raw = pc == null ? '' : row[pc];
+      const v = { date: C.fmtDate(d), time: cm.begTm != null ? C.fmtTime(row[cm.begTm]) : '', event: str(row[cm.event]), loc: str(row[cm.loc]),
+        provider: str(row[cm.rendering]), status: str(row[cm.sts]), precheck: yes(raw) ? 'Yes' : no(raw) ? 'No' : '', hasPrecheck: pc != null };
+      if (!out.has(per)) out.set(per, []);
+      out.get(per).push(v);
+    }
+    for (const list of out.values()) list.sort((a, b) => (C.parseDate(a.date) - C.parseDate(b.date)) || (C.timeMins(a.time) - C.timeMins(b.time)));
+    return out;
+  }
+  /**
+   * The checklist for one visit: [{id, label, done, source, when}]. A saved tick wins; with none, "Pre-check complete"
+   * follows the report (source 'NextGen report'). saved: Pre-Check sheet rows.
+   */
+  function precheckItems(visit, key, saved) {
+    const vk = visitKey(key, visit.date, visit.time);
+    const mine = new Map((saved || []).filter((r) => str(r.Key) === vk).map((r) => [str(r.Item), r]));
+    return PRECHECK_ITEMS.map((it) => {
+      const s = mine.get(it.id);
+      if (s) return { ...it, done: yes(s.Done), source: 'Marked here', when: str(s.When) };
+      if (it.id === 'precheck' && visit.precheck) return { ...it, done: visit.precheck === 'Yes', source: 'NextGen report', when: '' };
+      return { ...it, done: false, source: '', when: '' };
+    });
+  }
+  /** Save one tick: replaces the visit's row for that item. Returns the new rows (PRECHECK_COLS). */
+  function setPrecheck(saved, t) {
+    if (!PRECHECK_ITEMS.some((i) => i.id === t.item)) throw new Error(`Unknown pre-check item "${t.item}".`);
+    const vk = visitKey(t.key, t.date, t.time);
+    const rows = (saved || []).filter((r) => !(str(r.Key) === vk && str(r.Item) === t.item));
+    rows.push({ Key: vk, MRN: str(t.key), 'Appt Date': str(t.date), Time: str(t.time), Item: t.item, Done: t.done ? 'Yes' : 'No', When: str(t.when) });
+    return rows;
+  }
+  /** Drop ticks for visits before `from` (a day), so the sheet does not grow forever. */
+  function prunePrecheck(saved, from) {
+    const t0 = from ? C.parseDate(from instanceof Date ? from : String(from)) : null;
+    if (!t0) return saved || [];
+    return (saved || []).filter((r) => { const d = C.parseDate(r['Appt Date']); return !d || d >= t0; });
+  }
+
+  // ---------- last updated (v0.20) ----------
+  /**
+   * The "Last updated" pill: each source's time, the newest overall, and how fresh the data is.
+   * stamps: {report, sohar, flow} (ISO or readable dates; blank = never). Fresh when the report and the Sohar results
+   * are both from the last day; stale after `staleDays` (default 7) for either; aging between.
+   */
+  function freshness(stamps, now, staleDays) {
+    const t = (v) => { const n = C.soharTime(v); return isNaN(n) ? null : n; };
+    const n = now ? now.getTime() : Date.now(), day = 86400000, limit = (staleDays == null ? 7 : staleDays) * day;
+    const parts = [['report', 'NextGen report'], ['sohar', 'Sohar results'], ['flow', 'Sohar Flow']].map(([k, label]) => ({ key: k, label, time: t(stamps && stamps[k]) }));
+    const known = parts.filter((p) => p.time != null);
+    const newest = known.length ? Math.max(...known.map((p) => p.time)) : null;
+    const core = parts.filter((p) => p.key !== 'flow');
+    const ages = core.map((p) => (p.time == null ? Infinity : n - p.time));
+    const level = !known.length ? 'none' : ages.some((a) => a > limit) ? 'stale' : ages.every((a) => a <= day) ? 'fresh' : 'aging';
+    return { parts, newest, level };
+  }
+
   return { FLOW_COLS, FLOW_SHEET_COLS, isFlowFile, flowRecords, mergeFlow, flowFor, flowAmount, isSandbox, patientRecord, byPatient, upcomingOf, leadOf,
-    PROFILE_HEADERS, profiles, samePerson, guarantorCheck, subscriberOf };
+    PROFILE_HEADERS, profiles, samePerson, guarantorCheck, subscriberOf,
+    PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, visitKey, reportVisits, precheckItems, setPrecheck, prunePrecheck, freshness };
 });

@@ -228,3 +228,46 @@ test('calcInputs pre-fills the calculator from Sohar; calcPatient prices MD and 
   assert.match(F.calcPatient(ctx, tables, inp, [{ code: '90999', units: 1 }]).md.none, /No MD rate/);
   assert.deepEqual(F.calcInputs({ ...ctx, benefits: { inn: {}, oon: {} } }, {}).missing, ['Deductible', 'OOP max', 'Coinsurance']);
 });
+
+// ---------- visit pre-check and last updated ----------
+test('reportVisits reads Appointment Pre-Check Complete by header; precheckItems lets a tick win over the report', () => {
+  const hdr = ['Per Nbr', 'Appt Date', 'Beg Tm', 'Event', 'Loc Name', 'Appointment Pre-Check Complete', 'MRN', 'Payer Name (Cht Guar)'];
+  const rows = [hdr, ['9201', '10/01/2026', '9:00 AM', 'Old visit', 'Harbor Point', 'Yes', '720001', 'Acme'],
+    ['9201', '11/06/2026', '1:30 PM', 'Follow-up', 'Harbor Point', '', '720001', 'Acme'],
+    ['9201', '11/05/2026', '9:00 AM', 'Follow-up', 'Harbor Point', 'Yes', '720001', 'Acme'],
+    ['9202', '11/05/2026', '10:00 AM', 'Intake', 'Mill Street', 'No', '720002', 'Acme']];
+  const det = C.detectHeader(rows);
+  const v = REC.reportVisits(rows, det, null, '10/30/2026');
+  assert.deepEqual(v.get('9201').map((x) => `${x.date} ${x.time} ${x.precheck}`), ['11/05/2026 9:00 AM Yes', '11/06/2026 1:30 PM '], 'from the as-of day, soonest first');
+  assert.equal(v.get('9202')[0].precheck, 'No');
+  assert.equal(v.get('9202')[0].hasPrecheck, true);
+  const noCol = REC.reportVisits([hdr.slice(0, 5), ['9203', '11/05/2026', '9:00 AM', 'Intake', 'Mill Street']], C.detectHeader([hdr.slice(0, 5), ['9203', '11/05/2026', '9:00 AM', 'Intake', 'Mill Street']]), null, null);
+  assert.equal(noCol.get('9203')[0].hasPrecheck, false);
+  const first = v.get('9201')[0];
+  let items = REC.precheckItems(first, '720001', []);
+  assert.deepEqual(items.map((i) => [i.id, i.done, i.source]), [['precheck', true, 'NextGen report'], ['nextgen', false, ''], ['estimate', false, '']]);
+  let saved = REC.setPrecheck([], { key: '720001', date: first.date, time: first.time, item: 'precheck', done: false, when: '10/30/2026 9:00 AM' });
+  saved = REC.setPrecheck(saved, { key: '720001', date: first.date, time: first.time, item: 'nextgen', done: true, when: '10/30/2026 9:01 AM' });
+  saved = REC.setPrecheck(saved, { key: '720001', date: first.date, time: first.time, item: 'nextgen', done: true, when: '10/30/2026 9:02 AM' });
+  assert.equal(saved.length, 2, 'one row per visit and item');
+  items = REC.precheckItems(first, '720001', saved);
+  assert.deepEqual(items.map((i) => [i.id, i.done, i.source]), [['precheck', false, 'Marked here'], ['nextgen', true, 'Marked here'], ['estimate', false, '']]);
+  assert.equal(items[1].when, '10/30/2026 9:02 AM');
+  assert.throws(() => REC.setPrecheck([], { key: 'x', item: 'nope' }), /Unknown pre-check item/);
+  for (const c of REC.PRECHECK_COLS) assert.doesNotMatch(c, /name|dob|birth/i);
+  const old = REC.setPrecheck(saved, { key: '720001', date: '10/01/2026', time: '9:00 AM', item: 'precheck', done: true, when: '' });
+  assert.equal(REC.prunePrecheck(old, '10/30/2026').length, 2, 'ticks for past visits are dropped');
+});
+
+test('freshness: newest source time; fresh within a day, aging after, stale after 7 days', () => {
+  const now = new Date('2026-10-30T18:00:00Z');
+  const h = (n) => new Date(now.getTime() - n * 36e5).toISOString();
+  assert.equal(REC.freshness({}, now).level, 'none');
+  const f = REC.freshness({ report: h(2), sohar: h(5), flow: h(1) }, now);
+  assert.equal(f.level, 'fresh');
+  assert.equal(f.newest, Date.parse(h(1)));
+  assert.equal(REC.freshness({ report: h(2), sohar: h(50) }, now).level, 'aging');
+  assert.equal(REC.freshness({ report: h(2), sohar: h(24 * 8) }, now).level, 'stale');
+  assert.equal(REC.freshness({ report: h(2) }, now).level, 'stale', 'no Sohar results at all');
+  assert.equal(REC.freshness({ report: '2026-10-30 16:00 UTC', sohar: h(3) }, now).level, 'fresh', 'the Config UTC stamp is read');
+});

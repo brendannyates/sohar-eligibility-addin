@@ -15,6 +15,9 @@ Hard rules:
   current gender, pronouns, guarantor) read by header, and the guarantor vs Sohar subscriber check. Profiles and checks
   reach the full-screen window as LASFIR and text only, and never go on a sheet. `Flow Results` (hidden) holds the
   Flow's CSV, which has LASFIR and MRN but no names.
+  `Pre-Check` (hidden) holds the visit checklist ticks (MRN key); a tick wins over the report's "Appointment Pre-Check
+  Complete". The add-in never writes to NextGen. Config "Report uploaded" stamps each report upload for the "Last
+  updated" pill.
 - The West Coast Patient Responsibility Calculator's code lives in `fees.js` (`calcEstimate`, `calcInputs`,
   `calcPatient`), but its built-in rates never go in this repo: staff drop the calculator .html once, and
   `parseCalculatorHtml` + `mergeSchedules` put the rates on the hidden fee sheets (a saved rate is never changed).
