@@ -288,10 +288,10 @@
             ['Coverage', [r['Coverage Start'], r['Coverage End']].some(Boolean) ? `${r['Coverage Start'] || '?'} to ${r['Coverage End'] || 'open'}` : ''], ['Member ID', r['Sohar Member ID'] || r['NextGen Member ID']],
             ['Searched as', r['Searched As'] && r['Searched As'] !== 'Patient' ? r['Searched As'] : ''], ['Match', r.Match], ['Sohar', link(r['Sohar Link']), true]])}
           ${pillsOf(r).length ? `<div class="pills">${pillsHtml(r)}</div>` : ''}</div>
-        <div class="dgroup" id="visitBox"><h3>Upcoming visits and pre-check</h3>${visitsHtml(r, rec)}
-          ${r['Next Provider'] ? `<p class="hint">Next with ${esc(r['Next Provider'])}</p>` : ''}</div>
         <div class="dgroup"><h3>Financial progress</h3>${financialHtml(rec && rec.financial, r)}</div>
       </div>
+      <div class="dgroup visitsec" id="visitBox"><h3>Upcoming visits and pre-check</h3>${visitsHtml(r, rec)}
+        ${r['Next Provider'] ? `<p class="hint">Next with ${esc(r['Next Provider'])}</p>` : ''}</div>
       <div class="dgrid">
         ${rec ? notesHtml(k) : ''}
         ${guarantorHtml(prof)}
