@@ -369,6 +369,43 @@
     return (saved || []).filter((r) => { const d = C.parseDate(r['Appt Date']); return !d || d >= t0; });
   }
 
+  // ---------- Sohar Flow import (v0.21) ----------
+  // The CSV template Sohar gives for the "MHS Eligibility - Discovery vs NextGen" Flow, exactly, in order. One row per
+  // patient. The Flow's rateTable is an object and has no CSV column, so Flow runs from this file get discovery, the
+  // NextGen policy check and network status, but no cost estimate.
+  const FLOW_IMPORT_COLS = ['id', 'patient.firstName', 'patient.lastName', 'patient.dateOfBirth', 'patient.state', 'placeOfServiceCode',
+    'specialtyCode', 'chartPayerId', 'chartMemberId', 'tin', 'providerGroupName'];
+  const FLOW_IMPORT_CONFIG_ROWS = [
+    { setting: 'TIN', value: '', what: 'Sohar Flow import: the practice tax ID (tin column). Blank: left blank on every row.' },
+    { setting: 'Sohar provider group', value: '', what: 'Sohar Flow import: the provider group name the Flow checks network status for (providerGroupName). Blank: the overall network status.' },
+  ];
+  /**
+   * Flow import rows from the built patients (core.buildPatients after the re-verify skip). In scope only. chartPayerId
+   * and chartMemberId are the NextGen policy the Flow checks discovery against: filled only for patients routed to
+   * verification (a confident payer), from their first insurance; discovery patients get blanks, so a guessed payer is
+   * never verified as the chart policy. Left out: every insurance verified eligible inside the skip window (no repeat
+   * Sohar calls), and rows the Flow would reject (no name, DOB or state).
+   * Returns {rows, skipped: [{key, why}]}.
+   */
+  function flowImportRows(patients, cfg) {
+    const c = cfg || {};
+    const rows = [], skipped = [];
+    for (const p of patients || []) {
+      if (p['In Scope'] !== 'Yes') continue;
+      const key = C.keyOf(p);
+      const vrs = (p.x && p.x.verifyRows) || [];
+      if (p.Route === 'verification' && vrs.length && vrs.every((v) => v.reverifySkip)) { skipped.push({ key, why: 'verified eligible recently (skip window)' }); continue; }
+      if (!str(p['First Name']) || !str(p['Last Name']) || !str(p.DOB) || !str(p.State)) { skipped.push({ key, why: 'no name, DOB or state' }); continue; }
+      const v = p.Route === 'verification' ? (vrs.find((x) => !x.reverifySkip) || { payerId: p['Sohar payerId'], memberId: p['Member ID'] }) : null;
+      rows.push({ id: key, 'patient.firstName': str(p['First Name']), 'patient.lastName': str(p['Last Name']), 'patient.dateOfBirth': str(p.DOB),
+        'patient.state': str(p.State), placeOfServiceCode: str(p.POS), specialtyCode: str(c.specialty) || 'PSY',
+        chartPayerId: v ? str(v.payerId) : '', chartMemberId: v ? str(v.memberId) : '', tin: str(c.tin), providerGroupName: str(c.providerGroup) });
+    }
+    return { rows, skipped };
+  }
+  /** "Sohar Ready Import - Flow 2026-10-30.csv" (local date), like the other import files. */
+  const flowImportFileName = (d) => `Sohar Ready Import - Flow ${C.localDate(d)}.csv`;
+
   // ---------- last updated (v0.20) ----------
   /**
    * The "Last updated" pill: each source's time, the newest overall, and how fresh the data is.
@@ -390,5 +427,5 @@
   return { FLOW_COLS, FLOW_SHEET_COLS, isFlowFile, flowRecords, mergeFlow, flowFor, flowAmount, isSandbox, patientRecord, byPatient, upcomingOf, leadOf,
     PROFILE_HEADERS, profiles, samePerson, guarantorCheck, subscriberOf,
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, precheckNotes, setPrecheck,
-    addPrecheckNote, prunePrecheck, freshness };
+    addPrecheckNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName };
 });

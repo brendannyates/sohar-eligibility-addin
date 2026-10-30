@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.20.0">
+  <link rel="stylesheet" href="style.css?v=0.21.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -98,6 +98,10 @@
           <div class="savebtns">
             <button class="primary filebtn" id="btnDlVer" disabled><span>Verification file</span><span class="fname" id="fnVer"></span></button>
             <button class="primary filebtn alt" id="btnDlDisc" disabled><span>Discovery file</span><span class="fname" id="fnDisc"></span></button>
+          </div>
+          <div class="extrafile">
+            <button class="primary filebtn alt" id="btnDlFlow" disabled><span>Sohar Flow file (Discovery vs NextGen)</span><span class="fname" id="fnFlow"></span></button>
+            <p class="hint">For the MHS Eligibility - Discovery vs NextGen Flow in Sohar, in its CSV template: one row per patient, discovery checked against the NextGen policy. Use it instead of the two files above, not with them. Cost estimates do not run from a CSV (the Flow's rate table has no CSV column). Config <b>TIN</b> and <b>Sohar provider group</b> fill their columns.</p>
           </div>
           <div id="mapFile" class="extrafile" hidden>
             <button class="primary filebtn alt" id="btnDlMap" disabled><span>Payer mapping discovery</span><span class="fname" id="fnMap"></span></button>
@@ -249,14 +253,14 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.20.0"></script>
-  <script src="core.js?v=0.20.0"></script>
-  <script src="rules.js?v=0.20.0"></script>
-  <script src="fees.js?v=0.20.0"></script>
-  <script src="record.js?v=0.20.0"></script>
-  <script src="xlsx.js?v=0.20.0"></script>
-  <script src="payer-knowledge.js?v=0.20.0"></script>
-  <script src="excel.js?v=0.20.0"></script>
-  <script src="app.js?v=0.20.0"></script>
+  <script src="payer-rules.js?v=0.21.0"></script>
+  <script src="core.js?v=0.21.0"></script>
+  <script src="rules.js?v=0.21.0"></script>
+  <script src="fees.js?v=0.21.0"></script>
+  <script src="record.js?v=0.21.0"></script>
+  <script src="xlsx.js?v=0.21.0"></script>
+  <script src="payer-knowledge.js?v=0.21.0"></script>
+  <script src="excel.js?v=0.21.0"></script>
+  <script src="app.js?v=0.21.0"></script>
 </body>
 </html>

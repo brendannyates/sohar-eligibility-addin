@@ -293,3 +293,34 @@ test('guarantor text always names the patient by LASFIR', () => {
   assert.match(REC.guarantorCheck({ patient: pt, guarantor: pt, guarantorSelf: true }, pt).text, /match \(OKAADA, the patient\)/);
   assert.match(REC.guarantorCheck({ patient: pt, guarantor: { firstName: 'Cy', lastName: 'Moss' } }, { firstName: 'Di', lastName: 'Park' }).text, /patient OKAADA/);
 });
+
+// ---------- Sohar Flow import (v0.21) ----------
+test('Flow import: the header is Sohar\'s "MHS Eligibility - Discovery vs NextGen" CSV template, exactly', () => {
+  // Copied from the template Sohar gives for the Flow (10/30): never rename or reorder.
+  const template = 'id,patient.firstName,patient.lastName,patient.dateOfBirth,patient.state,placeOfServiceCode,specialtyCode,chartPayerId,chartMemberId,tin,providerGroupName';
+  assert.equal(REC.FLOW_IMPORT_COLS.join(','), template);
+  assert.equal(C.toCSV(REC.FLOW_IMPORT_COLS, []).split(/\r?\n/)[0], template);
+  assert.match(REC.flowImportFileName(new Date(2026, 9, 30)), /^Sohar Ready Import - Flow 2026-10-30\.csv$/);
+  assert.deepEqual(REC.FLOW_IMPORT_CONFIG_ROWS.map((r) => r.setting), ['TIN', 'Sohar provider group']);
+});
+
+test('Flow import rows: one per in-scope patient; chart policy only for verification patients; skip window and incomplete rows left out', () => {
+  const p = (o) => ({ 'In Scope': 'Yes', 'First Name': 'Synth', 'Last Name': 'Patient', DOB: '01/02/1980', State: 'CA', POS: '10', Route: 'verification',
+    'Sohar payerId': '60054', 'Member ID': 'SYN100', x: { verifyRows: [{ payerId: '60054', memberId: 'SYN100' }] }, ...o });
+  const pts = [
+    p({ MRN: '730001' }),
+    p({ MRN: '730002', x: { verifyRows: [{ payerId: '60054', memberId: 'SYN200', reverifySkip: true }, { payerId: '94036', memberId: 'SYN201' }] } }),
+    p({ MRN: '730003', Route: 'discovery', 'Sohar payerId': '99999', 'Member ID': 'GUESS1', x: {} }),
+    p({ MRN: '730004', x: { verifyRows: [{ payerId: '60054', memberId: 'SYN400', reverifySkip: true }] } }),
+    p({ MRN: '730005', DOB: '' }),
+    p({ MRN: '730006', 'In Scope': 'No' }),
+  ];
+  const out = REC.flowImportRows(pts, { specialty: 'PSY', tin: '000000000', providerGroup: 'Synthetic Group' });
+  assert.deepEqual(out.rows.map((r) => r.id), ['730001', '730002', '730003']);
+  assert.deepEqual(out.rows[0], { id: '730001', 'patient.firstName': 'Synth', 'patient.lastName': 'Patient', 'patient.dateOfBirth': '01/02/1980', 'patient.state': 'CA',
+    placeOfServiceCode: '10', specialtyCode: 'PSY', chartPayerId: '60054', chartMemberId: 'SYN100', tin: '000000000', providerGroupName: 'Synthetic Group' });
+  assert.deepEqual([out.rows[1].chartPayerId, out.rows[1].chartMemberId], ['94036', 'SYN201'], 'the first insurance not inside the skip window');
+  assert.deepEqual([out.rows[2].chartPayerId, out.rows[2].chartMemberId], ['', ''], 'discovery patients: a guessed payer is never sent as the chart policy');
+  assert.deepEqual(out.skipped, [{ key: '730004', why: 'verified eligible recently (skip window)' }, { key: '730005', why: 'no name, DOB or state' }]);
+  assert.equal(REC.flowImportRows([p({ MRN: '730007' })], {}).rows[0].specialtyCode, 'PSY');
+});

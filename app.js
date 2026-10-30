@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.20.0';
+  const VERSION = '0.21.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -229,6 +229,7 @@
     ['learnBox', 'clinicNotesBox', 'payerNotesBox'].forEach((id) => $(id).addEventListener('click', (e) => { const b = e.target.closest('[data-goto]'); if (b) X.activate(b.dataset.goto); }));
     $('btnDlVer').addEventListener('click', () => guard(() => download('verification'), 'preflight'));
     $('btnDlDisc').addEventListener('click', () => guard(() => download('discovery'), 'preflight'));
+    $('btnDlFlow').addEventListener('click', () => guard(downloadFlowImport, 'preflight'));
     dropZone('dropReport', 'fileImport', (files) => guard(() => uploadImport(files), 'scanResult'));
     dropZone('dropResults', 'fileResults', (files) => guard(() => uploadResults(files), 'resultsResult'));
     $('btnCopyMsg').addEventListener('click', () => guard(() => copyAdminMessage('action'), 'resultsResult'));
@@ -518,7 +519,7 @@
         const feeRows = F ? (feesOn() ? F.FEE_CONFIG_ROWS : F.FEE_CONFIG_ROWS.slice(0, 1)) : [];
         // "MRN ids since": Sohar checks created before this time carry the Per Nbr as their id, later ones the MRN.
         const since = { setting: 'MRN ids since', value: utcStamp(new Date()), what: 'When this workbook started sending the MRN (not the Per Nbr) as the Sohar id. Sohar results created before then are matched by Per Nbr. Set by the add-in; do not change.' };
-        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
+        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
         if (!String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
       }
       const learn = state.cfg.learning || C.LEARN_DEFAULTS;
@@ -592,6 +593,8 @@
       state.patients = res.patients; state.review = res.review.concat(C.learningReviewRows(state.learning));
       const pt = state.cfg.payerTests || C.PAYER_TEST_DEFAULTS;
       state.exports = C.buildExports(res.patients, { ...state.cfg, guarantorRequests: state.guarantorActive, mappingDiscovery: pt.mappingDiscovery !== false });
+      // v0.21: the Sohar Flow import (one row per patient, the Flow's own CSV template), from the same patients.
+      state.exports.flow = REC.flowImportRows(res.patients, state.cfg).rows;
       await X.writePayerMapping(C.MAPPING_SHEET_COLS, state.exports.mapping).catch((e) => { console.error(e); sheetWarn.push(`Payer Mapping sheet not updated: ${e.message}`); });
       state.exports.payerTests = [];
       if (pt.on) {
@@ -632,6 +635,9 @@
       const nv = state.exports.verification.length, nd = state.exports.discovery.length;
       const nvp = new Set(state.exports.verification.map((r) => r.id)).size;
       $('btnDlVer').disabled = !nv; $('btnDlDisc').disabled = !nd;
+      const flowOut = REC.flowImportRows(state.patients || res.patients, state.cfg), nf = flowOut.rows.length;
+      $('btnDlFlow').disabled = !nf;
+      $('fnFlow').textContent = `${nf} patient${nf === 1 ? '' : 's'}${flowOut.skipped.length ? `, ${flowOut.skipped.length} left out` : ''} · ${REC.flowImportFileName()}`;
       $('fnVer').textContent = `${nvp} patient${nvp === 1 ? '' : 's'}${nv > nvp ? ` (${nv} rows: ${nv - nvp} with two insurances)` : ''} · ${C.fileName('verification')}`;
       const ng = state.exports.discovery.filter((r) => /-G$/.test(r.id)).length;
       $('fnDisc').textContent = `${nd - ng} patient${nd - ng === 1 ? '' : 's'}${ng ? ` + ${ng} guarantor${ng === 1 ? '' : 's'}` : ''} · ${C.fileName('discovery')}`;
@@ -1360,6 +1366,21 @@
     if (!state.exports) throw new Error('Upload the NextGen report first (step 1).');
     const cols = kind === 'verification' ? C.VERIFICATION_COLS : C.DISCOVERY_COLS;
     await saveCSV(C.fileName(kind), cols, state.exports[kind], 'preflight');
+    markDone(2); setCurrent(3);
+  }
+
+  /** The Sohar Flow import (v0.21): REC.FLOW_IMPORT_COLS, one row per patient; says who was left out and why. */
+  async function downloadFlowImport() {
+    if (!state.patients) throw new Error('Upload the NextGen report first (step 1).');
+    const out = REC.flowImportRows(state.patients, state.cfg);
+    if (!out.rows.length) throw new Error('No patients for the Sohar Flow file (none in scope, or all verified recently).');
+    await saveCSV(REC.flowImportFileName(), REC.FLOW_IMPORT_COLS, out.rows, 'preflight');
+    const why = new Map();
+    for (const s of out.skipped) why.set(s.why, (why.get(s.why) || 0) + 1);
+    const parts = [`${out.rows.length} patient${out.rows.length === 1 ? '' : 's'} in the Sohar Flow file.`];
+    if (why.size) parts.push(`Left out: ${[...why].map(([w, n]) => `${n} ${w}`).join('; ')}.`);
+    if (!String((state.cfg && state.cfg.tin) || '').trim()) parts.push('Config TIN is blank, so the tin column is empty.');
+    note('preflight', parts.join(' '), why.size || !(state.cfg && state.cfg.tin) ? 'warn' : 'ok');
     markDone(2); setCurrent(3);
   }
 

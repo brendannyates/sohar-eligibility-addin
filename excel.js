@@ -171,6 +171,7 @@
       defaultState: String(cfg['Default state'] || '').trim(),
       reportUploaded: String(cfg['Report uploaded'] ?? '').trim(), // v0.20: when the NextGen report was last uploaded (UTC stamp)
       adminNames: String(cfg['Admin names'] ?? '').trim(), // v0.20: names admins pick for pre-check ticks and notes (record.adminNames)
+      tin: String(cfg['TIN'] ?? '').trim(), providerGroup: String(cfg['Sohar provider group'] ?? '').trim(), // v0.21: Sohar Flow import
       teleKeywords: String(cfg['Telehealth keywords'] || 'Tele').split(/[;,]/).map((s) => s.trim()).filter(Boolean),
       posTele: String(cfg['POS code: telehealth'] || '10').trim(),
       posOffice: String(cfg['POS code: office'] || '11').trim(),
