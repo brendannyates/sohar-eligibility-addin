@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.19.0';
+  const VERSION = '0.20.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -9,6 +9,7 @@
   const F = window.SoharFees; // fee estimates (v0.11, a test, Off by default)
   const PRM = window.PayerRules; // esketamine payer credential rules (v0.13, payer-rules.js, shared with other add-ins)
   const PK = window.PayerKnowledge; // built-in payer mappings and fee review flags (v0.17, payer-knowledge.js)
+  const REC = window.SoharRecord; // one record per patient and Sohar Flow results (v0.20, record.js)
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
   const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, discoveryVerify: null, pendingFocus: '', demo: false,
@@ -116,6 +117,7 @@
     await refreshRules();
     await loadInbox(); // after the tasks are built: its count is a dry run of the merge against them
     const last = saved.map((s) => String(s.Uploaded || '')).sort().pop();
+    state.lastSohar = last || ''; // the "Last updated" pill in full screen
     await stampUpdated(`${did}${last ? `. Last Sohar upload ${fmtStamp(new Date(last))}` : ''}`);
   }
 
@@ -282,6 +284,9 @@
     try {
       if (isCSV(file)) await X.writeImportRows(C.parseCSV(await readText(file)));
       else await X.importXlsx(await readBase64(file));
+      // v0.20: when the report came in, for the "Last updated" pill in full screen.
+      state.reportUploaded = utcStamp(new Date());
+      if (!state.demo) await X.setConfigValue('Report uploaded', state.reportUploaded).catch((e) => console.warn('Report uploaded not stamped', e));
       await lockNames();
       await refreshAll();
     } finally { dropBusy('dropReport'); }
@@ -513,7 +518,7 @@
         const feeRows = F ? (feesOn() ? F.FEE_CONFIG_ROWS : F.FEE_CONFIG_ROWS.slice(0, 1)) : [];
         // "MRN ids since": Sohar checks created before this time carry the Per Nbr as their id, later ones the MRN.
         const since = { setting: 'MRN ids since', value: utcStamp(new Date()), what: 'When this workbook started sending the MRN (not the Per Nbr) as the Sohar id. Sohar results created before then are matched by Per Nbr. Set by the add-in; do not change.' };
-        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
+        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
         if (!String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
       }
       const learn = state.cfg.learning || C.LEARN_DEFAULTS;
@@ -1372,10 +1377,54 @@
         else if (isXlsx(f)) list.push({ name: f.name, rows: await X.readXlsxRows(await readBase64(f)) });
         else list.push({ name: f.name, rows: [] });
       }
-      const html = await processResults(list);
+      const flow = await takeFlowFiles(list);
+      const html = flow.html + (flow.rest.length ? await processResults(flow.rest) : '');
       $('resultsResult').insertAdjacentHTML('beforeend', html);
       foldProgress();
     } finally { dropBusy('dropResults'); }
+  }
+  /**
+   * Sohar Flow results files (v0.20) dropped with the Sohar outputs: saved on the hidden Flow Results sheet (latest
+   * per visit), never matched as verification or discovery. Returns {rest: the other files, html: a summary}.
+   */
+  async function takeFlowFiles(list) {
+    const flow = list.filter((f) => REC.isFlowFile(f.rows));
+    const rest = list.filter((f) => !flow.includes(f));
+    if (!flow.length) return { rest, html: '' };
+    const m = REC.mergeFlow(await currentFlow(true), flow, fmtStamp(new Date()));
+    progress(`${flow.map((f) => f.name).join(', ')}: Sohar Flow results, ${m.read} visit${m.read === 1 ? '' : 's'}`);
+    await X.writeFlowResults(REC.FLOW_SHEET_COLS, m.rows);
+    state.flow = m.rows;
+    const sandbox = flow.some((f) => /sandbox/i.test(f.name));
+    return { rest, html: `<p class="ok">Sohar Flow: ${m.added} new visit${m.added === 1 ? '' : 's'}${m.replaced ? `, ${m.replaced} updated` : ''}; ${m.rows.length} saved. Cost estimates show at the top of each patient's record in full screen.${sandbox ? ' <b>Sandbox file: test results, not real coverage.</b>' : ''}</p>` };
+  }
+  /**
+   * Saved Flow results (hidden Flow Results sheet), read once per pane session. fresh (before a save): read again and
+   * let a read error throw, so a failed read never becomes an empty sheet.
+   */
+  async function currentFlow(fresh) {
+    if (state.demo) return state.flow || (state.flow = demoFlow());
+    if (fresh) return (state.flow = await X.readFlowResults());
+    if (fresh) return (state.flow = await X.readFlowResults());
+    if (!state.flow) state.flow = await X.readFlowResults().catch((e) => { console.error(e); return null; });
+    return state.flow || [];
+  }
+  /** Demo: made-up Flow results (sandbox) for the first three demo patients with a next visit. Invented amounts. */
+  function demoFlow() {
+    const seen = new Set(), out = [];
+    for (const r of state.results || []) {
+      const k = C.keyOf(r);
+      if (!k || seen.has(k) || !r['Next Appt'] || out.length >= 3) continue;
+      seen.add(k);
+      const i = out.length;
+      out.push({ ...Object.fromEntries(REC.FLOW_SHEET_COLS.map((c) => [c, ''])), Key: `demo-run-${i + 1}`, LASFIR: C.tagOf(r), MRN: k, 'Appt Date': r['Next Appt'], Time: r['Next Time'],
+        Event: r['Next Event'], Location: r['Next Location'], Provider: r['Next Provider'], 'Flow Run ID': `demo-run-${i + 1}`, 'Run Status': i === 2 ? 'IN_PROGRESS' : 'COMPLETE',
+        'Discovery Status': i === 2 ? '' : 'complete', 'Policy vs NextGen': ['Same policy as NextGen', 'New policy found; NextGen policy inactive (update NextGen)', ''][i],
+        'Estimate Policy': i === 2 ? '' : i === 1 ? 'Discovered' : 'NextGen', 'Sohar Payer': r['Sohar Payer'] || r['NextGen Payer'], 'Fee Tab': r['Next Location'],
+        'Rate Level': i === 1 ? 'MD' : 'NP', 'Est Codes': i === 1 ? '90792' : '99214', 'Sohar Est Patient': i === 2 ? '' : ['41.11', '151.11'][i], 'Sohar Est Plan Pays': i === 2 ? '' : ['130.00', '220.00'][i],
+        'Last Updated': new Date().toISOString(), File: 'Flow Results (SANDBOX).csv', Uploaded: 'demo' });
+    }
+    return out;
   }
   /** Tuck the file-by-file progress lines under "What was read" once the summary is up. */
   function foldProgress() {
@@ -1431,6 +1480,7 @@
     if (list.length) {
       step(`${acc.added} new result${acc.added === 1 ? '' : 's'}${acc.replaced ? `, ${acc.replaced} replaced` : ''}; ${acc.saved.length} saved in this workbook.`);
       await X.writeUploads(C.UPLOAD_COLS, cr.saved); // saved even when the report is missing: it matches once it is back
+      state.lastSohar = new Date().toISOString();
     }
     if (res.error) throw new Error(res.error);
     const learnedRefs = cr.refs;
@@ -1686,13 +1736,25 @@
     box.innerHTML = parts.join('');
     box.hidden = false;
   }
-  /** Parse an uploaded fee schedule (pure-JS reader) and replace the saved one completely. Returns a summary line. */
-  async function saveFeeSchedule(name, bytes) {
+  /**
+   * Parse an uploaded fee schedule (pure-JS reader) and replace the saved one completely. Returns a summary line.
+   * html (v0.20): the West Coast Patient Responsibility Calculator page instead. Its built-in rates complete the saved
+   * schedule (F.mergeSchedules: a saved rate is never changed) and go on the same hidden fee sheets.
+   */
+  async function saveFeeSchedule(name, bytes, html) {
     if (!feesOn()) throw new Error('Fee estimates are Off. Set Config "Fee estimates" to On, then refresh (⟳).');
-    const parsed = F.parseFeeSchedule(await XL.readWorkbook(bytes));
+    let parsed, fileName = name, calcNote = '';
+    if (html != null) {
+      const calc = F.parseCalculatorHtml(html);
+      const f = await loadFeeData();
+      const m = F.readMeta(f.meta);
+      parsed = F.mergeSchedules(f.schedule, m.tabSummary, calc);
+      fileName = m.file ? (m.file.includes(name) ? m.file : `${m.file} + ${name}`) : name;
+      calcNote = ` Calculator (${calc.source || 'built-in schedule'}): ${parsed.added.toLocaleString()} rate${parsed.added === 1 ? '' : 's'} added${f.schedule.length ? ' to the saved schedule' : ''}${parsed.conflicts ? `; ${parsed.conflicts} differed from the saved schedule, which was kept` : ''}${calc.counts.therapy ? `; ${calc.counts.therapy} therapy rates skipped (MD and NP only)` : ''}.`;
+    } else parsed = F.parseFeeSchedule(await XL.readWorkbook(bytes));
     const skipped = parsed.skipped.map((s) => `${s.name} (${s.reason})`).join(', ');
     if (!parsed.counts.tabs) throw new Error(`No fee tabs found in ${name}${skipped ? `: ${skipped}` : ''}. The saved fee schedule was not changed.`);
-    const meta = F.feeMetaRows(name, new Date().toISOString(), parsed);
+    const meta = F.feeMetaRows(fileName, new Date().toISOString(), parsed);
     await X.writeFee('schedule', F.FEE_COLS, parsed.rows);
     try {
       await X.writeFee('meta', F.FEE_META_COLS, meta);
@@ -1707,7 +1769,7 @@
     await refreshFees();
     await afterFeeChange();
     const issues = F.parseWarnings(parsed.tabs);
-    return `${name}: ${parsed.counts.tabs} tab${parsed.counts.tabs === 1 ? '' : 's'}, ${parsed.counts.codes} codes saved${skipped ? `; skipped ${skipped}` : ''}.${issues.length ? ` ${issues.join('. ')}.` : ''}`;
+    return `${name}: ${parsed.counts.tabs} tab${parsed.counts.tabs === 1 ? '' : 's'}, ${parsed.counts.codes} codes saved${skipped ? `; skipped ${skipped}` : ''}.${calcNote}${issues.length ? ` ${issues.join('. ')}.` : ''}`;
   }
   /** After fee data changed: Benefits sheet columns, Clinic cards and the full-screen window follow. */
   async function afterFeeChange() {
@@ -1718,9 +1780,12 @@
   async function uploadFee(files) {
     const file = files[0];
     if (!file) return;
-    if (!/\.xls[xm]$/i.test(file.name)) throw new Error(`${file.name} is not an .xlsx file. The fee schedule must be the Excel workbook.`);
+    const calc = /\.html?$/i.test(file.name);
+    if (!calc && !/\.xls[xm]$/i.test(file.name)) throw new Error(`${file.name} is not an .xlsx or .html file. Drop the fee schedule workbook or the West Coast Patient Responsibility Calculator.`);
     dropBusy('dropFee', `Reading ${file.name}…`);
-    try { note('feeStatus', await saveFeeSchedule(file.name, new Uint8Array(await file.arrayBuffer())), 'ok'); } finally { dropBusy('dropFee'); }
+    try {
+      note('feeStatus', calc ? await saveFeeSchedule(file.name, null, await file.text()) : await saveFeeSchedule(file.name, new Uint8Array(await file.arrayBuffer())), 'ok');
+    } finally { dropBusy('dropFee'); }
   }
   /** What the full-screen window needs for estimates: contexts, the rate tables they use, status. Never the whole schedule. */
   function feePayload() {
@@ -1904,9 +1969,101 @@
         themes: state.themes ? state.themes.rows : [], themeCounts: state.themes ? state.themes.counts : {}, tests: state.payerTests || [],
         mapping: (state.exports && state.exports.mapping) || [], payerTestRows: (state.exports && state.exports.payerTests) || [] },
       guarantor: { count: (state.guarantorCandidates || []).length, noDob: (state.guarantorCandidates || []).filter((x) => !x.hasDob).length },
+      // v0.20 patient record: Sohar Flow results and the Payer Outcomes ledger (older checks, for the timeline), trimmed.
+      flow: await currentFlow(), outcomes: await timelineOutcomes(), profiles: await patientProfiles(),
+      visits: await patientVisits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
+  }
+  /** The ledger columns the patient timeline shows, for patients with a Sohar result only. */
+  const TIMELINE_OUTCOME_COLS = ['MRN', 'Kind', 'Sohar Status', 'Sohar Date', 'Returned Payer', 'NextGen Payer', 'Signal'];
+  async function timelineOutcomes() {
+    if (!state.outcomes) state.outcomes = await X.readPayerOutcomes().catch((e) => { console.error(e); return null; });
+    const keys = new Set((state.results || []).map((r) => String(C.keyOf(r) || '')).filter(Boolean));
+    return (state.outcomes || []).filter((o) => keys.has(String(o.MRN || ''))).map((o) => Object.fromEntries(TIMELINE_OUTCOME_COLS.map((c) => [c, o[c] ?? ''])));
+  }
+  /**
+   * Per Nbr -> the patient record's profile (v0.20): gender identity, current gender, pronouns from the report (by header),
+   * the NextGen guarantor as LASFIR ("Patient" when it is the patient), and each Sohar result's guarantor vs subscriber
+   * check. Names stay in the pane: the window gets LASFIR and the check text only. Cached per set of results.
+   */
+  async function patientProfiles() {
+    if (state.profileCache && state.profileCache.results === state.results && state.profileCache.rows === state.rows) return state.profileCache.out;
+    const out = {};
+    const det = state.detection || (state.rows && C.detectHeader(state.rows));
+    if (!det || !state.rows || !state.results) return out;
+    const pers = new Set(state.results.map((r) => String(r['Per Nbr'] || '')).filter(Boolean));
+    const prof = REC.profiles(state.rows, det, pers);
+    const records = new Map();
+    for (const s of await X.readUploads().catch((e) => { console.error(e); return []; })) records.set(String(s.Key), s.Record);
+    for (const [per, p] of prof) {
+      out[per] = { genderIdentity: p.genderIdentity, currentGender: p.currentGender, pronouns: p.pronouns, prevLastName: p.prevLastName ? 'on file' : '',
+        // Always LASFIR, the patient's too when they are their own guarantor.
+        guarantor: !p.guarantor ? '' : p.guarantorSelf ? `${C.lasfir(p.guarantor.lastName, p.guarantor.firstName)} (the patient)` : C.lasfir(p.guarantor.lastName, p.guarantor.firstName), guarantorDob: p.guarantor && p.guarantor.dob ? 'on file' : '', checks: [] };
+    }
+    for (const r of state.results) {
+      const per = String(r['Per Nbr'] || '');
+      if (!out[per]) continue;
+      let rec = null;
+      try { const raw = records.get(String(r.resultKey || '')); rec = raw ? JSON.parse(raw) : null; } catch (e) { rec = null; }
+      const chk = REC.guarantorCheck(prof.get(per), REC.subscriberOf(rec));
+      if (chk.text) out[per].checks.push({ ref: r['Sohar Ref'] || '', sentAs: r['Sent As'] || '', payer: r['Sohar Payer'] || '', date: r['Sohar Date'] || '', ...chk });
+    }
+    state.profileCache = { results: state.results, rows: state.rows, out };
+    return out;
+  }
+  /** Today as MM/DD/YYYY in local time (an evening in the US is still today, not tomorrow's UTC date). */
+  const localToday = () => { const d = new Date(); return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`; };
+  /** Saved pre-check ticks (hidden Pre-Check sheet), read once per pane session. fresh: read again, errors throw. */
+  async function currentPrecheck(fresh) {
+    if (state.demo) return state.precheck || [];
+    if (fresh) return (state.precheck = await X.readPreCheck());
+    if (!state.precheck) state.precheck = await X.readPreCheck().catch((e) => { console.error(e); return null; });
+    return state.precheck || [];
+  }
+  /**
+   * Per Nbr -> upcoming visits on the report (from the as-of date, else today) with the report's Pre-Check Complete
+   * and the checklist (record.precheckItems). Patients with a Sohar result only.
+   */
+  async function patientVisits() {
+    const out = {};
+    const det = state.detection || (state.rows && C.detectHeader(state.rows));
+    if (!det || !state.rows || !state.results) return out;
+    const keyByPer = new Map(), tagByPer = new Map();
+    for (const r of [...(state.patients || []), ...state.results]) {
+      const per = String(r['Per Nbr'] || '');
+      if (per && !keyByPer.has(per) && C.keyOf(r)) keyByPer.set(per, C.keyOf(r));
+      if (per && !tagByPer.has(per) && C.tagOf(r)) tagByPer.set(per, C.tagOf(r));
+    }
+    const pers = new Set(state.results.map((r) => String(r['Per Nbr'] || '')).filter(Boolean));
+    const saved = await currentPrecheck();
+    for (const [per, vs] of REC.reportVisits(state.rows, det, pers, state.resultsAsOf || localToday())) {
+      const key = keyByPer.get(per);
+      if (key) out[per] = vs.map((v) => ({ ...v, key, lasfir: tagByPer.get(per) || '', items: REC.precheckItems(v, key, saved), notes: REC.precheckNotes(v, key, saved) }));
+    }
+    return out;
+  }
+  /**
+   * One pre-check tick or note from full screen, saved in order (two quick ticks never overwrite each other). The
+   * admin's name and the patient's LASFIR go on the row; the time is the pane's.
+   */
+  function savePrecheck(m) {
+    state.precheckQueue = (state.precheckQueue || Promise.resolve()).catch(() => {}).then(async () => {
+      const t = { key: m.key, lasfir: m.lasfir, date: m.date, time: m.time, by: m.by, when: fmtStamp(new Date()) };
+      const before = await currentPrecheck(true);
+      const next = m.type === 'precheck-note' ? REC.addPrecheckNote(before, { ...t, note: m.note }) : REC.setPrecheck(before, { ...t, item: m.item, done: !!m.done });
+      const rows = REC.prunePrecheck(next, localToday());
+      await X.writePreCheck(REC.PRECHECK_COLS, rows);
+      state.precheck = rows;
+    });
+    return state.precheckQueue;
+  }
+  /** When each source was last brought in, for the full-screen "Last updated" pill. */
+  async function lastUpdatedStamps() {
+    const flowRows = await currentFlow();
+    const flowLast = flowRows.map((r) => String(r['Last Updated'] || r.Uploaded || '')).filter(Boolean).sort().pop() || '';
+    return { report: state.reportUploaded || (state.cfg && state.cfg.reportUploaded) || '', sohar: state.lastSohar || '', flow: flowLast };
   }
   async function sendToDialog(obj) {
     if (!dlg) return;
@@ -1949,17 +2106,21 @@
           if (f.text != null) list.push({ name: f.name, rows: C.parseCSV(f.text) });
           else if (f.base64) list.push({ name: f.name, rows: await X.readXlsxRows(f.base64) });
         }
-        $('resultsResult').innerHTML = ''; const html = await processResults(list, (s) => sendToDialog({ type: 'notice', ok: true, text: s }));
+        $('resultsResult').innerHTML = '';
+        const flow = await takeFlowFiles(list);
+        const html = flow.html + (flow.rest.length ? await processResults(flow.rest, (s) => sendToDialog({ type: 'notice', ok: true, text: s })) : '');
         $('resultsResult').insertAdjacentHTML('beforeend', html); foldProgress();
         await sendToDialog({ ...(await payload('prep')), notice: { ok: true, text: `Loaded ${list.map((f) => f.name).join(', ')}.` } });
       } catch (e) {
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
+    } else if (m.type === 'precheck' || m.type === 'precheck-note') {
+      try { await savePrecheck(m); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `${m.type === 'precheck' ? 'Pre-check' : 'Note'} not saved: ${e.message}` }); throw e; }
     } else if (m.type === 'fee-upload' && feesOn()) {
       // Fee schedule picked on the full-screen Benefits tab: it arrives as base64 and is read here (pure JS, no Excel sheets).
       try {
-        const text = await saveFeeSchedule(m.name, base64Bytes(m.base64));
+        const text = m.html != null ? await saveFeeSchedule(m.name, null, m.html) : await saveFeeSchedule(m.name, base64Bytes(m.base64));
         note('feeStatus', text, 'ok');
         await sendToDialog({ ...(await payload('benefits')), notice: { ok: true, text } });
       } catch (e) {
@@ -2288,6 +2449,8 @@
     return {
       async readPayerCredRules() { return credRules; }, async writePayerCredRules(c, r) { credRules = r; return r.length; },
       async readFee(kind) { return feeStore[kind] || []; }, async writeFee(kind, c, r) { feeStore[kind] = r; return r.length; },
+      async readFlowResults() { return state.flow || []; }, async writeFlowResults(c, r) { state.flow = r; return r.length; },
+      async readPreCheck() { return state.precheck || []; }, async writePreCheck(c, r) { state.precheck = r; return r.length; },
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
       async writeImportRows(r) { rows = r; },

@@ -1085,6 +1085,234 @@
     return { md: md.none ? { ...md, patient: null } : withMed(md), np: np.none ? { ...np, patient: null } : withMed(np), flags, basis };
   }
 
+  // ---------- West Coast Patient Responsibility Calculator (v0.20) ----------
+  // Staff drop the calculator's .html once (Admin fee upload or the full-screen Benefits tab). Its built-in fee schedule
+  // (BUILTIN) is read here and saved like an uploaded workbook, on the hidden fee sheets of this workbook only. Its rates
+  // never go in this repo. The patient view then runs the calculator's math (calcEstimate) pre-filled from Sohar.
+
+  /** True when text looks like the calculator page (it carries a BUILTIN fee schedule). */
+  const isCalculatorHtml = (text) => /const\s+BUILTIN\s*=\s*\{/.test(String(text || ''));
+  /** Provider column labels the add-in estimates (MD and NP); therapy columns (PhD, Masters) are counted and skipped. */
+  function calcLevel(payer, prov) {
+    if (/^cash$/i.test(str(payer)) && /^rate$/i.test(str(prov))) return 'Cash';
+    return levelOf(prov);
+  }
+  /**
+   * Calculator page text -> the same {rows, tabs, skipped, counts} as parseFeeSchedule, so the saved schedule, Fee
+   * Locations, Fee Payer Map and estimates work unchanged. Throws a readable error when the page has no fee schedule.
+   */
+  function parseCalculatorHtml(text) {
+    const s = String(text || '');
+    const m = /const\s+BUILTIN\s*=\s*/.exec(s);
+    if (!m) throw new Error('This page has no built-in fee schedule. Drop the West Coast Patient Responsibility Calculator .html, or the fee schedule .xlsx.');
+    const end = s.indexOf('\n', m.index);
+    let B;
+    try { B = JSON.parse(s.slice(m.index + m[0].length, end < 0 ? undefined : end).trim().replace(/;\s*$/, '')); } catch (e) { throw new Error(`The calculator's built-in fee schedule could not be read (${e.message}).`); }
+    const t = B && B.t;
+    if (!t || !Array.isArray(B.r) || !Array.isArray(t.loc) || !Array.isArray(t.payer) || !Array.isArray(t.prov) || !Array.isArray(t.cpt)) {
+      throw new Error('The calculator\'s built-in fee schedule is not in the expected layout (t.loc / t.payer / t.prov / t.cpt and r).');
+    }
+    const info = new Map((B.locations || []).map((l) => [str(l.name), str(l.info)]));
+    const tabMeta = new Map();
+    const metaOf = (name) => {
+      if (!tabMeta.has(name)) {
+        const parts = (info.get(name) || '').split('|').map(str);
+        const title = parts.find((p) => /fee schedule/i.test(p)) || '';
+        const lm = /\blocality\s*(\d+)/i.exec(title);
+        tabMeta.set(name, { name, title, locality: lm ? `Locality ${lm[1]}` : '', locations: parseLocations(parts[0]) || [], payers: new Set(), codes: new Set(), therapy: 0 });
+      }
+      return tabMeta.get(name);
+    };
+    const rows = [];
+    let therapy = 0;
+    for (const a of B.r) {
+      const tab = str(t.loc[a[0]]), payer = str(t.payer[a[1]]), prov = str(t.prov[a[2]]), code = str(t.cpt[a[3]]).toUpperCase();
+      const desc = str((t.desc || [])[a[4]]), rate = num(a[5]), note = str((t.note || [])[a[6]]);
+      if (!tab || !code) continue;
+      const tm = metaOf(tab);
+      const L = calcLevel(payer, prov);
+      if (!L) { therapy++; tm.therapy++; continue; }
+      tm.codes.add(code);
+      const base = { Tab: tab, Locality: tm.locality, Locations: tm.locations.join('; '), Code: code, Description: desc, Rate: rate == null ? '' : rate, Note: note };
+      if (L === 'Cash') { rows.push({ ...base, Payer: 'Cash', Level: 'Cash' }); continue; }
+      tm.payers.add(payer);
+      for (const level of L === 'Both' ? ['MD', 'NP'] : [L]) rows.push({ ...base, Payer: payer, Level: level });
+    }
+    const tabs = [], skipped = [];
+    for (const tm of tabMeta.values()) {
+      if (!tm.payers.size) { skipped.push({ name: tm.name, reason: tm.therapy ? 'therapy rates only (no MD or NP columns)' : 'no MD or NP rates' }); continue; }
+      tabs.push({ name: tm.name, title: tm.title, locality: tm.locality, locations: tm.locations, payers: [...tm.payers], codes: tm.codes.size, notes: [], unlabeled: 0, unlabeledCols: [],
+        unparsed: {}, afterStop: 0, hasGross: false, hasCash: rows.some((r) => r.Tab === tm.name && r.Level === 'Cash') });
+    }
+    const keep = new Set(tabs.map((x) => x.name));
+    const out = rows.filter((r) => keep.has(r.Tab));
+    return { rows: out, tabs, skipped, counts: { tabs: tabs.length, codes: new Set(out.map((r) => r.Code)).size, rows: out.length, unparsed: 0, therapy }, source: str(B.source) };
+  }
+
+  /**
+   * "Complete the picture": add a parsed calculator schedule to the saved one. Saved rows are kept as they are; a
+   * calculator rate is added only where the saved schedule has none for the same tab, payer, level and code. A
+   * different rate for the same cell keeps the saved one and is counted in conflicts. Tabs the saved schedule lacks
+   * (tab summary) come from the calculator. Returns a parsed-shaped {rows, tabs, skipped, counts, added, conflicts}.
+   */
+  function mergeSchedules(savedRows, savedTabs, calc) {
+    const k = (r) => `${keyOf(r.Tab)}|${keyOf(r.Payer)}|${str(r.Level)}|${str(r.Code).toUpperCase()}`;
+    const have = new Map();
+    for (const r of savedRows || []) { const n = num(r.Rate); if (n != null && n > 0 && !have.has(k(r))) have.set(k(r), n); }
+    const rows = (savedRows || []).slice();
+    let added = 0, conflicts = 0;
+    for (const r of calc.rows || []) {
+      const n = num(r.Rate);
+      if (n == null || n <= 0) continue;
+      const prev = have.get(k(r));
+      if (prev != null) { if (Math.abs(prev - n) >= 0.005) conflicts++; continue; }
+      have.set(k(r), n); rows.push(r); added++;
+    }
+    const tabs = (savedTabs || []).slice();
+    for (const t of calc.tabs || []) if (!tabs.some((x) => keyOf(x.name) === keyOf(t.name))) tabs.push(t);
+    const tabNames = new Set(rows.map((r) => str(r.Tab)));
+    return { rows, tabs, skipped: calc.skipped || [], added, conflicts,
+      counts: { tabs: tabNames.size, codes: new Set(rows.map((r) => str(r.Code).toUpperCase())).size, rows: rows.length, unparsed: 0 } };
+  }
+
+  // The calculator's plan types and charge modes, as on its page.
+  const CALC_PLANS = [['commercial', 'Commercial / PPO / HMO'], ['medicare', 'Medicare (fee-for-service)'], ['medicare_adv', 'Medicare Advantage'],
+    ['medicaid', 'Medicaid'], ['tricare', 'Tricare'], ['va', 'VA'], ['self_pay', 'Self-pay (no insurance)']];
+  const CALC_MODES = [['ded_coins', 'Deductible, then coinsurance'], ['copay_only', 'Flat copay per visit only'], ['all', 'Copay plus deductible and coinsurance']];
+  /** The calculator's plan guess from a payer name (its inferPlan), with Medi-Cal / Medicaid added. */
+  function calcPlanType(payer, plan) {
+    const p = `${str(payer)} ${str(plan)}`.toLowerCase();
+    if (/cash|self.?pay/.test(p)) return 'self_pay';
+    if (/tricare|triwest/.test(p)) return /\bva\b/.test(p) ? 'va' : 'tricare';
+    if (/veterans|\bva\b/.test(p)) return 'va';
+    if (/medi[\s-]?cal|medicaid/.test(p)) return 'medicaid';
+    if (/noridian|novitas|palmetto/.test(p)) return 'medicare';
+    if (/medicare|mcare|mcr|\b65\b|med adv/.test(p)) return 'medicare_adv';
+    return 'commercial';
+  }
+  /** Calculator charge mode <-> the add-in's remembered toggles (Estimate Defaults), so both say the same thing. */
+  function calcModeOf(toggles) {
+    const t = { ...TOGGLE_DEFAULTS, ...(toggles || {}) };
+    if (t.deductible === 'Waived' && t.coinsurance === 'None') return 'copay_only';
+    return t.copay === 'None' ? 'ded_coins' : 'all';
+  }
+  const CALC_MODE_TOGGLES = {
+    ded_coins: { deductible: 'Applies', coinsurance: 'After deductible', copay: 'None' },
+    copay_only: { deductible: 'Waived', coinsurance: 'None', copay: 'Added' },
+    all: { deductible: 'Applies', coinsurance: 'After deductible', copay: 'Added' },
+  };
+  /**
+   * The calculator's math (computeEstimate on its page), unchanged apart from cents.
+   * services: [{allowed, svcCoins}] (allowed = rate x units; svcCoins 0-1, null = the plan coinsurance).
+   * b: {planType, mode, deductible, deductibleMet, coins (0-1), copay, oopMax (0 = none), oopMet, secCoins, secDed}.
+   */
+  function calcEstimate(services, b) {
+    const n0 = (v) => Math.max(0, Number(v) || 0);
+    const mode = b.mode || 'ded_coins';
+    const selfPay = b.planType === 'self_pay';
+    const useDed = !selfPay && (mode === 'ded_coins' || mode === 'all') && !b.secDed;
+    const useCoins = !selfPay && (mode === 'ded_coins' || mode === 'all') && !b.secCoins;
+    const useCopay = !selfPay && (mode === 'copay_only' || mode === 'all') && !b.secCoins;
+    let dedLeft = useDed ? Math.max(0, n0(b.deductible) - n0(b.deductibleMet)) : 0;
+    const lines = [];
+    let totalAllowed = 0, totalDed = 0, totalCoins = 0;
+    for (const s of services) {
+      const allowed = s.allowed;
+      totalAllowed += allowed;
+      if (selfPay) { lines.push({ allowed, ded: 0, coins: 0, patient: allowed }); continue; }
+      const ded = Math.min(allowed, dedLeft);
+      dedLeft -= ded;
+      const rate = useCoins ? (s.svcCoins !== null && s.svcCoins !== undefined ? s.svcCoins : n0(b.coins)) : 0;
+      const coins = (allowed - ded) * rate;
+      totalDed += ded; totalCoins += coins;
+      lines.push({ allowed, ded: cents(ded), coins: cents(coins), patient: cents(ded + coins) });
+    }
+    const copay = useCopay ? n0(b.copay) : 0;
+    let patient = selfPay ? totalAllowed : totalDed + totalCoins + copay;
+    let allowedCapAdj = 0;
+    if (patient > totalAllowed) { allowedCapAdj = totalAllowed - patient; patient = totalAllowed; }
+    let oopAdj = 0, oopReached = false;
+    const oopMax = n0(b.oopMax);
+    if (!selfPay && oopMax > 0) {
+      const remaining = Math.max(0, oopMax - n0(b.oopMet));
+      if (patient >= remaining) oopReached = true;
+      if (patient > remaining) { oopAdj = remaining - patient; patient = remaining; }
+    }
+    return { lines, totalAllowed: cents(totalAllowed), totalDed: cents(totalDed), totalCoins: cents(totalCoins), copay: cents(copay), allowedCapAdj: cents(allowedCapAdj),
+      oopAdj: cents(oopAdj), oopReached, patient: cents(patient), insurance: cents(totalAllowed - patient) };
+  }
+  /**
+   * Calculator inputs pre-filled for one patient: the estimate context (prepareEstimates) and the patient's Sohar result
+   * row (Deductible and OOP Max totals; the context has only what remains). Remaining = total - met, as the calculator
+   * asks for it. Unknown amounts are blank and listed in missing.
+   */
+  function calcInputs(ctx, row) {
+    const r = row || {};
+    const ben = ctx.oon ? ctx.benefits.oon : ctx.benefits.inn;
+    const missing = [];
+    const pair = (totalV, remV, label) => {
+      const total = num(totalV), rem = num(remV);
+      if (rem == null && total == null) { missing.push(label); return ['', '']; }
+      if (total == null) return [rem, 0];
+      return [total, rem == null ? '' : cents(Math.max(0, total - rem))];
+    };
+    const [deductible, deductibleMet] = pair(ctx.oon ? ben.deductibleRemaining : r.Deductible, ben.deductibleRemaining, 'Deductible');
+    const [oopMax, oopMet] = pair(ctx.oon ? ben.oopRemaining : r['OOP Max'], ben.oopRemaining, 'OOP max');
+    const cr = coinsRate(ben.coinsurance);
+    if (cr == null) missing.push('Coinsurance');
+    const copay = num(ben.copay);
+    const planType = ctx.selfPay ? 'self_pay' : calcPlanType(ctx.payer || r['Sohar Payer'] || r['NextGen Payer'], r.Plan);
+    return {
+      planType, network: ctx.oon ? 'out' : 'in', mode: calcModeOf(ctx.defaults), secCoins: false, secDed: false,
+      deductible, deductibleMet, coins: cr == null ? '' : Math.round(cr * 10000) / 100, copay: copay == null ? '' : copay, oopMax, oopMet, missing,
+    };
+  }
+  /**
+   * One patient's calculator estimate, MD and NP: {md, np, flags, basis}. inputs: calcInputs (edited by staff); codes:
+   * [{code, units, coins?}] (coins %, blank = the plan's). Rates: the payer column (in network), Gross Charge (out of
+   * network) or Cash (self pay), as estimatePatient uses them. Each level: calcEstimate plus code lines, or none.
+   */
+  function calcPatient(ctx, tables, inputs, codes) {
+    const flags = (ctx.flags || []).slice();
+    if (ctx.noEstimate) return { md: null, np: null, flags: [`No estimate: ${ctx.noEstimate}`], basis: '' };
+    const selfPay = inputs.planType === 'self_pay';
+    if (!ctx.tab) return { md: null, np: null, flags, basis: '' };
+    if (!selfPay && !ctx.ok) return { md: null, np: null, flags, basis: '' };
+    const list = (codes || []).filter((c) => str(c.code));
+    if (!list.length) return { md: null, np: null, flags: flags.length ? flags : ['Enter codes to estimate'], basis: '' };
+    const rates = tables.rates[ctx.rateKey] || {}, gross = tables.gross[ctx.tab] || {}, cash = (tables.cash || {})[ctx.tab] || {}, desc = tables.desc[ctx.tab] || {};
+    const oon = inputs.network === 'out';
+    const rateOf = (code, level) => (selfPay ? cash[code] : oon ? gross[code] : rates[code] ? rates[code][level] : null) ?? null;
+    const b = { ...inputs, coins: (num(inputs.coins) || 0) / 100 };
+    const level = (lv) => {
+      const ls = list.map((c) => { const units = Math.max(1, Number(c.units) || 1), rate = rateOf(str(c.code).toUpperCase(), lv), oc = num(c.coins);
+        return { code: str(c.code).toUpperCase(), units, desc: desc[str(c.code).toUpperCase()] || '', rate, allowed: rate == null ? null : cents(rate * units), svcCoins: oc == null ? null : Math.min(100, Math.max(0, oc)) / 100 }; });
+      const known = ls.filter((l) => l.allowed != null);
+      if (!known.length) return { none: `No ${selfPay ? 'Cash' : oon ? 'Gross Charge' : lv} rate for ${ls.map((l) => l.code).join(', ')} on ${ctx.tab}`, lines: ls, patient: null };
+      const e = calcEstimate(known, b);
+      known.forEach((l, i) => Object.assign(l, e.lines[i]));
+      const noRate = ls.filter((l) => l.allowed == null).map((l) => l.code);
+      return { ...e, lines: ls, noRate, partial: noRate.length > 0 };
+    };
+    const md = level('MD'), np = selfPay || oon ? null : level('NP');
+    const basis = selfPay ? `${ctx.tab} · Self pay (Cash)` : oon ? `Out of network: Gross Charge on ${ctx.tab}` : `${ctx.tab}${ctx.locality ? ` (${ctx.locality})` : ''} · ${ctx.feePayer}`;
+    return { md, np: np || md, flags, basis, same: !np };
+  }
+  /** Plain-English lines for one calculator estimate (one level). */
+  function calcText(e, b) {
+    if (!e || e.none) return e && e.none ? [e.none] : [];
+    const out = e.lines.map((l) => (l.allowed == null ? `${l.code} x${l.units}: no rate on the fee schedule` : `${l.code} x${l.units} at ${usd(l.rate)} = ${usd(l.allowed)}${l.svcCoins != null ? ` (coinsurance ${Math.round(l.svcCoins * 1000) / 10}% for this code)` : ''}${l.desc ? ` · ${l.desc.slice(0, 60)}` : ''}`));
+    out.push(`Allowed: ${usd(e.totalAllowed)}`);
+    if (b.planType === 'self_pay') { out.push(`Self pay: patient pays ${usd(e.patient)}`); return out; }
+    out.push(`Deductible: ${usd(e.totalDed)}`, `Coinsurance: ${usd(e.totalCoins)}`, `Copay: ${usd(e.copay)}`);
+    if (e.allowedCapAdj) out.push(`Capped at the allowed amount (${usd(e.allowedCapAdj)})`);
+    if (e.oopAdj) out.push(`Capped at the OOP max remaining (${usd(e.oopAdj)})`);
+    else if (e.oopReached) out.push('This visit reaches the OOP max');
+    out.push(`Patient pays: ${usd(e.patient)} · Insurance pays: ${usd(e.insurance)}`);
+    if (e.partial) out.push(`Partial: no rate for ${e.noRate.join(', ')}, so the total leaves ${e.noRate.length === 1 ? 'it' : 'them'} out.`);
+    return out;
+  }
+
   // ---------- demo (made-up numbers; the layout mimics a real fee schedule) ----------
   function demoTab(name, opts) {
     const rows = [['Mindful Health Solutions', '', '', '', '', '', opts.locations ? `Locations: ${opts.locations}` : '']];
@@ -1138,6 +1366,7 @@
     ESTIMATE_DEFAULT_COLS, defaultsFor, rememberDefaults,
     coinsRate, estimateMath, partialNote, benefitsMissing, estimateText, prepareEstimates, estimatePatient, usd,
     metaMatches, parseWarnings,
+    isCalculatorHtml, parseCalculatorHtml, mergeSchedules, CALC_PLANS, CALC_MODES, CALC_MODE_TOGGLES, calcPlanType, calcModeOf, calcEstimate, calcInputs, calcPatient, calcText,
     DEMO_WORKBOOK, demoSchedule,
   };
 });

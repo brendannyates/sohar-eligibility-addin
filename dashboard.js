@@ -16,6 +16,12 @@
   // estimate panel's codes and toggles.
   const F = window.SoharFees;
   let fees = null, estOver = null;
+  // v0.20 patient record: Sohar Flow results, Payer Outcomes ledger rows (timeline) and report profiles (Per Nbr ->
+  // pronouns, gender, guarantor LASFIR and checks), all from the pane.
+  const REC = window.SoharRecord;
+  let flow = [], outcomes = [], profiles = {};
+  // Per Nbr -> upcoming visits with the report's Pre-Check Complete and the checklist; when each source last came in.
+  let visits = {}, lastUpdated = null, admins = []; // admins: Config "Admin names"
   const take = C.messageAssembler();
   // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
   const PILL_COLOR = new Map(((window.SoharRules && window.SoharRules.PILLS) || []).map((p) => [p.label, p.color]));
@@ -54,17 +60,23 @@
     clinic = m.clinic || null; skipped = m.skipped || []; skipCols = m.skipCols || []; learning = m.learning || null; guarantor = m.guarantor || { count: 0, noDob: 0 };
     rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; verFailed = m.verifyFailed || []; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
+    flow = m.flow || []; outcomes = m.outcomes || []; profiles = m.profiles || {};
+    visits = m.visits || {}; lastUpdated = m.lastUpdated || null; admins = m.admins || [];
     fees = F && m.fees && m.fees.on ? m.fees : null;
-    renderFeeBar();
+    renderFeeBar(); renderUpdated();
+    const people = REC.byPatient(rows).length;
+    const gFlags = Object.values(profiles).filter((p) => (p.checks || []).some((c) => /^(high|medium)$/.test(c.severity))).length;
     $('dStatus').textContent = rows.length
-      ? `${rows.length} Sohar results, ${tasks.filter(open).length} open NextGen tasks${asOf ? `, appointments from ${C.fmtDate(asOf)}` : ''}.`
+      ? `${people} patient${people === 1 ? '' : 's'} (${rows.length} Sohar results), ${tasks.filter(open).length} open NextGen tasks${asOf ? `, appointments from ${C.fmtDate(asOf)}` : ''}${flow.length ? `, ${flow.length} Sohar Flow visit${flow.length === 1 ? '' : 's'}` : ''}${gFlags ? `, ${gFlags} guarantor / subscriber check${gFlags === 1 ? '' : 's'}` : ''}.`
       : 'No Sohar results yet. Upload the verification and discovery outputs on the Upload & save tab.';
     $('dStatus').className = `status ${rows.length ? 'ok' : 'bad'}`;
-    const q = (name) => rows.filter((x) => x['Work Queue'] === name).length;
+    // Tiles count patients (v0.20: one record per MRN): a patient counts in each queue any of their results is in.
+    const q = (name) => REC.byPatient(rows).filter((g) => g.queues.includes(name)).length;
     $('tAct').textContent = q('Action needed'); $('tUnm').textContent = q('Unmatched');
     $('tPen').textContent = q('Pending'); $('tClr').textContent = q('Clear');
-    $('tDedMet').textContent = rows.filter(BEN.dedMet).length; $('tDedAppr').textContent = rows.filter(BEN.dedAppr).length;
-    $('tOopMet').textContent = rows.filter(BEN.oopMet).length; $('tOopAppr').textContent = rows.filter(BEN.oopAppr).length;
+    const leads = REC.byPatient(rows).map((g) => g.row); // benefit tiles: each patient's most recent result
+    $('tDedMet').textContent = leads.filter(BEN.dedMet).length; $('tDedAppr').textContent = leads.filter(BEN.dedAppr).length;
+    $('tOopMet').textContent = leads.filter(BEN.oopMet).length; $('tOopAppr').textContent = leads.filter(BEN.oopAppr).length;
     $('benNote').hidden = !rows.length || rows.some((x) => x['Deductible Status'] || x['OOP Status']);
     const locs = [...new Set([...rows, ...tasks].map((x) => x['Next Location']).filter(Boolean))].sort();
     const keepLoc = $('fLoc').value;
@@ -83,6 +95,41 @@
   }
 
   const open = (t) => !String(t.Done || '').trim();
+
+  /** "Last updated" pill: the newest source time, colored by freshness; the title lists each source. */
+  function renderUpdated() {
+    const el = $('dUpdated');
+    const f = REC.freshness(lastUpdated || {}, new Date());
+    if (f.level === 'none') { el.hidden = true; return; }
+    const when = (t) => new Date(t).toLocaleString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+    // Not fresh: name the oldest of the report and the Sohar results, and how old it is.
+    const old = f.parts.filter((p) => p.key !== 'flow').sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity))[0];
+    const days = old && old.time != null ? Math.floor((Date.now() - old.time) / 864e5) : null;
+    const word = f.level === 'fresh' ? '' : ` · ${old.label} ${days == null ? 'never uploaded' : `${days} day${days === 1 ? '' : 's'} old`}${f.level === 'stale' ? ', upload again' : ''}`;
+    el.className = `pill upd ${{ fresh: 'p-blue', aging: 'p-amber', stale: 'p-red' }[f.level]}`;
+    el.textContent = `Last updated ${when(f.newest)}${word}`;
+    const detail = f.parts.map((p) => `${p.label}: ${p.time == null ? 'never' : when(p.time)}`).join('\n');
+    el.title = detail;
+    el.setAttribute('aria-label', `Last updated ${when(f.newest)}${word}. ${detail.replace(/\n/g, '. ')}`);
+    el.hidden = false;
+  }
+  /** The next visit's pre-check state for the lists: 'done', 'open' or '' (no report visit). */
+  function precheckOf(r) {
+    const v = (visits[String(r['Per Nbr'] || '')] || [])[0];
+    if (!v) return '';
+    const pc = v.items.find((i) => i.id === 'precheck');
+    if (pc && pc.done) return 'done';
+    // A report without the Pre-Check column says nothing: no pill until someone ticks it.
+    return v.hasPrecheck || (pc && pc.source) ? 'open' : '';
+  }
+  const precheckPill = (r) => ({ done: ' <span class="pill p-blue">Pre-check ✓</span>', open: ' <span class="pill p-amber">Pre-check open</span>' }[precheckOf(r)] || '');
+  /** A red pill when the NextGen guarantor and a Sohar subscriber are different people (record.guarantorCheck, high). */
+  // Amber when the patient is the guarantor but Sohar's subscriber is someone else (check the policy's insured).
+  const guarFlag = (r) => {
+    const cs = (profiles[String(r['Per Nbr'] || '')] || {}).checks || [];
+    if (cs.some((c) => c.severity === 'high')) return ' <span class="pill p-red">Guarantor ≠ subscriber</span>';
+    return cs.some((c) => c.severity === 'medium') ? ' <span class="pill p-amber">Check insured</span>' : '';
+  };
 
   // ---------- filters ----------
   function shared(r) {
@@ -105,6 +152,9 @@
     const qv = $('fQueue').value, bv = $('fBen').value;
     return rows.filter((r) => shared(r) && (!qv || r['Work Queue'] === qv) && (!bv || BEN[bv](r)));
   }
+  /** One entry per patient (record.byPatient) when any of the patient's results passes `pass`. */
+  const patientsWhere = (pass) => REC.byPatient(rows).filter((g) => g.rows.some(pass));
+  const moreText = (g) => (g.resultCount > 1 ? ` · ${g.resultCount} results` : '');
   function filteredTasks() {
     const dv = $('fDone').value, kv = $('fTask').value;
     return tasks.filter((t) => shared(t) && (!kv || t.Task === kv) && (dv === '' || (dv === 'open' ? open(t) : !open(t))));
@@ -146,7 +196,9 @@
   function link(u) { return /^https:\/\//.test(u || '') ? `<a href="${esc(u)}" target="_blank" rel="noopener">Sohar</a>` : ''; }
 
   function renderPrep() {
-    const rs = rows.filter(shared);
+    // One row per patient: the most recent result stands for them (v0.20).
+    const groups = patientsWhere(shared), gOf = new Map(groups.map((g) => [g.row, g]));
+    const rs = groups.map((g) => g.row);
     const byPer = new Map();
     for (const t of tasks) if (open(t)) { const k = keyOf(t) || `ref:${t['Sohar Ref']}`; byPer.set(k, (byPer.get(k) || 0) + 1); }
     const days = new Map();
@@ -165,7 +217,7 @@
         <table class="prep"><tbody>${day.map((r) => {
           const n = byPer.get(keyOf(r) || `ref:${r['Sohar Ref']}`) || 0;
           return `<tr class="q-${queueClass(r['Work Queue'])}" data-key="${esc(keyOf(r) + '|' + r['Sohar Ref'])}" tabindex="0">
-            ${cell(r['Next Time'])}<td><b>${esc(name(r))}</b><br><span class="hint">${esc(idText(r))}${r['Searched As'] && r['Searched As'] !== 'Patient' ? ` · searched as ${esc(r['Searched As'].toLowerCase())}` : ''}</span>${pillsOf(r).length ? `<div class="pills">${pillsHtml(r)}</div>` : ''}</td>
+            ${cell(r['Next Time'])}<td><b>${esc(name(r))}</b><br><span class="hint">${esc(idText(r))}${esc(moreText(gOf.get(r)))}${r['Searched As'] && r['Searched As'] !== 'Patient' ? ` · searched as ${esc(r['Searched As'].toLowerCase())}` : ''}</span>${pillsOf(r).length || guarFlag(r) || precheckPill(r) ? `<div class="pills">${pillsHtml(r)}${guarFlag(r)}${precheckPill(r)}</div>` : ''}</td>
             <td>${esc(r['Next Event'])}<br><span class="hint">${esc([r['Next Location'], r['Next Provider']].filter(Boolean).join(' · '))}</span></td>
             <td><span class="pill ${r['Sent As'] === 'Discovery' ? 'd' : 'v'}">${esc(r['Sent As'])}</span><br><span class="hint">${esc(r['Sohar Status'])}</span></td>
             <td>${esc(r['Benefit Flag'] || (r['Sent As'] === 'Verification' ? '' : ''))}${r.Copay !== '' && r.Copay != null ? `<br><span class="hint">Copay ${esc(r.Copay)}${r.Coinsurance ? ` · ${esc(r.Coinsurance)}` : ''}</span>` : ''}</td>
@@ -176,11 +228,13 @@
   }
 
   function renderWorklist() {
-    list = filteredRows();
-    $('shown').textContent = `Showing ${list.length} of ${rows.length}`;
+    const qv = $('fQueue').value, bv = $('fBen').value;
+    const groups = patientsWhere((r) => shared(r) && (!qv || r['Work Queue'] === qv) && (!bv || BEN[bv](r))), gOf = new Map(groups.map((g) => [g.row, g]));
+    list = groups.map((g) => g.row);
+    $('shown').textContent = `Showing ${list.length} of ${REC.byPatient(rows).length} patients (${rows.length} Sohar results; the most recent result stands for each patient)`;
     const st = (s) => ({ Met: 'met', Approaching: 'appr' }[s] || '');
     $('tbl').querySelector('tbody').innerHTML = list.map((r) => `<tr class="q-${queueClass(r['Work Queue'])}" data-key="${esc(keyOf(r) + '|' + r['Sohar Ref'])}" tabindex="0">
-      ${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r['Next Location'])}${cell(name(r))}${cell(idText(r))}<td class="pillc">${pillsHtml(r)}</td>${cell(r['Sent As'])}
+      ${cell([r['Next Appt'], r['Next Time']].filter(Boolean).join(' '))}${cell(r['Next Location'])}${cell(name(r))}${cell(idText(r))}<td class="pillc">${pillsHtml(r)}${guarFlag(r)}${precheckPill(r)}</td>${cell(r['Sent As'] + moreText(gOf.get(r)))}
       ${cell(r['Sohar Status'])}${cell(r['Work Queue'])}${cell(r.Action, 'wide')}${cell(r['Choose in NextGen'], 'mid')}
       ${cell(r['Benefit Flag'])}${cell(r.Copay)}${cell(r.Coinsurance)}
       ${cell(left(r['Deductible Remaining'], r.Deductible), st(r['Deductible Status']))}${cell(left(r['OOP Remaining'], r['OOP Max']), st(r['OOP Status']))}
@@ -203,36 +257,201 @@
       : C.adminMessage(rows.filter(shared), { asOf, mode });
   }
 
-  // ---------- patient view ----------
-  function showDetail(key) {
-    const r = rows.find((x) => `${keyOf(x)}|${x['Sohar Ref']}` === key);
+  // ---------- patient record (v0.20: one record per MRN) ----------
+  // Top down: the Sohar Flow cost estimates, then the most recent result, the upcoming visits and the financial progress,
+  // then the guarantor check, the calculator, NextGen tasks, and every earlier verification or discovery, newest first.
+  let detailKey = '';
+  const keyOfDetail = (dk) => { const r = rows.find((x) => `${keyOf(x)}|${x['Sohar Ref']}` === dk); return r ? (keyOf(r) || `ref:${r['Sohar Ref']}`) : ''; };
+  function showDetail(dk) {
+    const k = keyOfDetail(dk);
+    if (!k) return;
+    detailKey = k;
+    const rec = k.startsWith('ref:') ? null : REC.patientRecord(rows, k, { outcomes, flow, asOf });
+    const r = rec ? rec.lead : rows.find((x) => `ref:${x['Sohar Ref']}` === k);
     if (!r) return;
-    const k = keyOf(r);
-    const its = tasks.filter((t) => (k ? keyOf(t) === k : t['Sohar Ref'] === r['Sohar Ref']));
-    const others = k ? rows.filter((x) => x !== r && keyOf(x) === k) : [];
-    const grp = (title, keys, src) => `<div class="dgroup"><h3>${title}</h3><dl>${keys.filter((k) => (src || r)[k] !== '' && (src || r)[k] != null).map((k) => `<dt>${esc(k)}</dt><dd>${k === 'Sohar Link' ? link((src || r)[k]) : esc((src || r)[k])}</dd>`).join('') || '<dd class="hint">None</dd>'}</dl></div>`;
+    const its = tasks.filter((t) => (rec ? keyOf(t) === k : t['Sohar Ref'] === r['Sohar Ref']));
+    const prof = profiles[String(r['Per Nbr'] || '')] || null;
+    const dl = (pairs) => { const p = pairs.filter(([, v]) => v !== '' && v != null); return p.length ? `<dl>${p.map(([t, v, html]) => `<dt>${esc(t)}</dt><dd>${html ? v : esc(v)}</dd>`).join('')}</dl>` : '<p class="hint">None</p>'; };
+    const who = [prof && prof.pronouns ? `Pronouns: ${prof.pronouns}` : '', prof && prof.genderIdentity ? `Gender identity: ${prof.genderIdentity}` : '', prof && prof.currentGender ? `Current gender: ${prof.currentGender}` : ''].filter(Boolean);
     const box = $('detail');
     box.innerHTML = `<div class="dhead"><h2>${esc(name(r))}</h2>
-        <span class="hint">${esc(idText(r))}${r['Per Nbr'] && r.MRN ? ` · Per Nbr ${esc(r['Per Nbr'])}` : ''}</span>
+        <span class="hint">${esc(idText(r))}${r['Per Nbr'] && r.MRN ? ` · Per Nbr ${esc(r['Per Nbr'])}` : ''}${rec && rec.results.length > 1 ? ` · ${rec.results.length} Sohar results` : ''}</span>
         <button class="small" id="btnHide">Close</button></div>
+      ${who.length ? `<p class="hint who">${who.map(esc).join(' · ')}</p>` : ''}
+      ${rec ? flowHtml(rec.flow) : ''}
+      <div class="dgrid rtop">
+        <div class="dgroup lead"><h3>Most recent result</h3>
+          <p><span class="pill ${r['Sent As'] === 'Discovery' ? 'd' : 'v'}">${esc(r['Sent As'])}</span> <b>${esc(r['Sohar Status'])}</b> <span class="hint">${esc(r['Sohar Date'] ? fmtWhen({ time: C.soharTime(r['Sohar Date']), date: r['Sohar Date'] }) : '')}</span></p>
+          ${dl([['Action', r.Action], ['Choose in NextGen', r['Choose in NextGen']], ['Sohar Payer', r['Sohar Payer']], ['NextGen Payer', r['NextGen Payer']], ['Plan', r.Plan], ['Network', r.Network],
+            ['Coverage', [r['Coverage Start'], r['Coverage End']].some(Boolean) ? `${r['Coverage Start'] || '?'} to ${r['Coverage End'] || 'open'}` : ''], ['Member ID', r['Sohar Member ID'] || r['NextGen Member ID']],
+            ['Searched as', r['Searched As'] && r['Searched As'] !== 'Patient' ? r['Searched As'] : ''], ['Match', r.Match], ['Sohar', link(r['Sohar Link']), true]])}
+          ${pillsOf(r).length ? `<div class="pills">${pillsHtml(r)}</div>` : ''}</div>
+        <div class="dgroup" id="visitBox"><h3>Upcoming visits and pre-check</h3>${visitsHtml(r, rec)}
+          ${r['Next Provider'] ? `<p class="hint">Next with ${esc(r['Next Provider'])}</p>` : ''}</div>
+        <div class="dgroup"><h3>Financial progress</h3>${financialHtml(rec && rec.financial, r)}</div>
+      </div>
       <div class="dgrid">
-        ${grp('Upcoming visits', ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'Next Provider', 'Upcoming Appts', 'Upcoming Detail'])}
+        ${guarantorHtml(prof)}
         <div class="dgroup"><h3>NextGen tasks</h3>${its.length ? `<ul class="tasklist">${its.map((t) => `<li class="${open(t) ? '' : 'done'}"><label><input type="checkbox" data-task="${esc(t['Task Key'])}" ${open(t) ? '' : 'checked'}> <b>${esc(t.Task)}</b></label><br>${esc(t.Details)}${t['Clinic Note'] ? `<br><span class="cnote">Clinic: ${esc(t['Clinic Note'])}</span>` : ''}</li>`).join('')}</ul>` : '<p class="hint">None</p>'}</div>
-        ${grp('Benefits (in-network)', ['Benefit Flag', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status', 'OOP Max', 'OOP Remaining', 'OOP Status', 'Coverage Level'])}
-        ${grp('Coverage', ['Sent As', 'Searched As', 'Sohar Status', 'Action', 'Choose in NextGen', 'NextGen Payer', 'NextGen Member ID', 'Sohar Payer', 'Sohar payerId', 'Sohar Member ID', 'Plan', 'Network', 'Coverage Start', 'Coverage End', 'Match', 'Sohar Date', 'Sohar Link'])}
-        ${others.map((o) => grp(`Also: ${esc(o['Sent As'])} result`, ['Sohar Status', 'Action', 'Sohar Payer', 'Benefit Flag', 'Sohar Date'], o)).join('')}
         ${fees ? `<div class="dgroup est" id="estPanel" data-per="${esc(r['Per Nbr'])}"></div>` : ''}
-      </div>`;
+      </div>
+      <div class="dgroup timeline"><h3>Earlier verifications and discoveries <span class="hint">newest first</span></h3>${timelineHtml(rec ? rec.timeline : [])}</div>`;
     box.hidden = false;
-    if (fees) renderEstimatePanel(r['Per Nbr']);
+    if (fees) renderEstimatePanel(r['Per Nbr'], r);
+    box.querySelectorAll('.meter').forEach((m) => { m.firstElementChild.style.width = `${Math.round(Math.min(1, +m.dataset.pct) * 100)}%`; });
     $('btnHide').addEventListener('click', hideDetail);
     if (!$('detailBackdrop')){ const bd = document.createElement('div'); bd.className = 'backdrop'; bd.id = 'detailBackdrop'; bd.addEventListener('click', hideDetail); document.body.append(bd); }
     $('btnHide').focus();
   }
   // the detail card floats over the dashboard; everything behind it is blurred
-  function hideDetail() { $('detail').hidden = true; estOver = null; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
+  function hideDetail() { $('detail').hidden = true; estOver = null; detailKey = ''; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
 
-  // ---------- fee estimates (v0.11, a test; only when the pane sends fee data) ----------
+  /**
+   * Upcoming visits from the report, each with the NextGen Pre-Check Complete value, the checklist and notes admins add
+   * here (saved on the hidden Pre-Check sheet with their name). Without report visits: the visit summary from the Sohar
+   * result. The admin's name comes from Config "Admin names" and is remembered on this computer.
+   */
+  const NAME_KEY = 'sohar.precheck.by';
+  let adminName = (() => { try { return localStorage.getItem(NAME_KEY) || ''; } catch (e) { return ''; } })();
+  function visitsHtml(r, rec) {
+    const vs = visits[String(r['Per Nbr'] || '')] || [];
+    if (!vs.length) return rec && rec.upcoming.length ? `<ul class="visits">${rec.upcoming.map((v) => `<li>${esc(v)}</li>`).join('')}</ul>` : '<p class="hint">None scheduled</p>';
+    const names = admins.includes(adminName) || !adminName ? admins : [adminName, ...admins];
+    const picker = `<label class="inline pcby">Your name
+      ${names.length ? `<select id="pcBy"><option value="">Pick your name</option>${names.map((n) => `<option${n === adminName ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`
+        : `<input id="pcBy" value="${esc(adminName)}" placeholder="Your name" maxlength="60">`}</label>
+      ${names.length ? '' : '<span class="hint">Add the admin names to Config "Admin names" (separated by ;) to pick from a list.</span>'}`;
+    return `${picker}<ul class="visits pc">${vs.map((v, i) => `<li>
+      <b>${esc([v.date, v.time].filter(Boolean).join(' '))}</b> ${esc([v.event, v.loc].filter(Boolean).join(' · '))}${v.provider ? ` <span class="hint">${esc(v.provider)}</span>` : ''}
+      <br><span class="hint">${esc(v.lasfir || name(r))} · NextGen pre-check: ${esc(v.precheck || 'not on the report')}</span>
+      <div class="pcheck">${v.items.map((it) => `<label class="inline"><input type="checkbox" data-pc="${i}" data-pc-item="${esc(it.id)}"${it.done ? ' checked' : ''}> ${esc(it.label)}
+        <span class="hint" data-pc-note="${i}|${esc(it.id)}">${esc(pcNote(it))}</span></label>`).join('')}</div>
+      <div class="pnotes">${(v.notes || []).map((n) => `<p class="pnote">${esc(n.note)} <span class="hint">${esc([n.by, n.when].filter(Boolean).join(', '))}</span></p>`).join('')}
+        <div class="pnote-add"><input data-pn="${i}" maxlength="${REC.NOTE_MAX}" placeholder="Add a note for this visit" aria-label="Note for the ${esc(v.date)} visit"> <button class="small" data-pn-add="${i}">Add note</button></div></div></li>`).join('')}</ul>
+      <p class="hint">Ticks and notes are saved in this workbook with your name. The add-in does not change NextGen: "Updated in NextGen" means you made the change there.</p>`;
+  }
+  const pcNote = (it) => (it.source === 'NextGen report' ? '(from the report)' : it.source === 'Marked here' ? `(${[it.by, it.when].filter(Boolean).join(', ')})` : '');
+  const stamp = () => { const now = new Date(); return `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`; };
+  const detailVisit = (i) => {
+    const r = rows.find((x) => keyOf(x) === detailKey) || rows.find((x) => `ref:${x['Sohar Ref']}` === detailKey);
+    return r ? { r, v: (visits[String(r['Per Nbr'] || '')] || [])[+i] } : {};
+  };
+  /** The admin's name, or a notice and null when none is picked. */
+  function byOrAsk() {
+    if (adminName) return adminName;
+    notice('Pick your name first (top of Upcoming visits). It is saved with each tick and note.', false);
+    const el = $('pcBy'); if (el) el.focus();
+    return null;
+  }
+  $('detail').addEventListener('change', (e) => {
+    if (e.target.id === 'pcBy') {
+      adminName = e.target.value.trim();
+      try { localStorage.setItem(NAME_KEY, adminName); } catch (err) { /* storage blocked: remembered for this window only */ }
+      return;
+    }
+    const c = e.target.closest('input[data-pc]');
+    if (!c || !detailKey) return;
+    const { r, v } = detailVisit(c.dataset.pc);
+    const it = v && v.items.find((x) => x.id === c.dataset.pcItem);
+    if (!it) return;
+    const by = byOrAsk();
+    if (!by) { c.checked = !c.checked; return; }
+    Object.assign(it, { done: c.checked, source: 'Marked here', when: stamp(), by });
+    const note = $('detail').querySelector(`[data-pc-note="${c.dataset.pc}|${it.id}"]`);
+    if (note) note.textContent = pcNote(it);
+    toPane({ type: 'precheck', key: v.key, lasfir: v.lasfir || name(r), date: v.date, time: v.time, item: it.id, done: c.checked, by });
+    renderPrep(); renderWorklist(); // the list pills follow
+  });
+  $('detail').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-pn-add]');
+    if (!b || !detailKey) return;
+    const { r, v } = detailVisit(b.dataset.pnAdd);
+    const input = $('detail').querySelector(`input[data-pn="${b.dataset.pnAdd}"]`);
+    const text = input ? input.value.replace(/\s+/g, ' ').trim() : '';
+    if (!v || !text) return;
+    const by = byOrAsk();
+    if (!by) return;
+    const n = { note: text.slice(0, REC.NOTE_MAX), by, when: stamp() };
+    v.notes = [n, ...(v.notes || [])];
+    input.value = '';
+    input.closest('.pnotes').insertAdjacentHTML('afterbegin', `<p class="pnote">${esc(n.note)} <span class="hint">${esc(`${n.by}, ${n.when}`)}</span></p>`);
+    toPane({ type: 'precheck-note', key: v.key, lasfir: v.lasfir || name(r), date: v.date, time: v.time, note: n.note, by });
+  });
+  $('detail').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const i = e.target.closest('input[data-pn]');
+    if (i) { e.preventDefault(); const b = $('detail').querySelector(`[data-pn-add="${i.dataset.pn}"]`); if (b) b.click(); }
+  });
+  // Free-text name (no Config list yet): remembered as it is typed.
+  $('detail').addEventListener('input', (e) => {
+    if (e.target.id !== 'pcBy') return;
+    adminName = e.target.value.trim();
+    try { localStorage.setItem(NAME_KEY, adminName); } catch (err) { /* storage blocked */ }
+  });
+  /** Sohar Flow cost estimates, one card per visit (soonest first). Sandbox files say so. */
+  function flowHtml(list) {
+    if (!list || !list.length) return '';
+    const card = (f) => {
+      const pt = REC.flowAmount(f['Sohar Est Patient']), plan = REC.flowAmount(f['Sohar Est Plan Pays']);
+      const done = /^complete/i.test(f['Run Status']);
+      return `<div class="fcard">
+        <div class="fhead"><b>${esc([f['Appt Date'], f.Time].filter(Boolean).join(' '))}</b> <span class="hint">${esc([f.Event, f.Location, f.Provider].filter(Boolean).join(' · '))}</span></div>
+        <div class="famt">${pt ? `<span class="big">${esc(pt)}</span> <span class="hint">patient${plan ? ` · plan pays ${esc(plan)}` : ''}</span>` : `<span class="hint">${esc(done ? f['Estimate Note'] || 'No estimate' : `Flow ${String(f['Run Status'] || 'not started').toLowerCase().replace(/_/g, ' ')}`)}</span>`}</div>
+        <p class="hint">${esc([f['Est Codes'] ? `Codes ${f['Est Codes']}` : '', f['Rate Level'], f['Fee Tab'], f['Estimate Policy'] ? `${f['Estimate Policy']} policy` : '', f.Network, f['Sohar Payer']].filter(Boolean).join(' · '))}</p>
+        ${f['Policy vs NextGen'] ? `<p class="fpol">${esc(f['Policy vs NextGen'])}</p>` : ''}
+        ${pt && f['Estimate Note'] ? `<p class="hint">${esc(f['Estimate Note'])}</p>` : ''}
+        ${f['Run Error'] ? `<p class="warn-text">${esc(f['Run Error'])}</p>` : ''}
+      </div>`;
+    };
+    const sandbox = list.some(REC.isSandbox);
+    return `<div class="dgroup flow"><h3>Sohar Flow cost estimate${list.length > 1 ? 's' : ''} ${sandbox ? '<span class="pill p-amber">Sandbox: test data</span>' : ''} <span class="hint">estimates, not a guarantee</span></h3>
+      <div class="fcards">${list.map(card).join('')}</div></div>`;
+  }
+  /** Deductible and OOP max: spent so far of the total, with a bar (core.benefitsView row). */
+  function financialHtml(b, r) {
+    if (!b) return `<p class="hint">${r['Sent As'] === 'Discovery' ? 'No benefits yet: discovery finds coverage; the verification of it brings the amounts.' : 'No benefit amounts from Sohar.'}</p>`;
+    const bar = (label, met, total, pct, status, rem) => {
+      if (status === 'None') return `<div class="frow"><span>${label}</span> <span class="hint">None</span></div>`;
+      if (pct === '' || pct == null) return `<div class="frow"><span>${label}</span> <span class="hint">${esc(status || 'Unknown')}</span></div>`;
+      const cls = status === 'Met' ? 'met' : status === 'Approaching' ? 'appr' : '';
+      return `<div class="frow ${cls}"><span>${label}</span> <span class="meter wide" data-pct="${pct}"><span></span></span> <b>${Math.round(pct * 100)}%</b>
+        <br><span class="hint">${esc(usd(met))} of ${esc(usd(total))} met${rem !== '' && rem != null ? ` · ${esc(usd(rem))} left` : ''}${status ? ` · ${esc(status)}` : ''}</span></div>`;
+    };
+    return `${bar('Deductible', b['Deductible Met'], b.Deductible, b['Deductible % Met'], b['Deductible Status'], b['Deductible Remaining'])}
+      ${bar('OOP max', b['OOP Met'], b['OOP Max'], b['OOP % Met'], b['OOP Status'], b['OOP Remaining'])}
+      <p class="hint">${esc([b.Copay !== '' && b.Copay != null ? `Copay ${usd(b.Copay)}` : '', b.Coinsurance ? `Coinsurance ${b.Coinsurance}` : '', b.Plan].filter(Boolean).join(' · '))}</p>
+      ${b.Flag ? `<p class="${b.Flag === 'OOP max met' ? 'ok-text' : 'warn-text'}">${esc(b.Flag)}</p>` : ''}`;
+  }
+  /** NextGen guarantor (LASFIR) and the guarantor vs Sohar subscriber check for each result. */
+  function guarantorHtml(prof) {
+    if (!prof) return '';
+    const checks = prof.checks || [];
+    if (!prof.guarantor && !checks.length) return '';
+    const sev = (s) => (s === 'high' ? 'sev-high' : s === 'medium' ? 'sev-medium' : s === 'low' ? 'sev-low' : '');
+    return `<div class="dgroup"><h3>Guarantor</h3>
+      ${dl2([['NextGen guarantor', prof.guarantor || 'Not on the report'], ['Guarantor DOB', prof.guarantorDob], ['Previous last name', prof.prevLastName]])}
+      ${checks.length ? `<ul class="pc-items gchecks">${checks.map((c) => `<li class="${sev(c.severity)}"><b>${esc(c.status)}</b> <span class="hint">${esc([c.sentAs, c.payer, c.date].filter(Boolean).join(' · '))}</span><br>${esc(c.text)}</li>`).join('')}</ul>` : ''}</div>`;
+  }
+  const dl2 = (pairs) => { const p = pairs.filter(([, v]) => v !== '' && v != null); return p.length ? `<dl>${p.map(([t, v]) => `<dt>${esc(t)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : ''; };
+  /** Earlier results and ledger rows, newest first. */
+  function timelineHtml(list) {
+    if (!list.length) return '<p class="hint">No earlier Sohar checks for this patient.</p>';
+    return `<ol class="tline">${list.map((e) => `<li>
+      <span class="tdate">${esc(e.date ? fmtWhen(e) : 'Date unknown')}</span>
+      <span class="pill ${e.kind === 'Discovery' ? 'd' : 'v'}">${esc(e.kind)}</span> <b>${esc(e.status || '—')}</b>${e.payer ? ` · ${esc(e.payer)}` : ''}${e.plan ? ` · ${esc(e.plan)}` : ''}
+      ${e.source === 'ledger' ? ' <span class="hint">(from the payer outcomes history; details not kept)</span>' : ''}
+      ${[e.action, e.coverage ? `Coverage ${e.coverage}` : '', e.benefits, e.searched && e.searched !== 'Patient' ? `Searched as ${e.searched.toLowerCase()}` : ''].filter(Boolean).length
+        ? `<br><span class="hint">${esc([e.action, e.coverage ? `Coverage ${e.coverage}` : '', e.benefits, e.searched && e.searched !== 'Patient' ? `Searched as ${e.searched.toLowerCase()}` : ''].filter(Boolean).join(' · '))}</span>` : ''}
+      ${e.link ? ` ${link(e.link)}` : ''}</li>`).join('')}</ol>`;
+  }
+  const fmtWhen = (e) => {
+    if (!isFinite(e.time)) return e.date;
+    const d = new Date(e.time);
+    return d.toLocaleString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+
+  // ---------- patient responsibility calculator (v0.20; the West Coast calculator's math, pre-filled from Sohar) ----------
+  // Shown when the pane sends fee data (Config "Fee estimates" On). estOver: the open panel's inputs and codes.
   const money2 = (n) => (n == null ? '—' : F.usd(n));
   function renderFeeBar() {
     const bar = $('feeBar');
@@ -255,81 +474,117 @@
     const cell = (est) => { const p = F.partialNote(est); return `<td${p ? ` title="${esc(p)}"` : ''}>${esc(money2(est && est.patient))}${p ? ` <span class="hint">${esc(p)}</span>` : ''}</td>`; };
     return `${cell(e.md)}${cell(e.np)}`;
   }
-  /** The estimate panel in the patient card: code + units editors, the three toggles, MD and NP math. */
-  function renderEstimatePanel(per) {
+  /** The calculator panel in the patient record: plan, benefits and codes pre-filled, all editable; MD and NP results. */
+  function renderEstimatePanel(per, row) {
     const box = $('estPanel');
     if (!box) return;
-    const x = estimateFor(per);
-    if (!x) {
-      box.innerHTML = `<h3>Estimate</h3><p class="hint">${fees.status && fees.status.loaded ? 'No estimate: no verification with benefits for this patient.' : 'Upload the fee schedule on the Benefits tab first.'}</p>`;
+    const ctx = fees && fees.contexts ? fees.contexts[per] : null;
+    if (!ctx) {
+      box.innerHTML = `<h3>Patient responsibility calculator</h3><p class="hint">${fees.status && fees.status.loaded ? 'No estimate: no verification with benefits for this patient.' : 'Drop the fee schedule or the West Coast Patient Responsibility Calculator on the Benefits tab first.'}</p>`;
       return;
     }
-    const { ctx } = x;
-    if (!estOver || estOver.per !== per) estOver = { per, codes: (ctx.codes || []).map((c) => ({ ...c })), toggles: { ...ctx.defaults } };
-    const T = fees.toggles || F.TOGGLES;
-    const sel = (kind, label) => `<label>${label}<select data-etoggle="${kind}">${T[kind].map((o) => `<option${estOver.toggles[kind] === o ? ' selected' : ''}>${esc(o)}</option>`).join('')}</select></label>`;
-    box.innerHTML = `<h3>Estimate, not a guarantee <span class="hint">next visit${ctx.appt ? ` ${esc(ctx.appt)}` : ''}${ctx.event ? ` · ${esc(ctx.event)}` : ''}</span></h3>
-      <p class="hint">${esc([ctx.telehealth ? `Telehealth: home clinic ${ctx.home || 'unknown'}` : ctx.location, ctx.payer ? `${ctx.payer} (${ctx.payerSource})` : '', ctx.codeKeyword ? `codes from "${ctx.codeKeyword}"${ctx.codeNote ? `: ${ctx.codeNote}` : ''}` : ''].filter(Boolean).join(' · '))}</p>
-      <div class="estcodes">${estOver.codes.map((c, i) => `<span class="estcode"><input data-ecode="${i}" value="${esc(c.code)}" aria-label="Code ${i + 1}" maxlength="8"> x <input data-eunits="${i}" type="number" min="1" step="1" value="${esc(c.units)}" aria-label="Units for code ${i + 1}"> <button class="link" data-edel="${i}" aria-label="Remove code ${i + 1}">Remove</button></span>`).join('')}
+    if (!estOver || estOver.per !== per) estOver = { per, row: row || estOver?.row || {}, inputs: F.calcInputs(ctx, row), codes: (ctx.codes || []).map((c) => ({ ...c, coins: '' })) };
+    const b = estOver.inputs;
+    const opt = (list, v) => list.map(([k, l]) => `<option value="${esc(k)}"${k === v ? ' selected' : ''}>${esc(l)}</option>`).join('');
+    const numIn = (k, label) => `<label>${label}<input type="number" min="0" step="any" data-cin="${k}" value="${esc(b[k])}"></label>`;
+    const med = b.planType === 'medicare';
+    box.innerHTML = `<h3>Patient responsibility calculator <span class="hint">next visit${ctx.appt ? ` ${esc(ctx.appt)}` : ''}${ctx.event ? ` · ${esc(ctx.event)}` : ''} · not a guarantee</span></h3>
+      <p class="hint">${esc([ctx.telehealth ? `Telehealth: home clinic ${ctx.home || 'unknown'}` : ctx.location, ctx.tab ? `fee tab ${ctx.tab}` : '', ctx.payer ? `${ctx.payer} (${ctx.payerSource})` : '', ctx.codeKeyword ? `codes from "${ctx.codeKeyword}"${ctx.codeNote ? `: ${ctx.codeNote}` : ''}` : ''].filter(Boolean).join(' · '))}</p>
+      <div class="filters calcgrid">
+        <label>Plan type<select data-cin="planType">${opt(F.CALC_PLANS, b.planType)}</select></label>
+        <label>Network<select data-cin="network">${opt([['in', 'In-network'], ['out', 'Out-of-network']], b.network)}</select></label>
+        <label>How does this plan charge the patient?<select data-cin="mode"${b.planType === 'self_pay' ? ' disabled' : ''}>${opt(F.CALC_MODES, b.mode)}</select></label>
+      </div>
+      ${med ? `<div class="filters"><label class="inline"><input type="checkbox" data-cin="secCoins"${b.secCoins ? ' checked' : ''}> Secondary / Medigap covers coinsurance (also zeroes any copay)</label>
+        <label class="inline"><input type="checkbox" data-cin="secDed"${b.secDed ? ' checked' : ''}> Secondary also covers the deductible</label></div>` : ''}
+      <div class="filters calcgrid${b.planType === 'self_pay' ? ' off' : ''}">${numIn('deductible', 'Annual deductible ($)')}${numIn('deductibleMet', 'Deductible met so far ($)')}${numIn('coins', 'Coinsurance, patient pays (%)')}
+        ${numIn('copay', 'Copay per visit ($)')}${numIn('oopMax', 'OOP max ($, 0 = none)')}${numIn('oopMet', 'OOP met so far ($)')}</div>
+      <p class="hint">Pre-filled from Sohar${b.missing.length ? `; not returned: ${esc(b.missing.join(', '))} (counted as $0)` : ''}. ${ctx.feePayer ? `A change to "How does this plan charge" is remembered for ${esc(ctx.feePayer)} (Estimate Defaults sheet); other changes are for this estimate only.` : 'No fee payer column is mapped for this patient, so changes are for this estimate only and are not remembered.'}</p>
+      <div class="estcodes">${estOver.codes.map((c, i) => `<span class="estcode"><input data-ecode="${i}" value="${esc(c.code)}" aria-label="Code ${i + 1}" maxlength="8"> x <input data-eunits="${i}" type="number" min="1" step="1" value="${esc(c.units)}" aria-label="Units for code ${i + 1}">
+        <input data-ecoins="${i}" type="number" min="0" max="100" step="any" value="${esc(c.coins)}" placeholder="coins %" aria-label="Coinsurance % for code ${i + 1} (blank: the plan's)"> <button class="link" data-edel="${i}" aria-label="Remove code ${i + 1}">Remove</button></span>`).join('')}
         <button class="small" data-eadd="1">Add code</button> <button class="link" data-ereset="1">Reset</button></div>
-      <div class="filters esttoggles">${sel('deductible', 'Deductible')}${sel('coinsurance', 'Coinsurance')}${sel('copay', 'Copay')}</div>
-      <p class="hint">${ctx.feePayer ? `Toggle changes are remembered for ${esc(ctx.feePayer)} (Estimate Defaults sheet).` : 'Toggle changes are for this estimate only: no fee payer column is mapped for this patient, so they are not remembered.'} Code changes are for this estimate only.</p>
       <div id="estResults"></div>`;
     renderEstimateResults();
   }
   function renderEstimateResults() {
     const out = $('estResults');
     if (!out || !estOver) return;
-    const x = estimateFor(estOver.per, { codes: estOver.codes.filter((c) => c.code), toggles: estOver.toggles });
-    if (!x) { out.innerHTML = ''; return; }
-    const { ctx, e } = x;
-    const col = (lbl, est) => `<div class="estcol"><h4>${lbl}: ${esc(est && est.patient != null ? F.usd(est.patient) : '—')}</h4>${est && est.none ? `<p class="hint">${esc(est.none)}</p>` : est ? `<ul class="estlines">${F.estimateText(est).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}</div>`;
+    const ctx = fees && fees.contexts ? fees.contexts[estOver.per] : null;
+    if (!ctx) { out.innerHTML = ''; return; }
+    const b = estOver.inputs;
+    const e = F.calcPatient(ctx, fees.tables, b, estOver.codes);
+    const col = (lbl, est) => `<div class="estcol"><h4>${lbl}: ${esc(est && est.patient != null ? F.usd(est.patient) : '—')}</h4>${est ? `<ul class="estlines">${F.calcText(est, b).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}</div>`;
     out.innerHTML = `${e.flags.length ? `<ul class="pc-items">${e.flags.map((f) => `<li class="sev-medium">${esc(f)}</li>`).join('')}</ul>` : ''}
-      ${e.basis ? `<p class="hint">${esc(e.basis)}${ctx.oon ? ' (out of network)' : ''}</p>` : ''}
-      ${e.md || e.np ? `<div class="estcols">${col('MD', e.md)}${col('NP', e.np)}</div>` : ''}`;
+      ${e.basis ? `<p class="hint">${esc(e.basis)}</p>` : ''}
+      ${e.md || e.np ? `<div class="estcols">${e.same ? col(b.planType === 'self_pay' ? 'Self pay' : 'MD and NP', e.md) : `${col('MD', e.md)}${col('NP', e.np)}`}</div>` : ''}`;
   }
   function refreshEstimate() {
     const p = $('estPanel');
     if (!p || $('detail').hidden) return;
     if (!fees) { p.remove(); return; }
-    // New fee data (an upload or saved defaults): toggles follow the saved defaults, codes typed here are kept.
-    const keep = estOver && estOver.per === p.dataset.per ? estOver.codes : null;
-    estOver = null;
-    renderEstimatePanel(p.dataset.per);
-    if (keep && estOver) { estOver.codes = keep; renderEstimatePanel(p.dataset.per); }
+    // New fee data (an upload or saved defaults): what staff typed in the open panel is kept; rates follow the new data.
+    const keep = estOver && estOver.per === p.dataset.per ? estOver : null;
+    estOver = keep;
+    renderEstimatePanel(p.dataset.per, keep ? keep.row : null);
+  }
+  // Plan type presets, as on the calculator page: Medicare 20% after the deductible; Medicaid and VA copay only.
+  function planPreset(b) {
+    if (b.planType !== 'medicare') { b.secCoins = false; b.secDed = false; }
+    if (b.planType === 'medicare') { b.mode = 'ded_coins'; b.coins = 20; }
+    if (b.planType === 'medicaid' || b.planType === 'va') { b.mode = 'copay_only'; b.coins = 0; b.deductible = 0; }
   }
   $('detail').addEventListener('input', (e) => {
-    const c = e.target.closest('[data-ecode],[data-eunits]');
+    const c = e.target.closest('[data-ecode],[data-eunits],[data-ecoins],input[data-cin]');
     if (!c || !estOver) return;
-    const i = +(c.dataset.ecode ?? c.dataset.eunits);
+    if (c.dataset.cin) {
+      if (c.type === 'checkbox') return; // change event
+      estOver.inputs[c.dataset.cin] = c.value === '' ? '' : Math.max(0, Number(c.value) || 0);
+      renderEstimateResults();
+      return;
+    }
+    const i = +(c.dataset.ecode ?? c.dataset.eunits ?? c.dataset.ecoins);
     if (!estOver.codes[i]) return;
     if (c.dataset.ecode != null) estOver.codes[i].code = c.value.trim().toUpperCase();
-    else estOver.codes[i].units = Math.max(1, Number(c.value) || 1);
+    else if (c.dataset.eunits != null) estOver.codes[i].units = Math.max(1, Number(c.value) || 1);
+    else estOver.codes[i].coins = c.value;
     renderEstimateResults();
   });
   $('detail').addEventListener('change', (e) => {
-    const s = e.target.closest('[data-etoggle]');
+    const s = e.target.closest('select[data-cin],input[type=checkbox][data-cin]');
     if (!s || !estOver) return;
-    estOver.toggles[s.dataset.etoggle] = s.value;
+    const k = s.dataset.cin, b = estOver.inputs;
+    b[k] = s.type === 'checkbox' ? s.checked : s.value;
+    if (k === 'planType') { planPreset(b); renderEstimatePanel(estOver.per, estOver.row); return; }
+    if (k === 'mode') {
+      // Only the charge mode is remembered, as the matching Estimate Defaults toggles, so the Benefits table agrees.
+      const ctx = fees && fees.contexts ? fees.contexts[estOver.per] : null;
+      if (ctx && ctx.feePayer) toPane({ type: 'fee-defaults', feePayer: ctx.feePayer, toggles: F.CALC_MODE_TOGGLES[s.value] });
+    }
     renderEstimateResults();
-    const x = estimateFor(estOver.per);
-    // Only the toggle staff changed is remembered; the others shown here may be this patient's defaults (e.g. copay
-    // None for a $0 copay) and must not be saved for every patient on the fee payer.
-    if (x && x.ctx.feePayer) toPane({ type: 'fee-defaults', feePayer: x.ctx.feePayer, toggles: { [s.dataset.etoggle]: s.value } });
   });
   $('detail').addEventListener('click', (e) => {
     const b = e.target.closest('[data-eadd],[data-edel],[data-ereset]');
     if (!b || !estOver) return;
-    const per = estOver.per;
-    if (b.dataset.eadd) estOver.codes.push({ code: '', units: 1 });
+    const { per, row } = estOver;
+    if (b.dataset.eadd) estOver.codes.push({ code: '', units: 1, coins: '' });
     else if (b.dataset.edel != null) estOver.codes.splice(+b.dataset.edel, 1);
     else estOver = null;
-    renderEstimatePanel(per);
+    renderEstimatePanel(per, row);
   });
   async function uploadFee(files) {
     const f = files && files[0];
     if (!f) return;
-    if (!/\.xls[xm]$/i.test(f.name)) { notice(`${f.name} is not an .xlsx file. The fee schedule must be the Excel workbook.`, false); return; }
+    if (/\.html?$/i.test(f.name)) {
+      // The West Coast Patient Responsibility Calculator (v0.20): its built-in rates complete the saved schedule.
+      try {
+        const html = await f.text();
+        if (!F.isCalculatorHtml(html)) { notice(`${f.name} has no built-in fee schedule. Drop the West Coast Patient Responsibility Calculator, or the fee schedule .xlsx.`, false); return; }
+        $('feeState').textContent = `Sending ${f.name} to Excel…`;
+        toPane({ type: 'fee-upload', name: f.name, html });
+      } catch (e) { notice(e.message, false); }
+      return;
+    }
+    if (!/\.xls[xm]$/i.test(f.name)) { notice(`${f.name} is not an .xlsx or .html file. Drop the fee schedule workbook or the West Coast Patient Responsibility Calculator.`, false); return; }
     try {
       const [file] = await readFiles([f]);
       $('feeState').textContent = `Sending ${f.name} to Excel…`;
@@ -583,6 +838,30 @@
       mk({ 'Next Appt': '10/23/2026', 'Next Time': '11:00 AM', 'Next Event': 'Telepsych', 'Next Location': 'Walnut Creek', 'Upcoming Appts': 4, 'Per Nbr': '100103', 'Last Name': 'Mensah', 'First Name': 'Afia', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', Action: 'Eligible. No action.', Copay: '0', Coinsurance: '0%', Deductible: '0', 'Deductible Remaining': '0', 'Deductible Status': 'None', 'OOP Max': '3000', 'OOP Remaining': '0', 'OOP Status': 'Met', 'NextGen Payer': 'QMB Noridian Northern CA', 'Sohar Payer': 'Medicare of California', Plan: 'MEDICARE PART B', Match: 'Per Nbr', 'Sohar Ref': 'q-3' }),
       mk({ 'Sent As': 'Verification', 'Sohar Status': 'error.member.id', Action: 'Not matched to a patient in the Import report. Member ID rejected. Check the card, fix in NextGen, re-verify.', Match: 'No match', 'Sohar Ref': 'q-9' }),
     ].map((r) => ({ ...r, 'Benefit Flag': C.benefitFlag(r), 'Work Queue': C.workQueue(r) }));
+    // v0.20 patient record: Rivera's earlier checks (a discovery, then a verification with less of the deductible met),
+    // one older check from the payer outcomes history, Flow estimates, pronouns and a guarantor check. All made up.
+    res[0]['Sohar Date'] = '2026-10-18T16:05:00Z';
+    res.push(
+      { ...res[0], 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-09-12T15:30:00Z', 'Deductible Remaining': '600', 'Deductible Status': 'Not met', 'OOP Remaining': '3100', 'OOP Status': 'Not met', Action: 'Superseded by a later result', 'Sohar Ref': 'q-1a', 'Work Queue': 'Clear' },
+      { ...res[0], 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', 'Sohar Date': '2026-08-30T17:10:00Z', Plan: '', Deductible: '', 'Deductible Remaining': '', 'OOP Max': '', 'OOP Remaining': '', Copay: '', Coinsurance: '', 'Deductible Status': '', 'OOP Status': '', Action: 'Coverage found: verify it.', 'Sohar Ref': 'q-1b', 'Work Queue': 'Clear' });
+    const demoOutcomes = [{ MRN: '80100', Kind: 'Verification', 'Sohar Status': 'complete.ineligible', 'Sohar Date': '2026-06-02T15:00:00Z', 'Returned Payer': 'Old Synthetic Plan', 'NextGen Payer': 'Old Synthetic Plan', Signal: '' }];
+    const fl = (o) => ({ ...Object.fromEntries(REC.FLOW_SHEET_COLS.map((c) => [c, ''])), MRN: '80100', LASFIR: C.lasfir('Rivera', 'Ana'), Location: 'San Rafael', 'Run Status': 'COMPLETE', 'Discovery Status': 'complete',
+      'Policy vs NextGen': 'Same policy as NextGen', 'Estimate Policy': 'NextGen', Network: 'INN', 'Sohar Payer': 'UMR', 'Fee Tab': 'Marin', File: 'Flow Results (SANDBOX).csv', ...o });
+    const demoFlow = [fl({ Key: 'd1', 'Appt Date': '10/20/2026', Time: '9:00 AM', Event: 'TMS Treatment Unilateral', 'Rate Level': 'NP', 'Est Codes': '', 'Estimate Note': 'TMS (intervention): no estimate; verify deductible, OOP max and insurance status' }),
+      fl({ Key: 'd2', 'Appt Date': '10/27/2026', Time: '9:00 AM', Event: 'Med Management In-Office', 'Rate Level': 'NP', 'Est Codes': '99214', 'Sohar Est Patient': '71.11', 'Sohar Est Plan Pays': '100.00' })];
+    const demoProfiles = { 100100: { pronouns: 'They, Them, Theirs', genderIdentity: '', currentGender: 'Female', guarantor: 'RIVANA (the patient)', checks: [
+      { sentAs: 'Verification', payer: 'UMR', date: '2026-10-18', ...REC.guarantorCheck({ patient: { firstName: 'Ana', lastName: 'Rivera' }, guarantor: { firstName: 'Ana', lastName: 'Rivera' }, guarantorSelf: true }, { firstName: 'Luis', lastName: 'Rivera' }) }] } };
+    // Report visits with Pre-Check Complete (made up): Rivera's first visit done in NextGen, Lindqvist's not.
+    const dv = (key, date, time, event, loc, pc, ticks) => {
+      const v = { date, time, event, loc, provider: '', status: '', precheck: pc, hasPrecheck: true, key };
+      return { ...v, lasfir: '', items: REC.precheckItems(v, key, ticks || []), notes: REC.precheckNotes(v, key, ticks || []) };
+    };
+    const demoVisits = {
+      100100: [dv('80100', '10/20/2026', '9:00 AM', 'TMS Treatment Unilateral', 'San Rafael', 'Yes', [{ Key: '80100|10/20/2026|9:00 AM', Item: 'nextgen', Done: 'Yes', By: 'Jordan Lee', When: '10/19/2026 4:10 PM' },
+        { Key: '80100|10/20/2026|9:00 AM', Item: 'note', Note: 'New card scanned; plan unchanged', By: 'Jordan Lee', When: '10/19/2026 4:12 PM' }]),
+        dv('80100', '10/27/2026', '9:00 AM', 'Med Management In-Office', 'San Rafael', '')],
+      100102: [dv('PER-100102', '10/22/2026', '10:00 AM', 'Med Management In-Office', 'Walnut Creek', 'No')],
+    };
     const demoPills = { 100100: 'NP-TMS', 100101: 'Medi-Cal; New Medi-Cal; Re-verify', 100102: 'Kaiser/VA MM no auth; Kaiser/VA MM', 100103: 'QMB' };
     for (const r of res) r.Pills = demoPills[r['Per Nbr']] || '';
     // ?fees=1: fee estimates with the made-up demo fee schedule (fees.js), as the pane would send them.
@@ -612,8 +891,12 @@
     // One task the clinic ticked done with a note (Clinic Template Tool file or the clinic inbox), made up.
     const demoTasks = C.buildTasks(res).map((t, i) => (i === 0 ? { ...t, Done: `Yes (clinic ${t['Next Location']})`, 'Clinic Note': `Called the patient, new card scanned (Front desk, ${t['Next Location']}, 10/19)` } : t));
     load({ results: res, tasks: demoTasks, exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees,
-      clinic: demoClinic, skipped: demoSkipped, skipCols: ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'], learning: demoLearning, guarantor: { count: 2, noDob: 1 } });
-    if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
+      clinic: demoClinic, skipped: demoSkipped, skipCols: ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'], learning: demoLearning, guarantor: { count: 2, noDob: 1 },
+      flow: demoFlow, outcomes: demoOutcomes, profiles: demoProfiles, visits: demoVisits, admins: ['Jordan Lee', 'Sam Ortiz'],
+      lastUpdated: { report: new Date(Date.now() - 2 * 36e5).toISOString(), sohar: new Date(Date.now() - 3 * 864e5).toISOString(), flow: new Date().toISOString() } });
+    // #patient opens the first demo patient's record (for checking the layout); other hashes pick a tab.
+    if (location.hash === '#patient') showDetail(`${keyOf(res[0])}|${res[0]['Sohar Ref']}`);
+    else if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
   }
 
   // Boot last, so everything above is initialized before demo() or the first message can use it.
