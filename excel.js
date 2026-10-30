@@ -18,9 +18,25 @@
     return Office.context.requirements.isSetSupported('ExcelApi', '1.11') ? Excel.run({ delayForCellEdit: true }, fn) : Excel.run(fn);
   }
 
+  /**
+   * The Import sheet, made (very hidden: it holds names and DOBs) when the workbook has none, so a missing or renamed
+   * Import sheet never stops an upload. The template check looks for tables, and Import has none.
+   */
+  async function importSheet(ctx) {
+    const ws = ctx.workbook.worksheets.getItemOrNullObject(SHEETS.import); ws.load('isNullObject');
+    await ctx.sync();
+    if (!ws.isNullObject) return ws;
+    const made = ctx.workbook.worksheets.add(SHEETS.import);
+    made.visibility = Excel.SheetVisibility.veryHidden;
+    await ctx.sync();
+    return made;
+  }
+
   async function readImportRows() {
     return run(async (ctx) => {
-      const ws = ctx.workbook.worksheets.getItem(SHEETS.import);
+      const ws = ctx.workbook.worksheets.getItemOrNullObject(SHEETS.import); ws.load('isNullObject');
+      await ctx.sync();
+      if (ws.isNullObject) return []; // no Import sheet yet: nothing uploaded (the next upload makes it)
       const used = ws.getUsedRangeOrNullObject(true);
       used.load('rowCount,columnCount,rowIndex,columnIndex,isNullObject');
       await ctx.sync();
@@ -420,7 +436,7 @@
     const grid = rows.map((r) => { const o = r.slice(); while (o.length < width) o.push(''); return o; });
     const failed = (s) => (e) => { e.message = `Could not load the report (${s}): ${e.message}. The Import sheet was not changed.`; throw e; };
     return run(async (ctx) => {
-      const wb = ctx.workbook, ws = wb.worksheets.getItem(SHEETS.import);
+      const wb = ctx.workbook, ws = await importSheet(ctx).catch(failed('checking the workbook'));
       if (grid.length && width && Office.context.requirements.isSetSupported('ExcelApi', '1.9')) {
         // Fail-safe: rows go to a hidden staging sheet first, then onto Import in one batch (clear + server-side
         // copy), so a cut-off upload leaves Import untouched, empty or complete, never a partial report to build from.
@@ -484,7 +500,7 @@
   /** Copy an uploaded appointment report (.xlsx) onto the Import sheet, formats included, as if pasted. */
   async function importXlsx(base64) {
     return withTempSheet(base64, async (ctx, used) => {
-      const ws = ctx.workbook.worksheets.getItem(SHEETS.import);
+      const ws = await importSheet(ctx);
       ws.getRange().clear();
       if (used.isNullObject) { await ctx.sync(); return; }
       ws.getRangeByIndexes(0, 0, used.rowCount, used.columnCount).copyFrom(used, Excel.RangeCopyType.all);
