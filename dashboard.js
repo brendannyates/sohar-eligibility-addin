@@ -123,13 +123,13 @@
     // A report without the Pre-Check column says nothing: no pill until someone ticks it.
     return v.hasPrecheck || (pc && pc.source) ? 'open' : '';
   }
-  const precheckPill = (r) => ({ done: ' <span class="pill p-blue">Pre-check ✓</span>', open: ' <span class="pill p-amber">Pre-check open</span>' }[precheckOf(r)] || '');
+  const precheckPill = (r) => ({ done: ' <span class="pill p-blue">Pre-check done</span>', open: ' <span class="pill p-amber">Pre-check open</span>' }[precheckOf(r)] || '');
   /** A red pill when the NextGen guarantor and a Sohar subscriber are different people (record.guarantorCheck, high). */
   // Amber when the patient is the guarantor but Sohar's subscriber is someone else (check the policy's insured).
   const guarFlag = (r) => {
     const cs = (profiles[String(r['Per Nbr'] || '')] || {}).checks || [];
-    if (cs.some((c) => c.severity === 'high')) return ' <span class="pill p-red">Guarantor ≠ subscriber</span>';
-    return cs.some((c) => c.severity === 'medium') ? ' <span class="pill p-amber">Check insured</span>' : '';
+    if (cs.some((c) => c.severity === 'high')) return ' <span class="pill p-red">Guarantor: Different people</span>';
+    return cs.some((c) => c.severity === 'medium') ? ' <span class="pill p-amber">Guarantor: Check insured</span>' : '';
   };
 
   // ---------- filters ----------
@@ -258,96 +258,404 @@
       : C.adminMessage(rows.filter(shared), { asOf, mode });
   }
 
-  // ---------- patient record (v0.20: one record per MRN) ----------
-  // Top down: the Sohar Flow cost estimates, then the most recent result, the upcoming visits and the financial progress,
-  // then the guarantor check, the calculator, NextGen tasks, and every earlier verification or discovery, newest first.
-  let detailKey = '';
+  // ---------- patient view (v0.22: one record per MRN, sidebar + one section at a time) ----------
+  // A floating window over the dashboard: the sidebar has identity, freshness, the guarantor check, the sections, the
+  // admin's name and previous / next patient; the main area shows one section. The derivations are in record.js
+  // (plansOf, milestones, sinceLast, projection, actionItems, leadLine); this lays them out.
+  const SECTIONS = [['overview', 'Overview'], ['visits', 'Visits and pre-check'], ['benefits', 'Benefits projection'], ['activity', 'Activity and plans'],
+    ['guarantor', 'Guarantor'], ['calc', 'Calculator'], ['tasks', 'NextGen tasks']];
+  let detailKey = '', detailDk = '', sec = 'overview', order = [], animKey = '';
+  const ui = {}; // patient key -> {open: visit row open on Visits, sel: timeline row open, todoOpen: all action items shown}
+  const uiOf = (k) => (ui[k] = ui[k] || { open: 0, sel: '', todoOpen: false });
   const keyOfDetail = (dk) => { const r = rows.find((x) => `${keyOf(x)}|${x['Sohar Ref']}` === dk); return r ? (keyOf(r) || `ref:${r['Sohar Ref']}`) : ''; };
-  function showDetail(dk) {
-    const k = keyOfDetail(dk);
-    if (!k) return;
-    detailKey = k;
+  const num = (v) => { const n = parseFloat(String(v ?? '').replace(/[$,%\s]/g, '')); return isNaN(n) ? null : n; };
+  const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const money0 = (n) => `$${Math.round(n).toLocaleString('en-US')}`;
+  const sd = (v) => REC.shortDate(v);
+  const minsOf = (t) => { const m = String(t || '').match(/(\d+):(\d+)\s*(AM|PM)/i); return m ? ((+m[1] % 12) + (/pm/i.test(m[3]) ? 12 : 0)) * 60 + +m[2] : 0; };
+  const tag = (tone, label) => `<span class="tag t-${tone}">${esc(label)}</span>`;
+  const mark = (tone, label) => `<span class="tag mark t-${tone}"><i aria-hidden="true"></i>${esc(label)}</span>`;
+  /** A tick or note stamp ("11/2/2026 1:30 PM") as "Nov 2, 1:30 PM". */
+  const niceStamp = (s) => { const m = String(s || '').match(/^(\d{1,2}\/\d{1,2}\/\d{4})\s+(.+)$/); return m ? `${sd(m[1])}, ${m[2]}` : String(s || ''); };
+  /** A time in ms as "Oct 29, 4:40 PM" (the year too when it isn't this year). */
+  const whenOf = (t) => {
+    if (!isFinite(t)) return '';
+    const d = new Date(t);
+    return d.toLocaleString('en-US', { month: 'short', day: 'numeric', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+  };
+  const fmtWhen = (e) => (isFinite(e.time) ? whenOf(e.time) : e.date);
+  const planTitle = (r) => [r['Sohar Payer'] || r['NextGen Payer'], r.Plan].filter(Boolean).join(' · ');
+  const nameOfDk = (dk) => { const r = rows.find((x) => `${keyOf(x)}|${x['Sohar Ref']}` === dk); return r ? name(r) : ''; };
+
+  /** Everything the patient view shows for one patient key. */
+  function patientCtx(k) {
     const rec = k.startsWith('ref:') ? null : REC.patientRecord(rows, k, { outcomes, flow, asOf });
     const r = rec ? rec.lead : rows.find((x) => `ref:${x['Sohar Ref']}` === k);
-    if (!r) return;
+    if (!r) return null;
+    const per = String(r['Per Nbr'] || ''), prof = profiles[per] || null, checks = (prof && prof.checks) || [];
     const its = tasks.filter((t) => (rec ? keyOf(t) === k : t['Sohar Ref'] === r['Sohar Ref']));
-    const prof = profiles[String(r['Per Nbr'] || '')] || null;
-    const dl = (pairs) => { const p = pairs.filter(([, v]) => v !== '' && v != null); return p.length ? `<dl>${p.map(([t, v, html]) => `<dt>${esc(t)}</dt><dd>${html ? v : esc(v)}</dd>`).join('')}</dl>` : '<p class="hint">None</p>'; };
-    const who = [prof && prof.pronouns ? `Pronouns: ${prof.pronouns}` : '', prof && prof.genderIdentity ? `Gender identity: ${prof.genderIdentity}` : '', prof && prof.currentGender ? `Current gender: ${prof.currentGender}` : ''].filter(Boolean);
-    const box = $('detail');
-    box.innerHTML = `<div class="dhead"><h2>${esc(name(r))}</h2>
-        <span class="hint">${esc(idText(r))}${r['Per Nbr'] && r.MRN ? ` · Per Nbr ${esc(r['Per Nbr'])}` : ''}${rec && rec.results.length > 1 ? ` · ${rec.results.length} Sohar results` : ''}</span>
-        <button class="small" id="btnHide">Close</button></div>
-      ${who.length ? `<p class="hint who">${who.map(esc).join(' · ')}</p>` : ''}
-      ${rec ? `<div class="whobar">${whoHtml()}</div>` : ''}
-      ${rec ? flowHtml(rec.flow) : ''}
-      <div class="dgrid rtop">
-        <div class="dgroup lead"><h3>Most recent result</h3>
-          <p><span class="pill ${r['Sent As'] === 'Discovery' ? 'd' : 'v'}">${esc(r['Sent As'])}</span> <b>${esc(r['Sohar Status'])}</b> <span class="hint">${esc(r['Sohar Date'] ? fmtWhen({ time: C.soharTime(r['Sohar Date']), date: r['Sohar Date'] }) : '')}</span></p>
-          ${dl([['Action', r.Action], ['Choose in NextGen', r['Choose in NextGen']], ['Sohar Payer', r['Sohar Payer']], ['NextGen Payer', r['NextGen Payer']], ['Plan', r.Plan], ['Network', r.Network],
-            ['Coverage', [r['Coverage Start'], r['Coverage End']].some(Boolean) ? `${r['Coverage Start'] || '?'} to ${r['Coverage End'] || 'open'}` : ''], ['Member ID', r['Sohar Member ID'] || r['NextGen Member ID']],
-            ['Searched as', r['Searched As'] && r['Searched As'] !== 'Patient' ? r['Searched As'] : ''], ['Match', r.Match], ['Sohar', link(r['Sohar Link']), true]])}
-          ${pillsOf(r).length ? `<div class="pills">${pillsHtml(r)}</div>` : ''}</div>
-        <div class="dgroup"><h3>Financial progress</h3>${financialHtml(rec && rec.financial, r)}</div>
-      </div>
-      <div class="dgroup visitsec" id="visitBox"><h3>Upcoming visits and pre-check</h3>${visitsHtml(r, rec)}
-        ${r['Next Provider'] ? `<p class="hint">Next with ${esc(r['Next Provider'])}</p>` : ''}</div>
-      <div class="dgrid">
-        ${rec ? notesHtml(k) : ''}
-        ${guarantorHtml(prof)}
-        <div class="dgroup"><h3>NextGen tasks</h3>${its.length ? `<ul class="tasklist">${its.map((t) => `<li class="${open(t) ? '' : 'done'}"><label><input type="checkbox" data-task="${esc(t['Task Key'])}" ${open(t) ? '' : 'checked'}> <b>${esc(t.Task)}</b></label><br>${esc(t.Details)}${t['Clinic Note'] ? `<br><span class="cnote">Clinic: ${esc(t['Clinic Note'])}</span>` : ''}</li>`).join('')}</ul>` : '<p class="hint">None</p>'}</div>
-        ${fees ? `<div class="dgroup est" id="estPanel" data-per="${esc(r['Per Nbr'])}"></div>` : ''}
-      </div>
-      <div class="dgroup timeline"><h3>Earlier verifications and discoveries <span class="hint">newest first</span></h3>${timelineHtml(rec ? rec.timeline : [])}</div>`;
-    box.hidden = false;
-    if (fees) renderEstimatePanel(r['Per Nbr'], r);
-    box.querySelectorAll('.meter').forEach((m) => { m.firstElementChild.style.width = `${Math.round(Math.min(1, +m.dataset.pct) * 100)}%`; });
-    $('btnHide').addEventListener('click', hideDetail);
-    if (!$('detailBackdrop')){ const bd = document.createElement('div'); bd.className = 'backdrop'; bd.id = 'detailBackdrop'; bd.addEventListener('click', hideDetail); document.body.append(bd); }
+    const vs = visits[per] || [], fl = rec ? rec.flow : [];
+    const fresh = REC.freshness(lastUpdated || {}, new Date());
+    const plans = rec ? REC.plansOf(rec.results, r) : [];
+    const proj = REC.projection(rec && rec.financial, fl);
+    const items = visitItems(vs, fl);
+    const next = items[0] ? items[0].date : r['Next Appt'];
+    return { k, rec, r, per, prof, checks, its, vs, fl, fresh, plans, proj, items, next, marks: REC.milestones(rec ? rec.results : [r], plans),
+      todo: REC.actionItems({ lead: r, fresh, checks, visits: vs, flow: fl, tasks: its.filter(open), proj }),
+      lead: REC.leadLine({ lead: r, checks, fresh, proj, next }) };
+  }
+  /** Report visits (with their ticks) and Flow rows joined on date and time, soonest first. */
+  function visitItems(vs, fl) {
+    const key = (d, t) => { const x = C.parseDate(d); return `${x ? x.getTime() : d}|${minsOf(t)}`; };
+    const out = vs.map((v, i) => ({ v, i, f: null, date: v.date, time: v.time, event: v.event, loc: v.loc, prov: v.provider }));
+    for (const f of fl) {
+      const m = out.find((x) => x.v && !x.f && key(x.date, x.time) === key(f['Appt Date'], f.Time));
+      if (m) m.f = f; else out.push({ v: null, i: -1, f, date: f['Appt Date'], time: f.Time, event: f.Event, loc: f.Location, prov: f.Provider });
+    }
+    const at = (x) => { const d = C.parseDate(x.date); return (d ? d.getTime() : 8.64e15) + minsOf(x.time) * 6e4; };
+    return out.sort((a, b) => at(a) - at(b));
+  }
+  /** The freshness pill: "Up to date", or the oldest source and its age; the title lists every source. */
+  function freshPill(f) {
+    if (f.level === 'none') return '';
+    const old = f.parts.filter((p) => p.key !== 'flow').sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity))[0];
+    const days = old && old.time != null ? Math.floor((Date.now() - old.time) / 864e5) : null;
+    const label = f.level === 'fresh' ? 'Up to date' : `${old.label} ${days == null ? 'never uploaded' : `${days} day${days === 1 ? '' : 's'} old`}`;
+    const title = f.parts.map((p) => `${p.label}: ${p.time == null ? 'never' : whenOf(p.time)}`).join(' · ');
+    return `<span class="tag lg t-${{ fresh: 'blue', aging: 'amber', stale: 'red' }[f.level]}" title="${esc(title)}" aria-label="${esc(`${label}. ${title}`)}"><i class="dot" aria-hidden="true"></i>${esc(label)}</span>`;
+  }
+  /** [tone, label] for the patient's guarantor check: the worst of the per-result checks. */
+  function guarState(cs) {
+    if (cs.some((x) => x.severity === 'high')) return ['red', 'Different people'];
+    if (cs.some((x) => x.severity === 'medium')) return ['amber', 'Check insured'];
+    if (cs.some((x) => x.status === 'Match')) return ['green', 'Match'];
+    if (cs.some((x) => x.severity === 'low')) return ['grey', 'Other guarantor'];
+    return ['grey', 'Not checked'];
+  }
+  const checkTone = (x) => (x.severity === 'high' ? 'red' : x.severity === 'medium' ? 'amber' : x.status === 'Match' ? 'green' : 'grey');
+  const preDone = (v) => { const pc = v && v.items.find((i) => i.id === 'precheck'); return !!(pc && pc.done); };
+
+  function showDetail(dk, from) {
+    const k = keyOfDetail(dk);
+    if (!k) return;
+    // Previous / next follow the list the patient was opened from (one entry per patient).
+    if (from) {
+      const panel = from.closest('[data-panel]') || document;
+      const seen = new Set();
+      order = [...panel.querySelectorAll('tr[data-key]')].map((tr) => tr.dataset.key).filter((x) => { const pk = keyOfDetail(x); if (!pk || seen.has(pk)) return false; seen.add(pk); return true; });
+      sec = 'overview';
+    }
+    detailKey = k; detailDk = dk;
+    renderDetail();
+    if (!$('detailBackdrop')) { const bd = document.createElement('div'); bd.className = 'backdrop'; bd.id = 'detailBackdrop'; bd.addEventListener('click', hideDetail); document.body.append(bd); }
     $('btnHide').focus();
   }
-  // the detail card floats over the dashboard; everything behind it is blurred
-  function hideDetail() { $('detail').hidden = true; estOver = null; detailKey = ''; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
+  // the patient view floats over the dashboard; everything behind it is blurred
+  function hideDetail() { $('detail').hidden = true; estOver = null; detailKey = ''; detailDk = ''; const bd = $('detailBackdrop'); if (bd) bd.remove(); }
 
-  /**
-   * Upcoming visits from the report, each with the NextGen Pre-Check Complete value and the checklist admins tick here.
-   * Notes are the patient's, one list in the record (notesHtml), not per visit. Ticks and notes are saved on the hidden
-   * Pre-Check sheet with the admin's name, picked once per record (whoHtml) from Config "Admin names" and remembered on
-   * this computer. Without report visits: the visit summary from the Sohar result.
-   */
+  /** Draw the open patient's view. focus: a selector to focus afterwards (a tick that was just changed). */
+  function renderDetail(focus) {
+    const c = detailKey ? patientCtx(detailKey) : null;
+    const box = $('detail');
+    if (!c) { hideDetail(); return; }
+    const r = c.r, p = c.prof || {};
+    const ids = [p.pronouns, p.currentGender, p.genderIdentity ? `Identity: ${p.genderIdentity}` : ''].filter(Boolean);
+    const [gt, gl] = guarState(c.checks);
+    const openPre = c.vs.filter((v) => !preDone(v)).length, openTasks = c.its.filter(open).length;
+    const badge = { visits: openPre ? tag('amber', String(openPre)) : '', guarantor: gt === 'red' ? tag('red', 'Fix') : gt === 'amber' ? tag('amber', 'Check') : '', tasks: openTasks ? tag('grey', String(openTasks)) : '' };
+    const at = order.indexOf(detailDk);
+    const step = (d) => {
+      if (order.length < 2 || at < 0) return '';
+      const nm = nameOfDk(order[(at + d + order.length) % order.length]);
+      return `<button type="button" class="pv-btn" data-step="${d}" aria-label="${d < 0 ? 'Previous' : 'Next'} patient, ${esc(nm)}">${d < 0 ? '↑' : '↓'} ${esc(nm)}</button>`;
+    };
+    const anim = sec === 'overview' && animKey !== c.k;
+    if (anim) animKey = c.k;
+    box.innerHTML = `<div class="pv">
+      <aside class="pv-side" aria-label="Patient">
+        <button type="button" class="pv-back" id="btnHide">← All patients</button>
+        <div class="pv-who">
+          <div class="pv-name"><h2 id="pvTitle">${esc(name(r))}</h2><span class="pv-mrn">${esc(idText(r))}</span></div>
+          ${ids.length ? `<div class="pv-ids">${ids.map((x) => `<span>${esc(x)}</span>`).join('')}</div>` : ''}
+          ${planTitle(r) ? `<div class="pv-plan">${esc(planTitle(r))}</div>` : ''}
+          <div class="pv-pills">${freshPill(c.fresh)}${tag(gt, `Guarantor: ${gl}`)}</div>
+        </div>
+        <nav class="pv-nav" aria-label="Record sections">${SECTIONS.map(([k, l]) => `<button type="button" data-sec="${k}"${sec === k ? ' aria-current="page"' : ''}><span>${esc(l)}</span>${badge[k] || ''}</button>`).join('')}</nav>
+        <div class="pv-foot">${whoHtml()}<div class="pv-steps">${step(-1)}${step(1)}</div></div>
+      </aside>
+      <div class="pv-main" id="pvMain" role="region" aria-label="${esc(SECTIONS.find(([k]) => k === sec)[1])}">${sectionHtml(c, anim)}</div></div>`;
+    box.setAttribute('role', 'dialog'); box.setAttribute('aria-modal', 'true'); box.setAttribute('aria-labelledby', 'pvTitle');
+    box.hidden = false;
+    if (sec === 'calc' && fees) renderEstimatePanel(r['Per Nbr'], r);
+    fitDetail();
+    if (focus) { const el = box.querySelector(focus); if (el) el.focus(); }
+  }
+  // Narrow (under 760px, e.g. the 350px pane): the sidebar stacks on top and the sections become a scrolling row.
+  // A ResizeObserver, not a media query, because the window width varies with the pane.
+  function fitDetail() { const box = $('detail'); box.classList.toggle('narrow', box.getBoundingClientRect().width < 760); }
+  if (window.ResizeObserver) new ResizeObserver(() => { if (!$('detail').hidden) fitDetail(); }).observe($('detail'));
+
+  function sectionHtml(c, anim) {
+    switch (sec) {
+      case 'visits': return visitsSection(c);
+      case 'benefits': return benefitsSection(c);
+      case 'activity': return activitySection(c);
+      case 'guarantor': return guarantorSection(c);
+      case 'calc': return calcSection(c);
+      case 'tasks': return tasksSection(c);
+      default: return overviewSection(c, anim);
+    }
+  }
+
+  // ----- Overview: one line, four numbers, action items, the next visit's pre-check and the patient's notes -----
+  function overviewSection(c, anim) {
+    const r = c.r, u = uiOf(c.k);
+    const tile = (t, i) => `<div class="pv-tile">
+        <div class="pv-tile-top"><span>${esc(t.label)}</span>${tag(t.tag[0], t.tag[1])}</div>
+        <div class="pv-num"><span class="${anim ? 'rise' : ''}" style="animation-delay:${i * 90}ms">${esc(t.num)}</span></div>
+        <div class="pv-sub">${esc(t.sub)}</div>
+        ${t.bar != null ? `<div class="pv-bar" role="img" aria-label="${esc(t.barAria)}"><span class="f-${t.tone}" style="width:${Math.round(Math.min(1, t.bar) * 100)}%"></span></div>` : ''}
+        ${(t.lines || []).filter(Boolean).map((l) => `<div class="pv-line">${esc(l)}</div>`).join('')}</div>`;
+    const todo = c.todo, more = todo.length > 4;
+    const v0 = c.items[0];
+    return `<p class="pv-lead tone-${c.lead.tone}">${esc(c.lead.text)}</p>
+      <div class="pv-tiles">${[coverageTile(c), nextTile(c), benTile(c, 'ded'), benTile(c, 'oop')].map(tile).join('')}</div>
+      <div class="pv-row">
+        <section class="pv-card pv-todo" aria-labelledby="todoH">
+          <div class="pv-card-h"><h3 id="todoH">Action items · ${todo.length}</h3>${more ? `<button type="button" class="pv-link" data-todo="1" aria-expanded="${u.todoOpen}">${u.todoOpen ? 'Show fewer' : `Show all ${todo.length}`}</button>` : ''}</div>
+          ${todo.length ? `<div class="pv-scroll${u.todoOpen ? ' open' : ''}${more && !u.todoOpen ? ' fade' : ''}"><ul tabindex="0" aria-label="Action items, scrollable">${todo.map((t) => `<li>${tag(t.tone, t.tag)}<span class="pv-todo-t">${esc(t.text)}</span><span class="pv-due">${esc(t.due)}</span></li>`).join('')}</ul></div>`
+            : '<p class="hint">Nothing to do for this patient.</p>'}
+        </section>
+        <section class="pv-card pv-next" aria-labelledby="nextH">
+          <div class="pv-card-h"><h3 id="nextH">Next visit · pre-check</h3>${c.items.length ? `<button type="button" class="pv-link" data-sec="visits">All ${c.items.length} visit${c.items.length === 1 ? '' : 's'}</button>` : ''}</div>
+          ${v0 ? `${visitHead(v0)}${v0.v ? ticksHtml(v0) : '<p class="hint">This visit is not on the NextGen report, so there is no pre-check to tick.</p>'}`
+            : `<p class="hint">${esc(r['Next Appt'] ? `${[r['Next Appt'], r['Next Time'], r['Next Event']].filter(Boolean).join(' · ')}. Not on the NextGen report, so there is no pre-check to tick.` : 'No upcoming visit.')}</p>`}
+          ${c.rec ? notesHtml(c.k) : ''}
+        </section>
+      </div>`;
+  }
+  function coverageTile(c) {
+    const r = c.r, st = String(r['Sohar Status'] || '');
+    const ver = r['Sent As'] === 'Verification';
+    const lastVer = c.rec ? c.rec.results.find((x) => x['Sent As'] === 'Verification') : ver ? r : null;
+    const lines = [lastVer ? `Last verification: ${whenOf(C.soharTime(lastVer['Sohar Date'])) || lastVer['Sohar Date'] || 'date unknown'}` : 'No verification yet'];
+    const sub = [r['Sohar Payer'] || r['NextGen Payer'], r.Plan, r.Network].filter(Boolean).join(' · ');
+    if (ver && /^complete\.eligible/.test(st)) return { label: 'Coverage', tag: ['green', 'Eligible'], num: 'Active', sub, lines };
+    if (r['Sent As'] === 'Discovery') return { label: 'Coverage', tag: ['amber', 'Discovery only'], num: /found/i.test(st) ? 'Not verified' : 'Not found', sub: sub || st, lines };
+    if (r['Work Queue'] === 'Pending') return { label: 'Coverage', tag: ['grey', 'Pending'], num: 'Waiting', sub: st, lines };
+    return { label: 'Coverage', tag: ['red', /ineligible|inactive/.test(st) ? 'Not eligible' : 'Check'], num: /ineligible|inactive/.test(st) ? 'Inactive' : 'Check', sub: st, lines: [r.Action, ...lines] };
+  }
+  function nextTile(c) {
+    const v = c.items[0], f = v && v.f;
+    const sub = v ? [sd(v.date), v.time].filter(Boolean).join(', ') : 'No upcoming visit';
+    if (!f) return { label: 'Next visit owes', tag: ['grey', 'No estimate'], num: '—', sub, lines: [v ? v.event : '', v ? 'No Sohar Flow run for this visit yet' : ''] };
+    const amt = num(f['Sohar Est Patient']);
+    if (amt == null) return { label: 'Next visit owes', tag: ['grey', 'No estimate'], num: '—', sub, lines: [v.event, f['Estimate Note'] || 'Verify deductible, OOP max and insurance status'] };
+    return { label: 'Next visit owes', tag: REC.isSandbox(f) ? ['purple', 'Sandbox'] : ['grey', 'Estimate'], num: money(amt), sub, lines: [v.event, REC.isSandbox(f) ? 'Sandbox: don\'t quote or collect this' : ''] };
+  }
+  function benTile(c, key) {
+    const label = key === 'ded' ? 'Deductible left' : 'Out-of-pocket max left';
+    const fin = c.rec && c.rec.financial;
+    const cols = key === 'ded' ? ['Deductible', 'Deductible Remaining', 'Deductible Status'] : ['OOP Max', 'OOP Remaining', 'OOP Status'];
+    if (!fin) return { label, tag: ['grey', 'Unknown'], num: '—', sub: 'Not known yet', lines: [c.r['Sent As'] === 'Discovery' ? 'Run verification to get it' : 'Sohar returned no amounts'] };
+    const T = num(fin[cols[0]]), R = num(fin[cols[1]]), status = fin[cols[2]];
+    if (status === 'None') return { label, tag: ['grey', 'None'], num: '—', sub: key === 'ded' ? 'No deductible on this plan' : 'No OOP max on this plan', lines: [] };
+    if (T == null || R == null) return { label, tag: ['grey', 'Unknown'], num: '—', sub: 'Not returned by Sohar', lines: [] };
+    const left = Math.max(0, R), met = T - R;
+    const st = left <= 0 ? 'Met' : status === 'Approaching' || left <= T * 0.2 ? 'Approaching' : 'Not met';
+    const tone = { Met: 'green', Approaching: 'amber', 'Not met': 'grey' }[st];
+    const atV = c.proj && c.proj[key] && c.proj[key].at;
+    const first = [...c.marks.entries()].find(([, ls]) => ls.includes(key === 'ded' ? 'Deductible met, first seen' : 'OOP max met, first seen'));
+    const sub = left <= 0 ? `Met${first ? ` ${sd(first[0]['Sohar Date'])}` : ''} · of ${money0(T)}` : atV ? `of ${money0(T)} · met ${sd(atV['Appt Date'])} as booked` : `of ${money0(T)} · not met by booked visits`;
+    return { label, tag: [tone, st], num: money(left), sub, tone, bar: T > 0 ? met / T : 0, barAria: `${label.replace(' left', '')}: ${money(met)} of ${money(T)} met`, lines: [`${money(met)} met so far`] };
+  }
+  const visitHead = (x) => `<div class="pv-visit"><b>${esc([sd(x.date), x.time].filter(Boolean).join(', '))}${x.event ? ` · ${esc(x.event)}` : ''}</b>
+    ${[x.loc, x.prov].some(Boolean) ? `<span class="hint">${esc([x.loc, x.prov].filter(Boolean).join(' · '))}</span>` : ''}</div>`;
+  /** The visit's two ticks, each with who and when; data-pc is the visit's index in the report visits. */
+  function ticksHtml(x) {
+    const v = x.v;
+    return `<p class="hint">NextGen "Pre-Check Complete": ${esc(v.precheck || 'blank')}. A tick here wins over the report.</p>
+      ${v.items.map((it) => `<label class="pv-tick"><input type="checkbox" data-pc="${x.i}" data-pc-item="${esc(it.id)}"${it.done ? ' checked' : ''}>
+        <span><b>${esc(it.label)}</b><span class="hint" data-pc-note="${x.i}|${esc(it.id)}">${esc(pcNote(it, v))}</span></span></label>`).join('')}
+      <p class="hint">The add-in doesn't change NextGen. Tick "Updated in NextGen" after you make the change there.</p>`;
+  }
+  const pcNote = (it, v) => (it.source === 'Marked here' ? `Marked here · ${[it.by, niceStamp(it.when)].filter(Boolean).join(' · ')}` : it.source === 'NextGen report' ? `From NextGen report: ${(v && v.precheck) || (it.done ? 'Yes' : 'No')}` : 'Not ticked yet');
+  /** The patient's notes, newest first, with an add box. A note written against a visit before v0.21.1 says which. */
+  const noteLine = (n) => `<div class="pv-note"><div class="hint">${esc([n.by, niceStamp(n.when), n.visit ? `visit ${n.visit}` : ''].filter(Boolean).join(' · '))}</div><div>${esc(n.note)}</div></div>`;
+  function notesHtml(k) {
+    return `<div class="pv-notes"><h4>Patient notes</h4>
+      <div class="pv-note-add"><textarea id="pnText" rows="2" maxlength="${REC.NOTE_MAX}" placeholder="Add a note for this patient" aria-label="Note for this patient"></textarea><button type="button" class="pv-btn" id="pnAdd">Add note</button></div>
+      <div id="pnList">${(notes[k] || []).map(noteLine).join('') || '<p class="hint" id="pnNone">No notes yet.</p>'}</div></div>`;
+  }
+
+  // ----- Visits and pre-check: one row per booked visit, the Flow estimate and the ticks inside -----
+  function visitsSection(c) {
+    const u = uiOf(c.k);
+    if (!c.items.length) return `<h3 class="pv-h">Visits and pre-check</h3><p class="hint">${esc(c.rec && c.rec.upcoming.length ? c.rec.upcoming.join('; ') : 'No upcoming visits.')}</p>`;
+    return `<h3 class="pv-h">Visits and pre-check</h3>
+      <section class="pv-card pv-list">${c.items.map((x, j) => {
+        const f = x.f, amt = f ? num(f['Sohar Est Patient']) : null, opened = u.open === j;
+        const owes = amt == null ? 'No estimate' : `${money(amt)}${REC.isSandbox(f) ? ' sandbox' : ''}`;
+        const pre = !x.v ? tag('grey', 'Not on report') : preDone(x.v) ? tag('green', 'Pre-check done') : tag('amber', 'Pre-check open');
+        return `<div class="pv-vrow"><button type="button" class="pv-vhead" data-vopen="${j}" aria-expanded="${opened}">
+            <span class="pv-when"><b>${esc(sd(x.date))}</b><span class="hint">${esc(x.time || '')}</span></span>
+            <span class="pv-what"><span>${esc(x.event || '')}</span><span class="hint">${esc([x.loc, x.prov].filter(Boolean).join(' · '))}</span></span>
+            <span class="pv-owes">${esc(owes)}</span>${pre}</button>
+          ${opened ? `<div class="pv-vbody"><div class="pv-est">${estimateHtml(x)}</div><div class="pv-pre">${x.v ? ticksHtml(x) : '<p class="hint">Not on the NextGen report, so there is no pre-check to tick.</p>'}</div></div>` : ''}</div>`;
+      }).join('')}</section>`;
+  }
+  function estimateHtml(x) {
+    const f = x.f;
+    if (!f) return '<div class="pv-est-h">Sohar Flow estimate</div><p class="hint">No Sohar Flow run for this visit yet.</p>';
+    const amt = num(f['Sohar Est Patient']), plan = num(f['Sohar Est Plan Pays']);
+    const done = /^complete/i.test(f['Run Status']);
+    return `<div class="pv-est-h">Sohar Flow estimate</div>
+      ${REC.isSandbox(f) ? '<div class="pv-sandbox">Sandbox estimate. Don\'t quote or collect this amount.</div>' : ''}
+      ${amt != null ? `<div class="pv-est-amt"><span class="pv-big">${esc(money(amt))}</span><span class="hint">patient owes${plan != null ? ` · plan pays ${esc(money(plan))}` : ''}</span></div>
+        <div class="hint">${esc([f['Est Codes'], f['Rate Level'] ? `${f['Rate Level']} rate` : '', f['Fee Tab'], f['Estimate Policy'] ? `${f['Estimate Policy']} policy` : ''].filter(Boolean).join(' · '))}</div>
+        ${f['Estimate Note'] ? `<div class="hint">${esc(f['Estimate Note'])}</div>` : ''}`
+        : `<div><b>No estimate</b></div><div class="hint">${esc(done ? f['Estimate Note'] || 'Verify deductible, OOP max and insurance status.' : `Flow ${String(f['Run Status'] || 'not started').toLowerCase().replace(/_/g, ' ')}.`)}</div>`}
+      ${f['Policy vs NextGen'] ? `<div>Policy vs NextGen: ${esc(f['Policy vs NextGen'])}</div>` : ''}
+      ${f['Run Error'] ? `<div class="warn-text">${esc(f['Run Error'])}</div>` : ''}`;
+  }
+
+  // ----- Benefits projection: the booked visits' estimates applied to the deductible and the OOP max -----
+  function benefitsSection(c) {
+    const head = '<div class="pv-hrow"><h3 class="pv-h">Benefits projection</h3><span class="hint">From booked visits and their Flow estimates. A projection, not a quote.</span></div>';
+    const p = c.proj;
+    if (!p) return `${head}<p class="hint">No projection yet. It needs the deductible and OOP max from a verification.</p>`;
+    const meter = (label, m) => {
+      if (!m) return '';
+      const already = m.met >= m.total || m.left <= 0, appr = !already && m.left <= m.total * 0.2;
+      const tone = already || m.at ? 'green' : appr ? 'amber' : 'grey';
+      const metPct = m.total > 0 ? Math.min(100, (m.met / m.total) * 100) : 100, projPct = m.total > 0 ? Math.min(100 - metPct, (m.applied / m.total) * 100) : 0;
+      const right = already ? 'Met' : m.at ? `${money(m.left)} left · met ${sd(m.at['Appt Date'])} as booked` : appr ? `${money(m.left)} left · approaching` : `${money(m.left)} left`;
+      return `<div class="pv-meter"><div class="pv-meter-h"><b>${esc(label)} ${esc(money0(m.total))}</b><b class="tone-${tone}">${esc(right)}</b></div>
+        <div class="pv-mbar" role="img" aria-label="${esc(`${label}: ${money(m.met)} of ${money(m.total)} met; the striped part is projected from booked visits`)}"><span class="met f-${tone}" style="width:${metPct}%"></span><span class="proj f-${tone}" style="left:${metPct}%;width:${projPct}%"></span></div>
+        <div class="hint">${esc(`${money(m.met)} met · ${money(m.left)} left`)}</div></div>`;
+    };
+    const missing = c.items.filter((x) => !x.f || num(x.f['Sohar Est Patient']) == null || REC.isSandbox(x.f));
+    const missText = (x) => `${sd(x.date)} ${x.event || ''}${x.f && REC.isSandbox(x.f) && num(x.f['Sohar Est Patient']) != null ? ' (sandbox)' : ''}`.trim();
+    const line = (m, what) => (!m ? '' : m.left <= 0 ? `${what} already met.` : m.at ? `${what} projected to be met at the ${sd(m.at['Appt Date'])} visit.` : `${what} not met by booked visits. ${money(Math.max(0, m.left - m.applied))} left after the last estimate.`);
+    return `${head}<section class="pv-card pv-proj">
+        ${meter('Deductible', p.ded)}${meter('Out-of-pocket max', p.oop)}
+        ${p.rows.length ? `<div class="pv-prows">${p.rows.map((x) => `<div class="pv-prow"><b class="pv-pdate">${esc(sd(x.flow['Appt Date']))}</b><span class="pv-pev">${esc(x.flow.Event || '')}</span>
+          <b class="pv-pamt">${esc(x.applied == null ? (REC.isSandbox(x.flow) && x.est != null ? 'Sandbox' : 'No estimate') : x.est != null && x.applied < x.est ? `${money(x.applied)} (est. ${money(x.est)})` : money(x.applied))}</b>
+          <span class="hint pv-pleft">${x.oopLeft == null ? '' : `OOP left ${x.applied == null ? '—' : x.oopLeft === 0 ? 'Met' : money(x.oopLeft)}`}</span>
+          ${x.marks.map((l) => mark(/approaching/i.test(l) ? 'amber' : 'green', l)).join('')}</div>`).join('')}</div>` : '<p class="hint">No Sohar Flow estimates for the booked visits yet.</p>'}
+        <div class="pv-psum">${[line(p.ded, 'Deductible'), line(p.oop, 'OOP max')].filter(Boolean).map((t) => `<div>${esc(t)}</div>`).join('')}
+          ${missing.length ? `<div class="tone-amber"><b>Incomplete: ${esc(missing.map(missText).join(', '))} ${missing.length > 1 ? 'have' : 'has'} no estimate and ${missing.length > 1 ? 'are' : 'is'} left out.</b></div>` : c.items.length ? '<div class="hint">Every booked visit has an estimate.</div>' : ''}</div>
+      </section>`;
+  }
+
+  // ----- Activity and plans: what changed, the current plan's timeline, then earlier plans -----
+  function activitySection(c) {
+    const u = uiOf(c.k);
+    const since = REC.sinceLast(c.plans);
+    const cur = c.plans.find((g) => g.current), prev = c.plans.filter((g) => !g.current);
+    const ledger = c.rec ? c.rec.timeline.filter((e) => e.source === 'ledger') : [];
+    // Ledger rows keep only the payer: one for a payer with no saved result is an earlier plan of its own.
+    const same = (a, b) => !!a && !!b && a.toLowerCase() === b.toLowerCase();
+    for (const e of ledger) {
+      if (!e.payer || same(e.payer, cur && cur.payer) || prev.some((g) => same(g.payer, e.payer))) continue;
+      prev.push({ payer: e.payer, memberId: '', results: [], current: false, superseded: false });
+    }
+    const planOfLedger = (e) => prev.find((g) => same(g.payer, e.payer)) || cur;
+    const evs = [...(cur ? cur.results : [c.r]).map((r) => resultEvent(r, c.marks)), ...ledger.filter((e) => planOfLedger(e) === cur).map(ledgerEvent), ...c.fl.map(flowEvent)]
+      .sort((a, b) => (isFinite(b.time) ? b.time : -Infinity) - (isFinite(a.time) ? a.time : -Infinity));
+    const evHtml = (e) => {
+      const opened = u.sel === e.id;
+      return `<li><button type="button" class="pv-ev${opened ? ' sel' : ''}" data-tl="${esc(e.id)}" aria-expanded="${opened}" title="${esc(`${e.kind} · ${e.when} · ${e.hover || e.title}`)}">
+          <i class="pv-dot${e.solid ? ' solid' : ''}" aria-hidden="true"></i>
+          <span class="pv-ev-b"><span class="pv-ev-top"><b>${esc(e.kind)}</b><span class="hint">${esc(e.when)}</span><span class="pv-ev-st tone-${e.tone}">${esc(e.status)}</span></span>
+            <span>${esc(e.title)}</span>${e.chips.map((l) => mark(/met/i.test(l) && !/approaching/i.test(l) ? 'green' : /approaching/i.test(l) ? 'amber' : 'grey', l)).join('')}</span></button>
+        ${opened ? `<div class="pv-ev-d">${e.rows.filter(([, v]) => v).map(([k, v]) => `<div><span class="hint">${esc(k)}</span><span>${esc(v)}</span></div>`).join('')}
+          ${e.ledger ? '<p class="hint">History ledger entry. Only date, kind, status and payer were kept.</p>' : ''}${/^https:\/\//.test(e.link || '') ? `<a href="${esc(e.link)}" target="_blank" rel="noopener">Open in Sohar</a>` : ''}</div>` : ''}</li>`;
+    };
+    const prevHtml = (g) => {
+      const top = g.results[0] || {};
+      const amt = (a, b) => (num(top[a]) == null ? '' : `${money0(num(top[a]))}${num(top[b]) == null ? '' : ` · ${money(num(top[a]) - num(top[b]))} met at the last check`}`);
+      const facts = [['Deductible', amt('Deductible', 'Deductible Remaining')], ['Out-of-pocket max', amt('OOP Max', 'OOP Remaining')], ['Superseded', g.superseded ? 'A later result replaced this plan' : '']];
+      const led = ledger.filter((e) => planOfLedger(e) === g);
+      const last = top['Sohar Date'] ? sd(top['Sohar Date']) : led[0] ? sd(led[0].date) : '';
+      return `<details open><summary><b>${esc(g.payer || 'Unknown payer')}</b> <span class="hint">${esc([g.memberId, `${g.results.length + led.length} result${g.results.length + led.length === 1 ? '' : 's'}`, last ? `last ${last}` : ''].filter(Boolean).join(' · '))}</span></summary>
+        ${facts.filter(([, v]) => v).map(([k, v]) => `<div class="pv-fact"><span class="hint">${esc(k)}</span><span>${esc(v)}</span></div>`).join('')}
+        ${[...g.results.map((r) => resultEvent(r, c.marks)), ...led.map(ledgerEvent)].map((e) => `<div class="pv-pitem"><b>${esc(e.kind)}</b> · ${esc(e.when)} · ${esc(e.status)}<div class="hint">${esc(e.title)}</div></div>`).join('')}</details>`;
+    };
+    return `<h3 class="pv-h">Activity and previous plans</h3>
+      <div class="pv-card pv-since"><div class="hint">Since last check</div><b>${esc(since.a)}</b><div class="hint">${esc(since.sub)}</div></div>
+      <section class="pv-card pv-tl"><div class="hint pv-tl-h">${esc(cur ? [cur.payer, cur.memberId].filter(Boolean).join(' · ') : planTitle(c.r))} · current · newest first</div>
+        <ol>${evs.map(evHtml).join('')}</ol></section>
+      <section class="pv-card pv-prev"><h4>Previous plans</h4>${prev.length ? prev.map(prevHtml).join('') : '<p class="hint">No earlier plans for this MRN.</p>'}</section>`;
+  }
+  const statusTone = (s) => (/eligible$|found|active/i.test(s) && !/ineligible|not found/i.test(s) ? 'green' : /error|ineligible|inactive|not found/i.test(s) ? 'red' : 'grey');
+  function resultEvent(r, marks) {
+    const t = C.soharTime(r['Sohar Date']);
+    const ben = [num(r['Deductible Remaining']) != null ? `deductible ${money(num(r['Deductible Remaining']))} left` : '', num(r['OOP Remaining']) != null ? `OOP max ${money(num(r['OOP Remaining']))} left` : ''].filter(Boolean).join(' · ');
+    return { id: `r:${r['Sohar Ref']}`, kind: r['Sent As'] || 'Verification', time: t, when: whenOf(t) || r['Sohar Date'] || 'Date unknown', status: r['Sohar Status'] || '—', tone: statusTone(r['Sohar Status'] || ''), solid: true,
+      title: [r['Sohar Payer'] || r['NextGen Payer'], r.Plan, ben].filter(Boolean).join(' · ') || r.Action || '', hover: r.Action, chips: marks.get(r) || [], link: r['Sohar Link'], ledger: false,
+      rows: [['Status', [r['Sohar Status'], r['Sohar Ref'] ? `ref …${String(r['Sohar Ref']).slice(-4)}` : ''].filter(Boolean).join(' · ')], ['Network', r.Network],
+        ['Coverage', [r['Coverage Start'], r['Coverage End']].some(Boolean) ? `${r['Coverage Start'] || '?'} to ${r['Coverage End'] || 'open'}` : ''], ['Member ID', r['Sohar Member ID'] || r['NextGen Member ID']],
+        ['Action', r.Action], ['Flags', pillsOf(r).join(', ')], ['Copay', r.Copay !== '' && r.Copay != null ? usd(r.Copay) : ''], ['Coinsurance', r.Coinsurance], ['Searched as', r['Searched As'] && r['Searched As'] !== 'Patient' ? r['Searched As'] : '']] };
+  }
+  const ledgerEvent = (e) => ({ id: `l:${e.kind}|${e.date}|${e.status}`, kind: `${e.kind} · ledger`, time: e.time, when: fmtWhen(e) || 'Date unknown', status: e.status || '—', tone: statusTone(e.status || ''), solid: true,
+    title: e.payer, chips: [], link: '', ledger: true, rows: [] });
+  function flowEvent(f) {
+    const t = Date.parse(f['Last Updated'] || f.Started), amt = num(f['Sohar Est Patient']), sb = REC.isSandbox(f);
+    return { id: `f:${f.Key}`, kind: amt != null ? 'Cost estimate' : 'Flow run', time: t, when: whenOf(t) || 'Date unknown', status: sb ? 'Sandbox' : String(f['Run Status'] || '').toLowerCase().replace(/_/g, ' ') || '—', tone: sb ? 'purple' : 'grey', solid: false,
+      title: [sd(f['Appt Date']), f.Event, amt != null ? money(amt) : f['Estimate Note'] || 'no estimate'].filter(Boolean).join(' · '), hover: f['Policy vs NextGen'], chips: [], ledger: false,
+      link: [f['Discovered Verification Link'], f['NextGen Verification Link'], f['Discovery Link']].find((l) => /^https:\/\//.test(l || '')) || '',
+      rows: [['Visit', [f['Appt Date'], f.Time, f.Event].filter(Boolean).join(' ')], ['Codes', [f['Est Codes'], f['Rate Level'] ? `${f['Rate Level']} rate` : ''].filter(Boolean).join(' · ')], ['Fee tab', f['Fee Tab']],
+        ['Policy', f['Estimate Policy']], ['Policy vs NextGen', f['Policy vs NextGen']], ['Plan pays', num(f['Sohar Est Plan Pays']) != null ? money(num(f['Sohar Est Plan Pays'])) : ''], ['Error', f['Run Error']], ['File', f.File]] };
+  }
+
+  // ----- Guarantor: NextGen's guarantor against each result's Sohar subscriber -----
+  function guarantorSection(c) {
+    const p = c.prof || {}, cs = c.checks;
+    const worst = cs.find((x) => x.severity === 'high') || cs.find((x) => x.severity === 'medium') || cs[0];
+    const g = String(p.guarantor || '').replace(' (the patient)', ', the patient');
+    const note = worst ? worst.text : p.guarantor ? `NextGen guarantor is ${g}. Sohar returned no subscriber to compare yet.` : 'Not checked. The NextGen report has no guarantor for this patient.';
+    return `<h3 class="pv-h">Guarantor check</h3>
+      <p class="pv-gnote${worst && worst.severity === 'high' ? ' tone-red' : ''}">${esc(note)}</p>
+      ${cs.length ? `<section class="pv-card pv-grows">${cs.map((x) => `<div class="pv-grow"><span class="hint pv-gres">${esc([x.sentAs, whenOf(C.soharTime(x.date)) || x.date, x.payer].filter(Boolean).join(' · '))}</span>
+          <span><span class="hint">NextGen guarantor</span><b>${esc(g || 'Not on the report')}</b></span>
+          <span><span class="hint">Sohar subscriber</span><b>${esc(x.subscriber || 'Not returned')}</b></span>${tag(checkTone(x), x.status)}</div>`).join('')}</section>` : ''}
+      ${[p.guarantorDob ? 'Guarantor DOB on file' : '', p.prevLastName ? 'Previous last name on file' : ''].filter(Boolean).length ? `<p class="hint">${esc([p.guarantorDob ? 'Guarantor DOB on file' : '', p.prevLastName ? 'Previous last name on file' : ''].filter(Boolean).join(' · '))}.</p>` : ''}`;
+  }
+
+  // ----- Calculator: the West Coast calculator panel (renderEstimatePanel) -----
+  function calcSection(c) {
+    if (!fees) return '<h3 class="pv-h">Calculator</h3><p class="hint">The calculator needs fee estimates turned on: set Config "Fee estimates" to On, then drop the fee schedule or the West Coast Patient Responsibility Calculator on the Benefits tab.</p>';
+    return `<div class="pv-hrow"><h3 class="pv-h">Calculator</h3><span class="hint">Pre-filled from Sohar. Edits here are for this check only and don't change Sohar results or the Flow estimates.</span></div>
+      <section class="pv-card dgroup est" id="estPanel" data-per="${esc(c.r['Per Nbr'])}"></section>`;
+  }
+
+  // ----- NextGen tasks: Done ticks stay in the workbook -----
+  function tasksSection(c) {
+    return `<h3 class="pv-h">NextGen tasks</h3>
+      <section class="pv-card pv-tasks">${c.its.length ? c.its.map((t) => `<label class="pv-task${open(t) ? '' : ' done'}"><input type="checkbox" data-task="${esc(t['Task Key'])}"${open(t) ? '' : ' checked'} aria-label="Done: ${esc(t.Task)}">
+          <span class="pv-task-t"><b>${esc(t.Task)}</b><span>${esc(t.Details || '')}</span>${t['Clinic Note'] ? `<span class="cnote">Clinic: ${esc(t['Clinic Note'])}</span>` : ''}<span class="hint">${esc(open(t) ? (t['Due By'] ? `Due ${sd(t['Due By'])}` : '') : String(t.Done))}</span></span>
+          ${open(t) ? tag('amber', 'Open') : tag('green', 'Done')}</label>`).join('') : '<p class="hint">No NextGen tasks for this patient.</p>'}
+        <p class="hint">Tasks come from the Sohar results. Done ticks stay in this workbook.</p></section>`;
+  }
+
+  // ----- the admin's name, ticks and notes (saved on the hidden Pre-Check sheet by the pane) -----
+  // The name is picked once from Config "Admin names" and remembered on this computer; every tick and note records it.
   const NAME_KEY = 'sohar.precheck.by';
   let adminName = (() => { try { return localStorage.getItem(NAME_KEY) || ''; } catch (e) { return ''; } })();
   function whoHtml() {
     const names = admins.includes(adminName) || !adminName ? admins : [adminName, ...admins];
-    return `<label class="inline pcby">Your name
+    return `<label class="pv-as">Working as
       ${names.length ? `<select id="pcBy"><option value="">Pick your name</option>${names.map((n) => `<option${n === adminName ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`
         : `<input id="pcBy" value="${esc(adminName)}" placeholder="Your name" maxlength="60">`}</label>
       ${names.length ? '' : '<span class="hint">Add the admin names to Config "Admin names" (separated by ;) to pick from a list.</span>'}`;
   }
-  function visitsHtml(r, rec) {
-    const vs = visits[String(r['Per Nbr'] || '')] || [];
-    if (!vs.length) return rec && rec.upcoming.length ? `<ul class="visits">${rec.upcoming.map((v) => `<li>${esc(v)}</li>`).join('')}</ul>` : '<p class="hint">None scheduled</p>';
-    return `<ul class="visits pc">${vs.map((v, i) => `<li>
-      <b>${esc([v.date, v.time].filter(Boolean).join(' '))}</b> ${esc([v.event, v.loc].filter(Boolean).join(' · '))}${v.provider ? ` <span class="hint">${esc(v.provider)}</span>` : ''}
-      <br><span class="hint">${esc(v.lasfir || name(r))} · NextGen pre-check: ${esc(v.precheck || 'not on the report')}</span>
-      <div class="pcheck">${v.items.map((it) => `<label class="inline"><input type="checkbox" data-pc="${i}" data-pc-item="${esc(it.id)}"${it.done ? ' checked' : ''}> ${esc(it.label)}
-        <span class="hint" data-pc-note="${i}|${esc(it.id)}">${esc(pcNote(it))}</span></label>`).join('')}</div></li>`).join('')}</ul>
-      <p class="hint">Ticks are saved in this workbook with your name. The add-in does not change NextGen: "Updated in NextGen" means you made the change there.</p>`;
-  }
-  /** The patient's notes, newest first, with an add box. A note written against a visit before v0.21.1 says which. */
-  const noteLine = (n) => `<p class="pnote">${esc(n.note)} <span class="hint">${esc([n.by, n.when, n.visit ? `visit ${n.visit}` : ''].filter(Boolean).join(', '))}</span></p>`;
-  function notesHtml(k) {
-    return `<div class="dgroup pnotes"><h3>Notes</h3>
-      <div class="pnote-add"><input id="pnText" maxlength="${REC.NOTE_MAX}" placeholder="Add a note for this patient" aria-label="Note for this patient"> <button class="small" id="pnAdd">Add note</button></div>
-      <div id="pnList">${(notes[k] || []).map(noteLine).join('') || '<p class="hint" id="pnNone">No notes yet.</p>'}</div></div>`;
-  }
-  const pcNote = (it) => (it.source === 'NextGen report' ? '(from the report)' : it.source === 'Marked here' ? `(${[it.by, it.when].filter(Boolean).join(', ')})` : '');
   const stamp = () => { const now = new Date(); return `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`; };
   const detailRow = () => rows.find((x) => keyOf(x) === detailKey) || rows.find((x) => `ref:${x['Sohar Ref']}` === detailKey);
   /** The admin's name, or a notice and null when none is picked. */
   function byOrAsk() {
     if (adminName) return adminName;
-    notice('Pick your name first (top of the patient record). It is saved with each tick and note.', false);
+    notice('Pick your name first ("Working as", bottom of the sidebar). It is saved with each tick and note.', false);
     const el = $('pcBy'); if (el) el.focus();
     return null;
   }
@@ -365,9 +673,8 @@
     const by = byOrAsk();
     if (!by) { c.checked = !c.checked; return; }
     Object.assign(it, { done: c.checked, source: 'Marked here', when: stamp(), by });
-    const note = $('detail').querySelector(`[data-pc-note="${c.dataset.pc}|${it.id}"]`);
-    if (note) note.textContent = pcNote(it);
     toPane({ type: 'precheck', key: v.key, lasfir: v.lasfir || name(r), date: v.date, time: v.time, item: it.id, done: c.checked, by });
+    renderDetail(`input[data-pc="${c.dataset.pc}"][data-pc-item="${CSS.escape(it.id)}"]`); // badges and action items follow
     renderPrep(); renderWorklist(); // the list pills follow
   });
   function addNote() {
@@ -383,75 +690,30 @@
     $('pnList').insertAdjacentHTML('afterbegin', noteLine(n));
     toPane({ type: 'precheck-note', key: k, lasfir: name(r), note: n.note, by });
   }
-  $('detail').addEventListener('click', (e) => { if (e.target.closest('#pnAdd')) addNote(); });
-  $('detail').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'pnText') { e.preventDefault(); addNote(); } });
+  $('detail').addEventListener('click', (e) => {
+    if (e.target.closest('#pnAdd')) { addNote(); return; }
+    if (e.target.closest('#btnHide')) { hideDetail(); return; }
+    const b = e.target.closest('[data-sec],[data-step],[data-vopen],[data-tl],[data-todo]');
+    if (!b || !detailKey) return;
+    const u = uiOf(detailKey);
+    if (b.dataset.sec) { sec = b.dataset.sec; renderDetail(`.pv-nav [data-sec="${sec}"]`); $('pvMain').scrollTop = 0; return; }
+    if (b.dataset.step) {
+      const dk = order[(order.indexOf(detailDk) + +b.dataset.step + order.length) % order.length];
+      if (dk) { showDetail(dk); const s = $('detail').querySelector(`[data-step="${b.dataset.step}"]`); if (s) s.focus(); }
+      return;
+    }
+    if (b.dataset.vopen != null) { u.open = u.open === +b.dataset.vopen ? -1 : +b.dataset.vopen; renderDetail(`[data-vopen="${b.dataset.vopen}"]`); return; }
+    if (b.dataset.tl) { u.sel = u.sel === b.dataset.tl ? '' : b.dataset.tl; renderDetail(`[data-tl="${CSS.escape(b.dataset.tl)}"]`); return; }
+    if (b.dataset.todo) { u.todoOpen = !u.todoOpen; renderDetail('[data-todo]'); }
+  });
+  // Ctrl+Enter adds the note (Enter makes a new line in the box).
+  $('detail').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.id === 'pnText') { e.preventDefault(); addNote(); } });
   // Free-text name (no Config list yet): remembered as it is typed.
   $('detail').addEventListener('input', (e) => {
     if (e.target.id !== 'pcBy') return;
     adminName = e.target.value.trim();
     try { localStorage.setItem(NAME_KEY, adminName); } catch (err) { /* storage blocked */ }
   });
-  /** Sohar Flow cost estimates, one card per visit (soonest first). Sandbox files say so. */
-  function flowHtml(list) {
-    if (!list || !list.length) return '';
-    const card = (f) => {
-      const pt = REC.flowAmount(f['Sohar Est Patient']), plan = REC.flowAmount(f['Sohar Est Plan Pays']);
-      const done = /^complete/i.test(f['Run Status']);
-      return `<div class="fcard">
-        <div class="fhead"><b>${esc([f['Appt Date'], f.Time].filter(Boolean).join(' '))}</b> <span class="hint">${esc([f.Event, f.Location, f.Provider].filter(Boolean).join(' · '))}</span></div>
-        <div class="famt">${pt ? `<span class="big">${esc(pt)}</span> <span class="hint">patient${plan ? ` · plan pays ${esc(plan)}` : ''}</span>` : `<span class="hint">${esc(done ? f['Estimate Note'] || 'No estimate' : `Flow ${String(f['Run Status'] || 'not started').toLowerCase().replace(/_/g, ' ')}`)}</span>`}</div>
-        <p class="hint">${esc([f['Est Codes'] ? `Codes ${f['Est Codes']}` : '', f['Rate Level'], f['Fee Tab'], f['Estimate Policy'] ? `${f['Estimate Policy']} policy` : '', f.Network, f['Sohar Payer']].filter(Boolean).join(' · '))}</p>
-        ${f['Policy vs NextGen'] ? `<p class="fpol">${esc(f['Policy vs NextGen'])}</p>` : ''}
-        ${pt && f['Estimate Note'] ? `<p class="hint">${esc(f['Estimate Note'])}</p>` : ''}
-        ${f['Run Error'] ? `<p class="warn-text">${esc(f['Run Error'])}</p>` : ''}
-      </div>`;
-    };
-    const sandbox = list.some(REC.isSandbox);
-    return `<div class="dgroup flow"><h3>Sohar Flow cost estimate${list.length > 1 ? 's' : ''} ${sandbox ? '<span class="pill p-amber">Sandbox: test data</span>' : ''} <span class="hint">estimates, not a guarantee</span></h3>
-      <div class="fcards">${list.map(card).join('')}</div></div>`;
-  }
-  /** Deductible and OOP max: spent so far of the total, with a bar (core.benefitsView row). */
-  function financialHtml(b, r) {
-    if (!b) return `<p class="hint">${r['Sent As'] === 'Discovery' ? 'No benefits yet: discovery finds coverage; the verification of it brings the amounts.' : 'No benefit amounts from Sohar.'}</p>`;
-    const bar = (label, met, total, pct, status, rem) => {
-      if (status === 'None') return `<div class="frow"><span>${label}</span> <span class="hint">None</span></div>`;
-      if (pct === '' || pct == null) return `<div class="frow"><span>${label}</span> <span class="hint">${esc(status || 'Unknown')}</span></div>`;
-      const cls = status === 'Met' ? 'met' : status === 'Approaching' ? 'appr' : '';
-      return `<div class="frow ${cls}"><span>${label}</span> <span class="meter wide" data-pct="${pct}"><span></span></span> <b>${Math.round(pct * 100)}%</b>
-        <br><span class="hint">${esc(usd(met))} of ${esc(usd(total))} met${rem !== '' && rem != null ? ` · ${esc(usd(rem))} left` : ''}${status ? ` · ${esc(status)}` : ''}</span></div>`;
-    };
-    return `${bar('Deductible', b['Deductible Met'], b.Deductible, b['Deductible % Met'], b['Deductible Status'], b['Deductible Remaining'])}
-      ${bar('OOP max', b['OOP Met'], b['OOP Max'], b['OOP % Met'], b['OOP Status'], b['OOP Remaining'])}
-      <p class="hint">${esc([b.Copay !== '' && b.Copay != null ? `Copay ${usd(b.Copay)}` : '', b.Coinsurance ? `Coinsurance ${b.Coinsurance}` : '', b.Plan].filter(Boolean).join(' · '))}</p>
-      ${b.Flag ? `<p class="${b.Flag === 'OOP max met' ? 'ok-text' : 'warn-text'}">${esc(b.Flag)}</p>` : ''}`;
-  }
-  /** NextGen guarantor (LASFIR) and the guarantor vs Sohar subscriber check for each result. */
-  function guarantorHtml(prof) {
-    if (!prof) return '';
-    const checks = prof.checks || [];
-    if (!prof.guarantor && !checks.length) return '';
-    const sev = (s) => (s === 'high' ? 'sev-high' : s === 'medium' ? 'sev-medium' : s === 'low' ? 'sev-low' : '');
-    return `<div class="dgroup"><h3>Guarantor</h3>
-      ${dl2([['NextGen guarantor', prof.guarantor || 'Not on the report'], ['Guarantor DOB', prof.guarantorDob], ['Previous last name', prof.prevLastName]])}
-      ${checks.length ? `<ul class="pc-items gchecks">${checks.map((c) => `<li class="${sev(c.severity)}"><b>${esc(c.status)}</b> <span class="hint">${esc([c.sentAs, c.payer, c.date].filter(Boolean).join(' · '))}</span><br>${esc(c.text)}</li>`).join('')}</ul>` : ''}</div>`;
-  }
-  const dl2 = (pairs) => { const p = pairs.filter(([, v]) => v !== '' && v != null); return p.length ? `<dl>${p.map(([t, v]) => `<dt>${esc(t)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>` : ''; };
-  /** Earlier results and ledger rows, newest first. */
-  function timelineHtml(list) {
-    if (!list.length) return '<p class="hint">No earlier Sohar checks for this patient.</p>';
-    return `<ol class="tline">${list.map((e) => `<li>
-      <span class="tdate">${esc(e.date ? fmtWhen(e) : 'Date unknown')}</span>
-      <span class="pill ${e.kind === 'Discovery' ? 'd' : 'v'}">${esc(e.kind)}</span> <b>${esc(e.status || '—')}</b>${e.payer ? ` · ${esc(e.payer)}` : ''}${e.plan ? ` · ${esc(e.plan)}` : ''}
-      ${e.source === 'ledger' ? ' <span class="hint">(from the payer outcomes history; details not kept)</span>' : ''}
-      ${[e.action, e.coverage ? `Coverage ${e.coverage}` : '', e.benefits, e.searched && e.searched !== 'Patient' ? `Searched as ${e.searched.toLowerCase()}` : ''].filter(Boolean).length
-        ? `<br><span class="hint">${esc([e.action, e.coverage ? `Coverage ${e.coverage}` : '', e.benefits, e.searched && e.searched !== 'Patient' ? `Searched as ${e.searched.toLowerCase()}` : ''].filter(Boolean).join(' · '))}</span>` : ''}
-      ${e.link ? ` ${link(e.link)}` : ''}</li>`).join('')}</ol>`;
-  }
-  const fmtWhen = (e) => {
-    if (!isFinite(e.time)) return e.date;
-    const d = new Date(e.time);
-    return d.toLocaleString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
-  };
 
   // ---------- patient responsibility calculator (v0.20; the West Coast calculator's math, pre-filled from Sohar) ----------
   // Shown when the pane sends fee data (Config "Fee estimates" On). estOver: the open panel's inputs and codes.
@@ -800,9 +1062,9 @@
   document.addEventListener('click', (e) => {
     if (e.target.closest('a, input, button')) return;
     const tr = e.target.closest('tr[data-key]');
-    if (tr) showDetail(tr.dataset.key);
+    if (tr) showDetail(tr.dataset.key, tr);
   });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('detail').hidden) { hideDetail(); return; } if (e.key === 'Enter') { const tr = e.target.closest && e.target.closest('tr[data-key]'); if (tr) showDetail(tr.dataset.key); } });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('detail').hidden) { hideDetail(); return; } if (e.key === 'Enter') { const tr = e.target.closest && e.target.closest('tr[data-key]'); if (tr) showDetail(tr.dataset.key, tr); } });
   document.addEventListener('change', (e) => {
     const cb = e.target.closest && e.target.closest('input[data-task]');
     if (!cb) return;
@@ -812,6 +1074,7 @@
     document.querySelectorAll(`input[data-task="${CSS.escape(key)}"]`).forEach((x) => { x.checked = cb.checked; });
     $('taskCount').textContent = tasks.filter(open).length || '';
     renderTasks(); renderPrep(); renderMessage();
+    if (!$('detail').hidden && $('detail').contains(cb)) renderDetail(`input[data-task="${CSS.escape(key)}"]`);
   });
   $('drop').addEventListener('click', () => $('fileUp').click());
   $('drop').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('fileUp').click(); } });
@@ -853,11 +1116,15 @@
       { ...res[0], 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', 'Sohar Date': '2026-08-30T17:10:00Z', Plan: '', Deductible: '', 'Deductible Remaining': '', 'OOP Max': '', 'OOP Remaining': '', Copay: '', Coinsurance: '', 'Deductible Status': '', 'OOP Status': '', Action: 'Coverage found: verify it.', 'Sohar Ref': 'q-1b', 'Work Queue': 'Clear' });
     const demoOutcomes = [{ MRN: '80100', Kind: 'Verification', 'Sohar Status': 'complete.ineligible', 'Sohar Date': '2026-06-02T15:00:00Z', 'Returned Payer': 'Old Synthetic Plan', 'NextGen Payer': 'Old Synthetic Plan', Signal: '' }];
     const fl = (o) => ({ ...Object.fromEntries(REC.FLOW_SHEET_COLS.map((c) => [c, ''])), MRN: '80100', LASFIR: C.lasfir('Rivera', 'Ana'), Location: 'San Rafael', 'Run Status': 'COMPLETE', 'Discovery Status': 'complete',
-      'Policy vs NextGen': 'Same policy as NextGen', 'Estimate Policy': 'NextGen', Network: 'INN', 'Sohar Payer': 'UMR', 'Fee Tab': 'Marin', File: 'Flow Results (SANDBOX).csv', ...o });
+      'Policy vs NextGen': 'Same policy as NextGen', 'Estimate Policy': 'NextGen', Network: 'INN', 'Sohar Payer': 'UMR', 'Fee Tab': 'Marin', File: 'Flow Results.csv',
+      Started: '2026-10-18T16:20:00Z', 'Last Updated': '2026-10-18T16:24:00Z', ...o });
+    // Four booked visits: TMS (no estimate), two priced visits that reach the OOP max, and a sandbox one (left out).
     const demoFlow = [fl({ Key: 'd1', 'Appt Date': '10/20/2026', Time: '9:00 AM', Event: 'TMS Treatment Unilateral', 'Rate Level': 'NP', 'Est Codes': '', 'Estimate Note': 'TMS (intervention): no estimate; verify deductible, OOP max and insurance status' }),
-      fl({ Key: 'd2', 'Appt Date': '10/27/2026', Time: '9:00 AM', Event: 'Med Management In-Office', 'Rate Level': 'NP', 'Est Codes': '99214', 'Sohar Est Patient': '71.11', 'Sohar Est Plan Pays': '100.00' })];
+      fl({ Key: 'd2', 'Appt Date': '10/27/2026', Time: '9:00 AM', Event: 'Med Management In-Office', 'Rate Level': 'NP', 'Est Codes': '99214 + 90836', 'Sohar Est Patient': '420.00', 'Sohar Est Plan Pays': '100.00' }),
+      fl({ Key: 'd3', 'Appt Date': '11/03/2026', Time: '9:00 AM', Event: 'Med Management In-Office', 'Rate Level': 'NP', 'Est Codes': '99214 + 90836', 'Sohar Est Patient': '420.00', 'Sohar Est Plan Pays': '100.00' }),
+      fl({ Key: 'd4', 'Appt Date': '11/10/2026', Time: '9:00 AM', Event: 'Med Management In-Office', 'Rate Level': 'NP', 'Est Codes': '99214', 'Sohar Est Patient': '71.11', 'Sohar Est Plan Pays': '100.00', File: 'Flow Results (SANDBOX).csv' })];
     const demoProfiles = { 100100: { pronouns: 'They, Them, Theirs', genderIdentity: '', currentGender: 'Female', guarantor: 'RIVANA (the patient)', checks: [
-      { sentAs: 'Verification', payer: 'UMR', date: '2026-10-18', ...REC.guarantorCheck({ patient: { firstName: 'Ana', lastName: 'Rivera' }, guarantor: { firstName: 'Ana', lastName: 'Rivera' }, guarantorSelf: true }, { firstName: 'Luis', lastName: 'Rivera' }) }] } };
+      { sentAs: 'Verification', payer: 'UMR', date: '2026-10-18', subscriber: 'RIVLUI', ...REC.guarantorCheck({ patient: { firstName: 'Ana', lastName: 'Rivera' }, guarantor: { firstName: 'Ana', lastName: 'Rivera' }, guarantorSelf: true }, { firstName: 'Luis', lastName: 'Rivera' }) }] } };
     // Report visits with Pre-Check Complete (made up): Rivera's first visit done in NextGen, Lindqvist's not.
     const dv = (key, date, time, event, loc, pc, ticks) => {
       const v = { date, time, event, loc, provider: '', status: '', precheck: pc, hasPrecheck: true, key };
@@ -865,7 +1132,7 @@
     };
     const demoVisits = {
       100100: [dv('80100', '10/20/2026', '9:00 AM', 'TMS Treatment Unilateral', 'San Rafael', 'Yes', [{ Key: '80100|10/20/2026|9:00 AM', Item: 'nextgen', Done: 'Yes', By: 'Jordan Lee', When: '10/19/2026 4:10 PM' }]),
-        dv('80100', '10/27/2026', '9:00 AM', 'Med Management In-Office', 'San Rafael', '')],
+        dv('80100', '10/27/2026', '9:00 AM', 'Med Management In-Office', 'San Rafael', ''), dv('80100', '11/03/2026', '9:00 AM', 'Med Management In-Office', 'San Rafael', '')],
       100102: [dv('PER-100102', '10/22/2026', '10:00 AM', 'Med Management In-Office', 'Walnut Creek', 'No')],
     };
     const demoPills = { 100100: 'NP-TMS', 100101: 'Medi-Cal; New Medi-Cal; Re-verify', 100102: 'Kaiser/VA MM no auth; Kaiser/VA MM', 100103: 'QMB' };
@@ -901,8 +1168,14 @@
       flow: demoFlow, outcomes: demoOutcomes, profiles: demoProfiles, visits: demoVisits, admins: ['Jordan Lee', 'Sam Ortiz'],
       notes: { 80100: [{ note: 'Called the patient; new card scanned, plan unchanged', by: 'Jordan Lee', when: '10/19/2026 4:12 PM', visit: '' }] },
       lastUpdated: { report: new Date(Date.now() - 2 * 36e5).toISOString(), sohar: new Date(Date.now() - 3 * 864e5).toISOString(), flow: new Date().toISOString() } });
-    // #patient opens the first demo patient's record (for checking the layout); other hashes pick a tab.
-    if (location.hash === '#patient') showDetail(`${keyOf(res[0])}|${res[0]['Sohar Ref']}`);
+    // #patient opens the first demo patient's record (for checking the layout), #patient/<section> a section of it;
+    // other hashes pick a tab.
+    const ph = location.hash.match(/^#patient(?:\/(\w+))?$/);
+    if (ph) {
+      const dk = `${keyOf(res[0])}|${res[0]['Sohar Ref']}`;
+      showDetail(dk, document.querySelector(`#prepList tr[data-key="${CSS.escape(dk)}"]`));
+      if (ph[1] && SECTIONS.some(([k]) => k === ph[1])) { sec = ph[1]; renderDetail(); }
+    }
     else if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
   }
 

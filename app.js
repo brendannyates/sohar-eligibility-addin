@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.21.1';
+  const VERSION = '0.22.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -2034,8 +2034,10 @@
       if (!out[per]) continue;
       let rec = null;
       try { const raw = records.get(String(r.resultKey || '')); rec = raw ? JSON.parse(raw) : null; } catch (e) { rec = null; }
-      const chk = REC.guarantorCheck(prof.get(per), REC.subscriberOf(rec));
-      if (chk.text) out[per].checks.push({ ref: r['Sohar Ref'] || '', sentAs: r['Sent As'] || '', payer: r['Sohar Payer'] || '', date: r['Sohar Date'] || '', ...chk });
+      const sub = REC.subscriberOf(rec);
+      const chk = REC.guarantorCheck(prof.get(per), sub);
+      // subscriber: LASFIR only, for the patient view's guarantor rows (v0.22).
+      if (chk.text) out[per].checks.push({ ref: r['Sohar Ref'] || '', sentAs: r['Sent As'] || '', payer: r['Sohar Payer'] || '', date: r['Sohar Date'] || '', subscriber: sub && (sub.lastName || sub.firstName) ? C.lasfir(sub.lastName, sub.firstName) : '', ...chk });
     }
     state.profileCache = { results: state.results, rows: state.rows, out };
     return out;

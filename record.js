@@ -430,7 +430,173 @@
     return { parts, newest, level };
   }
 
+  // ---------- patient view (v0.22): plans, milestones, projection, action items ----------
+  const money = (n) => `$${(Math.round(n * 100) / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const c2 = (n) => Math.round(n * 100) / 100;
+  /** "Nov 4" from a date the report or Sohar wrote; '' when it isn't a date. */
+  const shortDate = (v) => { const d = C.parseDate(v); return d ? d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' }) : str(v); };
+  const payerOf = (r) => str(r['Sohar Payer']) || str(r['NextGen Payer']);
+  const memberOf = (r) => str(r['Sohar Member ID']) || str(r['NextGen Member ID']);
+  /**
+   * A patient's results grouped by plan (payer + member ID), newest plan first. A result without a member ID joins the
+   * newest plan with the same payer. The plan holding the lead result is current; the rest are previous plans.
+   * Returns [{payer, memberId, results (newest first), current, superseded}].
+   */
+  function plansOf(results, lead) {
+    const plans = [];
+    const low = (s) => s.toLowerCase();
+    for (const r of (results || []).slice().sort(newestFirst)) {
+      const p = payerOf(r), m = memberOf(r);
+      let g = plans.find((x) => low(x.payer) === low(p) && (!m || !x.memberId || x.memberId === m));
+      if (!g) { g = { payer: p, memberId: m, results: [], current: false, superseded: false }; plans.push(g); }
+      if (!g.memberId && m) g.memberId = m;
+      g.results.push(r);
+      if (/^Superseded/.test(str(r.Action))) g.superseded = true;
+    }
+    const cur = plans.find((g) => g.results.includes(lead)) || plans[0];
+    if (cur) cur.current = true;
+    return cur ? [cur, ...plans.filter((g) => g !== cur)] : plans;
+  }
+  /**
+   * First-seen milestones, oldest result first: the first result each was seen on, keyed by the result row.
+   * Deductible approaching / met, OOP max approaching / met, and a new plan (a plan seen after another, or one Sohar
+   * found that NextGen doesn't have).
+   */
+  function milestones(results, plans) {
+    const out = new Map(), seen = new Set();
+    const add = (r, label) => { if (seen.has(label)) return; seen.add(label); out.set(r, [...(out.get(r) || []), label]); };
+    const oldest = (results || []).slice().sort((a, b) => timeOf(a) - timeOf(b));
+    const firstOf = new Map((plans || []).map((g) => [g, g.results[g.results.length - 1]]));
+    const planOrder = [...firstOf.entries()].sort((a, b) => timeOf(a[1]) - timeOf(b[1]));
+    for (const r of oldest) {
+      if (r['Deductible Status'] === 'Approaching') add(r, 'Approaching deductible, first seen');
+      if (r['Deductible Status'] === 'Met') add(r, 'Deductible met, first seen');
+      if (r['OOP Status'] === 'Approaching') add(r, 'Approaching OOP max, first seen');
+      if (r['OOP Status'] === 'Met') add(r, 'OOP max met, first seen');
+    }
+    planOrder.forEach(([g, r], i) => { if (i > 0 || str(r['Coverage Differs']) === 'Yes') { const l = out.get(r) || []; out.set(r, [...l, 'New plan, first seen']); } });
+    return out;
+  }
+  /**
+   * What changed between the lead result and the one before it on the same plan. {a, sub}: a short headline and a line.
+   */
+  function sinceLast(plans) {
+    const cur = (plans || []).find((g) => g.current);
+    if (!cur) return { a: 'No results', sub: '' };
+    const [now, before] = cur.results;
+    const prev = (plans || []).filter((g) => !g.current);
+    if (!before) {
+      return prev.length ? { a: 'New plan', sub: `Replaces ${prev[0].payer || 'an earlier plan'}${prev[0].memberId ? ` (${prev[0].memberId})` : ''}.` }
+        : { a: 'First check', sub: 'No earlier Sohar result for this MRN.' };
+    }
+    const diff = [];
+    const amt = (v) => { const n = num(v); return n == null ? '?' : money(n); };
+    if (str(now['Sohar Status']) !== str(before['Sohar Status'])) diff.push(`Status ${str(before['Sohar Status']) || '?'} → ${str(now['Sohar Status']) || '?'}`);
+    if (str(now['Deductible Remaining']) !== str(before['Deductible Remaining']) && (now['Deductible Remaining'] !== '' || before['Deductible Remaining'] !== '')) diff.push(`Deductible left ${amt(before['Deductible Remaining'])} → ${amt(now['Deductible Remaining'])}`);
+    if (str(now['OOP Remaining']) !== str(before['OOP Remaining']) && (now['OOP Remaining'] !== '' || before['OOP Remaining'] !== '')) diff.push(`OOP max left ${amt(before['OOP Remaining'])} → ${amt(now['OOP Remaining'])}`);
+    const since = shortDate(before['Sohar Date']);
+    if (!diff.length) return { a: 'No change', sub: `Same as the ${str(before['Sent As']).toLowerCase() || 'check'}${since ? ` on ${since}` : ''}.` };
+    const benefitsOnly = diff.every((d) => !d.startsWith('Status'));
+    return { a: benefitsOnly ? 'Benefits only' : 'Status changed', sub: `${diff.join('; ')}${since ? ` since ${since}` : ''}.` };
+  }
+  /**
+   * The benefits projection: walk the booked visits (Flow rows, soonest first) and apply each visit's estimate to the
+   * deductible and the OOP max, capped at what's left. fin: the patient's Benefits view row. Visits with no estimate,
+   * or a sandbox one, are left out and listed as missing. An estimate counts toward the deductible unless it equals
+   * the copay (a copay goes to the OOP max only). Null when Sohar returned neither amount.
+   * Returns {ded, oop: {total, met, left, applied, at}, rows: [{flow, est, applied, dedLeft, oopLeft, marks}], missing}.
+   */
+  function projection(fin, flowRows) {
+    if (!fin) return null;
+    const dT = num(fin.Deductible), dR = num(fin['Deductible Remaining']), oT = num(fin['OOP Max']), oR = num(fin['OOP Remaining']);
+    if ((dT == null || dR == null) && (oT == null || oR == null)) return null;
+    const ded = dT == null || dR == null ? null : { total: dT, met: c2(dT - dR), left: c2(Math.max(0, dR)), applied: 0, at: null };
+    const oop = oT == null || oR == null ? null : { total: oT, met: c2(oT - oR), left: c2(Math.max(0, oR)), applied: 0, at: null };
+    const copay = num(fin.Copay);
+    let dl = ded ? ded.left : 0, ol = oop ? oop.left : Infinity, apprMarked = !oop || ol <= oop.total * 0.2;
+    const rows = [], missing = [];
+    for (const f of flowRows || []) {
+      const est = num(f['Sohar Est Patient']);
+      if (est == null || isSandbox(f)) { missing.push(f); rows.push({ flow: f, est, applied: null, dedLeft: ded ? dl : null, oopLeft: oop ? ol : null, marks: [] }); continue; }
+      const pay = c2(oop ? Math.min(est, ol) : est), marks = [];
+      const fCopay = num(f.Copay);
+      const isCopay = [fCopay, copay].some((c) => c != null && c > 0 && Math.abs(c - est) < 0.005);
+      if (ded && dl > 0 && !isCopay) {
+        const a = Math.min(pay, dl); dl = c2(dl - a); ded.applied = c2(ded.applied + a);
+        if (dl === 0 && !ded.at) { ded.at = f; marks.push('Deductible met at this visit'); }
+      }
+      if (oop && ol > 0) {
+        ol = c2(Math.max(0, ol - pay)); oop.applied = c2(oop.applied + pay);
+        if (ol === 0 && !oop.at) { oop.at = f; marks.push('OOP max met at this visit'); }
+        else if (!apprMarked && ol <= oop.total * 0.2) { apprMarked = true; marks.push('OOP max approaching'); }
+      }
+      rows.push({ flow: f, est, applied: pay, dedLeft: ded ? dl : null, oopLeft: oop ? ol : null, marks });
+    }
+    return { ded, oop, rows, missing };
+  }
+  const daysOld = (t, now) => Math.floor(((now ? now.getTime() : Date.now()) - t) / 86400000);
+  /**
+   * What to do next for one patient, most urgent first: [{tone: 'red'|'amber'|'grey', tag, text, due}].
+   * ctx: {lead, fresh (freshness()), checks (guarantor checks), visits (report visits with items), flow (Flow rows),
+   * tasks (open NextGen tasks), proj (projection()), now}.
+   */
+  function actionItems(ctx) {
+    const o = ctx || {}, out = [], lead = o.lead || {}, now = o.now || new Date();
+    const day0 = Date.UTC(now.getFullYear(), now.getMonth(), now.getDate());
+    const soon = (d) => { const t = C.parseDate(d); return !t || t.getTime() - day0 <= 7 * 86400000; };
+    const next = (o.visits || [])[0] || (o.flow || [])[0];
+    const nextDate = next ? shortDate(next.date || next['Appt Date']) : '';
+    if (o.fresh && o.fresh.level !== 'fresh' && o.fresh.level !== 'none') {
+      const old = o.fresh.parts.filter((p) => p.key !== 'flow').sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity))[0];
+      const age = old && old.time != null ? `It is ${daysOld(old.time, now)} days old.` : 'It was never uploaded.';
+      if (old) out.push(o.fresh.level === 'stale'
+        ? { tone: 'red', tag: 'Fix now', text: old.key === 'report' ? `Upload a new NextGen report. ${age}` : `Re-run Sohar. The results are ${old.time != null ? `${daysOld(old.time, now)} days old` : 'missing'}.`, due: 'Today' }
+        : { tone: 'amber', tag: 'Before visit', text: old.key === 'report' ? `Upload a new NextGen report. ${age}` : `Re-run Sohar. The results are ${old.time != null ? `${daysOld(old.time, now)} days old` : 'missing'}.`, due: nextDate ? `By ${nextDate}` : '' });
+    }
+    const checks = o.checks || [];
+    if (checks.some((c) => c.severity === 'high')) out.push({ tone: 'red', tag: 'Fix now', text: 'Fix the guarantor in NextGen: the guarantor and the Sohar subscriber are different people.', due: nextDate ? `Before ${nextDate}` : '' });
+    else if (checks.some((c) => c.severity === 'medium')) out.push({ tone: 'amber', tag: 'Before visit', text: 'Check the policy\'s insured in NextGen: Sohar\'s subscriber is not the patient.', due: nextDate ? `By ${nextDate}` : '' });
+    if (str(lead['Sent As']) === 'Discovery' && /found/i.test(str(lead['Sohar Status']))) out.push({ tone: 'amber', tag: 'Before visit', text: `Run verification on ${payerOf(lead) || 'the plan discovery found'}.`, due: nextDate ? `By ${nextDate}` : '' });
+    else if (str(lead['Work Queue']) === 'Action needed' && str(lead.Action)) out.push({ tone: 'amber', tag: 'Before visit', text: str(lead.Action), due: nextDate ? `By ${nextDate}` : '' });
+    for (const v of o.visits || []) {
+      const pc = (v.items || []).find((i) => i.id === 'precheck');
+      if (!pc || pc.done) continue;
+      const near = soon(v.date);
+      out.push({ tone: near ? 'amber' : 'grey', tag: near ? 'Pre-check' : 'Later', text: `Pre-check the ${shortDate(v.date)} visit`, due: shortDate(v.date) });
+    }
+    for (const f of o.flow || []) {
+      if (num(f['Sohar Est Patient']) != null || !/^complete/i.test(str(f['Run Status']))) continue;
+      out.push({ tone: 'grey', tag: 'Verify', text: `Check deductible, OOP max and status for ${shortDate(f['Appt Date'])} ${str(f.Event)}`.trim(), due: 'No estimate' });
+    }
+    for (const t of o.tasks || []) out.push({ tone: soon(t['Due By']) ? 'amber' : 'grey', tag: 'NextGen task', text: [str(t.Task), str(t.Details)].filter(Boolean).join(': '), due: t['Due By'] ? `Due ${shortDate(t['Due By'])}` : '' });
+    const rank = { red: 0, amber: 1, grey: 2 };
+    return out.map((x, i) => ({ ...x, i })).sort((a, b) => rank[a.tone] - rank[b.tone] || a.i - b.i).map(({ i, ...x }) => x);
+  }
+  /**
+   * The one plain line at the top of the Overview: {tone: 'red'|'amber'|'green'|'grey', text}.
+   * ctx: {lead, checks, fresh, proj, next (the next visit's date)}.
+   */
+  function leadLine(ctx) {
+    const o = ctx || {}, lead = o.lead || {}, by = o.next ? ` before the ${shortDate(o.next)} visit` : '';
+    if ((o.checks || []).some((c) => c.severity === 'high')) return { tone: 'red', text: `Guarantor and subscriber are different people. Fix the guarantor in NextGen${by}.` };
+    if (o.fresh && o.fresh.level === 'stale') {
+      const old = o.fresh.parts.filter((p) => p.key !== 'flow').sort((a, b) => (a.time ?? -Infinity) - (b.time ?? -Infinity))[0];
+      return { tone: 'red', text: `${old ? old.label : 'The data'} is out of date. Upload it again${by}.` };
+    }
+    if (str(lead['Sent As']) === 'Discovery' && /found/i.test(str(lead['Sohar Status']))) return { tone: 'amber', text: `Discovery found ${payerOf(lead) || 'a plan'}. Run verification to get benefits${by}.` };
+    if (str(lead['Work Queue']) === 'Action needed') return { tone: 'amber', text: str(lead.Action) || `Check this patient${by}.` };
+    const p = o.proj;
+    if (p && p.oop && p.oop.left > 0 && p.oop.left <= p.oop.total * 0.2) {
+      const i = p.oop.at ? p.rows.findIndex((r) => r.flow === p.oop.at) : -1;
+      return { tone: 'amber', text: `Approaching OOP max: ${money(p.oop.left)} left.${p.oop.at ? ` Met at the ${shortDate(p.oop.at['Appt Date'])} visit if visits go as booked (visit ${i + 1} of ${p.rows.length}).` : ''}` };
+    }
+    if (p && p.oop && p.oop.left === 0) return { tone: 'green', text: 'OOP max met for this plan year.' };
+    if (str(lead['Work Queue']) === 'Pending') return { tone: 'grey', text: 'Waiting on Sohar. Check back after the next upload.' };
+    return { tone: 'green', text: 'Coverage looks good. Nothing to fix before the next visit.' };
+  }
+
   return { FLOW_COLS, FLOW_SHEET_COLS, isFlowFile, flowRecords, mergeFlow, flowFor, flowAmount, isSandbox, patientRecord, byPatient, upcomingOf, leadOf,
+    shortDate, plansOf, milestones, sinceLast, projection, actionItems, leadLine,
     PROFILE_HEADERS, profiles, samePerson, guarantorCheck, subscriberOf,
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,
     addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName };
