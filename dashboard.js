@@ -23,6 +23,7 @@
   // Per Nbr -> upcoming visits with the report's Pre-Check Complete and the checklist; when each source last came in.
   let visits = {}, lastUpdated = null, admins = []; // admins: Config "Admin names"
   let notes = {}; // patient key (MRN) -> the patient's notes, newest first (record.patientNotes)
+  let savedAudits = { summary: [], lines: [] }; // v0.23.1: the last saved account audit per patient (audit.AUDIT_COLS rows)
   const take = C.messageAssembler();
   // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
   const PILL_COLOR = new Map(((window.SoharRules && window.SoharRules.PILLS) || []).map((p) => [p.label, p.color]));
@@ -50,6 +51,11 @@
       if (m.notice) notice(m.notice.text, m.notice.ok);
       if (m.focus) showTab(m.focus === 'exports' ? 'upload' : m.focus);
     } else if (m.type === 'notice') { notice(m.text, m.ok); $('upState').textContent = ''; }
+    else if (m.type === 'audits') {
+      savedAudits = m.audits || { summary: [], lines: [] };
+      if (m.notice) notice(m.notice.text, m.notice.ok);
+      if (!$('detail').hidden && sec === 'audit') renderDetail('[data-au-save]');
+    }
     else if (m.type === 'fee-update') { fees = m.fees || null; renderFeeBar(); renderBenefits(); refreshEstimate(); }
   }
   function toPane(obj) {
@@ -63,6 +69,7 @@
     asOf = m.asOf ? new Date(m.asOf) : null;
     flow = m.flow || []; outcomes = m.outcomes || []; profiles = m.profiles || {};
     visits = m.visits || {}; lastUpdated = m.lastUpdated || null; admins = m.admins || []; notes = m.notes || {};
+    savedAudits = m.audits || savedAudits;
     fees = F && m.fees && m.fees.on ? m.fees : null;
     renderFeeBar(); renderUpdated();
     const people = REC.byPatient(rows).length;
@@ -703,7 +710,19 @@
         ${a ? `<div class="filters au-plan"><label>Plan year from<input type="date" data-au-plan="start" value="${esc(AU.iso(a.plan.start))}"></label><label>to<input type="date" data-au-plan="end" value="${esc(AU.iso(a.plan.end))}"></label>
           <span class="hint">${s.plan ? 'Set here.' : c.rec && c.rec.financial && c.rec.financial['Coverage Start'] ? 'From the Sohar coverage start.' : 'January to December (no coverage start from Sohar).'}</span></div>` : ''}
       </section>`;
-    if (!a) return head;
+    const sv = AU.savedFor(savedAudits, c.k), nSaved = (savedAudits.summary || []).length;
+    const exportBtns = (one) => `${one ? '<button type="button" class="pv-btn" data-au-export="one">Export this patient</button>' : ''}${nSaved ? `<button type="button" class="pv-btn" data-au-export="all">Export all saved audits (${nSaved})</button>` : ''}`;
+    if (!a) {
+      if (!sv) return `${head}${nSaved ? `<div class="au-acts">${exportBtns(false)}<span class="hint">One workbook: Summary, Findings, Visits, Re-quote and Payments, LASFIR and MRN only.</span></div>` : ''}`;
+      const n = (k) => (sv[k] === '' || sv[k] == null ? '—' : money(Number(sv[k])));
+      return `${head}<section class="pv-card au-saved"><div class="pv-card-h"><h3>Last saved audit</h3><span class="hint">${esc([niceStamp(sv.Saved), sv.By].filter(Boolean).join(' · '))}</span></div>
+        <table class="watch"><tbody>
+          <tr><td>True patient balance</td><td class="num"><b>${esc(n('True Balance'))}</b></td></tr><tr><td>Arietis balance${sv['Arietis Through'] ? ` (through ${esc(sv['Arietis Through'])})` : ''}</td><td class="num">${esc(n('Arietis Balance'))}</td></tr>
+          <tr><td>Pending claims, re-quoted patient share (${esc(sv['Pending Claims'] || 0)} claims)</td><td class="num">${esc(n('Pending Patient Share'))}</td></tr><tr><td>InstaMed not posted</td><td class="num">${esc(n('InstaMed Not Posted'))}</td></tr>
+          <tr><td>Booked visits re-quote</td><td class="num">${esc(n('Booked Re-quote'))}</td></tr></tbody></table>
+        <p class="hint">${esc([`Plan year ${sv['Plan Year']}`, `${sv.High || 0} high, ${sv.Medium || 0} medium, ${sv.Low || 0} low`, sv.Sources].filter(Boolean).join(' · '))}. Drop the files again to re-run it; saving replaces it.</p></section>
+        <div class="au-acts">${exportBtns(true)}</div>`;
+    }
     const b = a.balance, inp = a.inputs;
     const tiles = [
       { label: 'True patient balance', tag: b.true > 0.005 ? ['amber', 'Owes'] : b.true < -0.005 ? ['blue', 'Credit'] : ['green', 'Even'], num: money(b.true),
@@ -788,9 +807,36 @@
         <p><b>Pending claims ${esc(money(b.pendingPatient))}</b> · booked visits ${esc(money(b.booked))}${inp.oopMax === '' ? ' · no OOP max known, so nothing is capped' : ''}.</p>` : '<p class="hint">No pending claims or booked visits in this plan year.</p>'}</section>`;
     return `${head}<div class="pv-tiles">${tiles.map(tile).join('')}</div>${findHtml}
       <div class="pv-row">${balHtml}${benHtml}</div>${visHtml}${payHtml}${rqHtml}
-      <div class="au-acts"><button type="button" class="pv-btn" data-au-copy="1">Copy audit summary</button><span class="hint">LASFIR and MRN only, no names or card numbers, for a ticket or a patient note.</span></div>`;
+      <div class="au-acts"><button type="button" class="pv-btn" data-au-save="1">Save this audit</button>${exportBtns(true)}<button type="button" class="pv-btn" data-au-copy="1">Copy audit summary</button></div>
+      <p class="hint">${sv ? `Last saved ${esc(niceStamp(sv.Saved))}${sv.By ? ` by ${esc(sv.By)}` : ''}. Saving again replaces it.` : 'Not saved yet.'} Saving keeps the results (LASFIR and MRN, no names or card numbers) on a hidden sheet in this workbook, not the files. "Export this patient" uses what is on screen; "Export all" compiles every saved audit.</p>`;
   }
   const auDetailCtx = () => (detailKey ? patientCtx(detailKey) : null);
+  // File names can carry a patient's name, so summaries and saved audits name the sources only.
+  const auSources = (s) => AU_KINDS.filter(([k]) => s.files[k] && s.files[k].id.ok).map(([, l]) => l);
+  /** Download an audit export workbook; on Excel on the web, also offer the save tab. */
+  function auExport(spec, file, extra) {
+    if (!spec.sheets[0].rows.length) { notice('No audit to export yet. Save one first, or add the files.', false); return; }
+    const bytes = XLR.buildWorkbook(spec);
+    const url = URL.createObjectURL(new Blob([bytes], { type: XLR.MIME }));
+    const el = document.createElement('a');
+    el.href = url; el.download = file; document.body.appendChild(el); el.click();
+    setTimeout(() => { URL.revokeObjectURL(url); el.remove(); }, 1000);
+    notice(`Saved ${file} (${spec.sheets[0].rows.length} patient${spec.sheets[0].rows.length === 1 ? '' : 's'}) to your Downloads folder. ${extra || ''} It has PHI: keep it in MHS OneDrive or Teams.`, true);
+    if (inOffice && web) {
+      const tab = document.createElement('button'); tab.className = 'link'; tab.textContent = 'Save in a new tab';
+      tab.addEventListener('click', () => {
+        const w = window.open(new URL('save.html', location.href).href, '_blank');
+        if (!w) { notice('The browser blocked the new tab. Allow pop-ups for Excel.', false); return; }
+        let got = false, tries = 0;
+        const onMsg = (ev) => { if (ev.origin === location.origin && ev.data && ev.data.type === 'sohar-save-got') { got = true; window.removeEventListener('message', onMsg); } };
+        window.addEventListener('message', onMsg);
+        const b64 = XLR.toBase64(bytes);
+        const send = () => { if (got || ++tries > 40 || w.closed) { window.removeEventListener('message', onMsg); return; } try { w.postMessage({ type: 'sohar-save', name: file, base64: b64, mime: XLR.MIME }, location.origin); } catch (err) { /* not loaded yet */ } setTimeout(send, 250); };
+        send();
+      });
+      $('notice').append(' Nothing there? ', tab, '.');
+    }
+  }
   async function auCopy(text) {
     try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall through: Office dialogs may block the clipboard API */ }
     const ta = document.createElement('textarea');
@@ -801,19 +847,34 @@
     return ok;
   }
   $('detail').addEventListener('click', (e) => {
-    const t = e.target.closest('#auDrop,[data-au-rm],[data-au-more],[data-au-all],[data-au-copy]');
+    const t = e.target.closest('#auDrop,[data-au-rm],[data-au-more],[data-au-all],[data-au-copy],[data-au-save],[data-au-export]');
     if (!t || !detailKey) return;
     const s = auditOf(detailKey);
     if (t.id === 'auDrop') { $('auFile').click(); return; }
     if (t.dataset.auRm) { delete s.files[t.dataset.auRm]; renderDetail('#auDrop'); return; }
     if (t.dataset.auMore) { s.more = !s.more; renderDetail('[data-au-more]'); return; }
     if (t.dataset.auAll) { s.all = !s.all; renderDetail('[data-au-all]'); return; }
+    if (t.dataset.auSave) {
+      const c = auDetailCtx(), a = c && auditRun(c);
+      if (!a) return;
+      const by = byOrAsk();
+      if (!by) return;
+      toPane({ type: 'audit-save', record: AU.auditRecord(a, { ...whoOf(c), key: c.k }, { by, when: stamp(), sources: auSources(s) }) });
+      notice('Saving the audit…', true);
+      return;
+    }
+    if (t.dataset.auExport) {
+      const c = auDetailCtx(), a = c && auditRun(c);
+      if (t.dataset.auExport === 'one') {
+        const data = a ? AU.mergeAudits({ summary: [], lines: [] }, AU.auditRecord(a, { ...whoOf(c), key: c.k }, { by: adminName, when: stamp(), sources: auSources(s) })) : savedAudits;
+        auExport(AU.exportSpec(data, [c.k]), AU.exportName(whoOf(c).lasfir), a ? 'This export is what is on screen; save it to keep it in the workbook.' : '');
+      } else auExport(AU.exportSpec(savedAudits), AU.exportName(''), a && !AU.savedFor(savedAudits, c.k) ? 'The audit on screen is not saved, so it is not in this export.' : '');
+      return;
+    }
     if (t.dataset.auCopy) {
       const c = auDetailCtx(), a = c && auditRun(c);
       if (!a) return;
-      // File names can carry a patient's name, so the summary names the sources only.
-      const srcs = AU_KINDS.filter(([k]) => s.files[k] && s.files[k].id.ok).map(([, l]) => l);
-      auCopy(AU.summaryText(a, whoOf(c), srcs)).then((ok) => notice(ok ? 'Audit summary copied.' : 'Copy was blocked. Select the text and copy it yourself.', ok));
+      auCopy(AU.summaryText(a, whoOf(c), auSources(s))).then((ok) => notice(ok ? 'Audit summary copied.' : 'Copy was blocked. Select the text and copy it yourself.', ok));
     }
   });
   $('detail').addEventListener('keydown', (e) => { if (e.target.id === 'auDrop' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); $('auFile').click(); } });

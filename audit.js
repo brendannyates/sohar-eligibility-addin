@@ -1,4 +1,4 @@
-/* audit.js — patient account audit (v0.23). Pure: no Office.js, no DOM, no network. Loaded after core.js and fees.js
+/* audit.js — patient account audit (v0.23; saved audits and the export v0.23.1). Pure: no Office.js, no DOM, no network. Loaded after core.js and fees.js
    by dashboard.html, and by tests/.
    Staff drop up to three files in a patient's record: the InstaMed payment transactions report (.xls), the Arietis
    account activity detail (.xlsx) and a fresh NextGen appointments report with the plan year's kept visits. This:
@@ -672,6 +672,97 @@
     return L.join('\n');
   }
 
+  // ---------- saved audits and the export (v0.23.1) ----------
+  // The last audit per patient is saved on two hidden sheets: one summary row (AUDIT_COLS) and its lines
+  // (AUDIT_LINE_COLS: findings, visits, re-quote, payments). LASFIR and MRN only: no names, file names or card numbers.
+  // Saving again replaces that patient's rows. The export compiles every saved audit into one workbook.
+  const AUDIT_COLS = ['Key', 'MRN', 'LASFIR', 'Saved', 'By', 'Plan Year', 'Sources', 'Arietis Through', 'Arietis Balance', 'Processed Balance',
+    'Earlier Plan Years', 'Pending Claims', 'Pending Billed', 'Pending Patient Share', 'InstaMed Not Posted', 'True Balance', 'Booked Re-quote',
+    'InstaMed Collected', 'Arietis Patient Paid', 'Deductible', 'Deductible Met', 'OOP Max', 'OOP Met', 'TMS', 'Visit', 'Esketamine',
+    'Calculator', 'High', 'Medium', 'Low', 'Codes Confirmed'];
+  const AUDIT_LINE_COLS = ['Key', 'MRN', 'LASFIR', 'Saved', 'Part', 'Date', 'What', 'Codes', 'Allowed', 'Plan Paid', 'Patient Share', 'Calculator',
+    'Quoted', 'Paid', 'Balance', 'Status', 'Severity', 'Source', 'Detail'];
+  const AUDIT_MONEY = new Set(['Arietis Balance', 'Processed Balance', 'Earlier Plan Years', 'Pending Billed', 'Pending Patient Share', 'InstaMed Not Posted',
+    'True Balance', 'Booked Re-quote', 'InstaMed Collected', 'Arietis Patient Paid', 'Deductible', 'Deductible Met', 'OOP Max', 'OOP Met',
+    'Allowed', 'Plan Paid', 'Patient Share', 'Calculator', 'Quoted', 'Paid', 'Balance']);
+  /** Card digits out of any text that is saved or exported. */
+  const scrub = (s) => str(s).replace(/card ending \d+/gi, 'card on file').replace(/(?:…|\.\.\.)\d{4}\b/g, '').replace(/\b(?:IM|CC)\s*Ref\s*#\s*\w+/gi, 'card ref');
+  const m2 = (n) => (n == null || n === '' || !isFinite(n) ? '' : r2(n));
+  const clsText = (k, c) => (!c ? '' : c.rule === 'copay' ? `${usd(c.copay)} copay (${c.from})` : c.rule === 'coins' ? `${Math.round((c.coins || 0) * 1000) / 10}% coinsurance (${c.from})` : `${c.rule} (${c.from})`);
+  /**
+   * The rows to save for one audit: {summary, lines}. who: {key, mrn, lasfir}; o: {by, when, sources}.
+   */
+  function auditRecord(a, who, o) {
+    const base = { Key: str(who.key || who.mrn || who.lasfir), MRN: str(who.mrn), LASFIR: str(who.lasfir), Saved: str(o.when) };
+    const b = a.balance, i = a.inputs;
+    const summary = { ...base, By: str(o.by), 'Plan Year': `${us(a.plan.start)} to ${us(a.plan.end)}`, Sources: (o.sources || []).join('; '),
+      'Arietis Through': a.charges.length ? us(a.asOf) : '', 'Arietis Balance': m2(b.arietis), 'Processed Balance': m2(b.processed), 'Earlier Plan Years': m2(b.earlier),
+      'Pending Claims': b.pendingCount, 'Pending Billed': m2(b.pendingBilled), 'Pending Patient Share': m2(b.pendingPatient), 'InstaMed Not Posted': m2(b.unposted),
+      'True Balance': m2(b.true), 'Booked Re-quote': m2(b.booked), 'InstaMed Collected': m2(b.instamedCollected), 'Arietis Patient Paid': m2(b.arietisPatientPaid),
+      Deductible: m2(num(i.deductible)), 'Deductible Met': m2(num(i.dedMet)), 'OOP Max': m2(num(i.oopMax)), 'OOP Met': m2(num(i.oopMet)),
+      TMS: clsText('TMS', i.cls.TMS), Visit: clsText('Visit', i.cls.Visit), Esketamine: a.learned.classes.Esketamine ? clsText('Esketamine', i.cls.Esketamine) : '',
+      Calculator: a.calc.days ? `${(F && (F.CALC_MODES.find(([k]) => k === a.calc.mode) || [])[1]) || a.calc.mode}: ${usd(a.calc.calcTotal)} vs ${usd(a.calc.planTotal)} charged, ${a.calc.off} of ${a.calc.days} days differ` : '',
+      High: a.counts.high, Medium: a.counts.medium, Low: a.counts.low, 'Codes Confirmed': a.days.filter((d) => d.confirmed).length };
+    const lines = [];
+    const add = (part, o2) => lines.push({ ...Object.fromEntries(AUDIT_LINE_COLS.map((c) => [c, ''])), ...base, Part: part, ...o2 });
+    for (const x of a.anomalies.filter((y) => y.sev !== 'info' || y.confirmed)) add('Finding', { Date: x.day != null ? us(x.day) : '', What: scrub(x.text), Severity: x.confirmed ? 'confirmed' : x.sev, Source: x.source, Status: x.confirmed ? 'Codes confirmed' : '' });
+    for (const d of a.days.filter((y) => y.inPlan || y.checks.length)) {
+      const cs = d.charges;
+      add('Visit', { Date: us(d.day), What: d.visits.map((v) => `${v.event} (${v.status})`).join('; '), Codes: cs.map((c) => `${c.code}${c.mods.length ? `-${c.mods.join('-')}` : ''}`).join(', '),
+        Allowed: cs.length ? m2(cs.reduce((t, c) => t + (c.allowed ?? c.expected ?? 0), 0)) : '', 'Plan Paid': d.processed ? m2(cs.reduce((t, c) => t + c.insPaid, 0)) : '',
+        'Patient Share': d.processed ? m2(d.resp) : '', Calculator: m2(d.calc), Quoted: d.quote ? m2(d.quote.amount) : '', Paid: m2(d.patPaid), Balance: m2(d.balance),
+        Status: `${!cs.length ? 'Not billed' : d.processed ? 'Processed' : 'Pending'}${d.confirmed ? ' · codes OK' : ''}`,
+        Detail: scrub([...d.checks.map((x) => x.text), ...cs.flatMap((c) => c.checks.filter((x) => x.sev !== 'info').map((x) => `${c.code}: ${x.text}`))].join('; ')) });
+    }
+    for (const q of a.requote) {
+      add('Re-quote', { Date: us(q.day), What: `${q.kind}: ${q.event || ''}`.trim(), Codes: q.lines.map((l) => `${l.code} ${l.allowed == null ? 'no rate' : usd(l.allowed)} (${l.src})`).join(', '),
+        'Patient Share': m2(q.patient), Paid: m2(q.paid), Balance: m2(q.due),
+        Status: q.flow == null ? '' : q.sandbox ? 'Sohar Flow (sandbox)' : Math.abs(q.flow - q.patient) > 1 ? 'Sohar Flow differs' : 'Sohar Flow same',
+        Detail: [q.flow != null ? `Sohar Flow ${usd(q.flow)}` : '', q.capped ? 'reaches the OOP max' : '', q.oopLeft != null ? `OOP left ${usd(q.oopLeft)}` : ''].filter(Boolean).join('; ') });
+    }
+    const p = a.payments;
+    for (const m of p.matches) for (const t of m.txns) {
+      add('Payment', { Date: us(t.day), What: 'InstaMed payment', Paid: m2(t.amount), Status: 'Posted in Arietis',
+        Detail: `posted ${[...new Set(m.lines.map((l) => us(l.posted)))].join(', ')}; batch ${[...new Set(m.lines.map((l) => l.batch))].join(', ')}${m.lines.length > 1 ? `; split across ${m.lines.length} charges` : ''}` });
+    }
+    for (const t of p.unposted) add('Payment', { Date: us(t.day), What: 'InstaMed payment', Paid: m2(t.amount), Status: t.recent ? 'Not posted yet' : 'Not posted', Detail: t.ambiguous ? 'same amount as other payments on this card' : '' });
+    for (const l of p.notInInstamed) add('Payment', { Date: us(l.posted), What: 'Arietis patient payment', Paid: m2(l.pay), Status: 'Not in the InstaMed report', Detail: `batch ${l.batch}` });
+    lines.sort((x, y) => ['Finding', 'Visit', 'Re-quote', 'Payment'].indexOf(x.Part) - ['Finding', 'Visit', 'Re-quote', 'Payment'].indexOf(y.Part));
+    return { summary, lines };
+  }
+  /** Saved audits with one patient's replaced by rec (its Key). saved: {summary, lines}. */
+  function mergeAudits(saved, rec) {
+    const k = str(rec.summary.Key);
+    const keep = (rows) => (rows || []).filter((r) => str(r.Key) !== k);
+    return { summary: [...keep(saved && saved.summary), rec.summary].sort((x, y) => str(x.LASFIR).localeCompare(str(y.LASFIR))), lines: [...keep(saved && saved.lines), ...rec.lines] };
+  }
+  /** A saved summary row for a patient key, or null. */
+  const savedFor = (saved, key) => ((saved && saved.summary) || []).find((r) => str(r.Key) === str(key)) || null;
+  /**
+   * The export workbook spec (xlsx.buildWorkbook): Summary, Findings, Visits, Re-quote, Payments. keys: only these
+   * patients (blank = every saved audit). Money columns go out as numbers.
+   */
+  function exportSpec(saved, keys) {
+    const want = keys && keys.length ? new Set(keys.map(str)) : null;
+    const pick = (rows) => (rows || []).filter((r) => !want || want.has(str(r.Key)));
+    const money = (cols) => (r) => Object.fromEntries(cols.map((c) => [c, AUDIT_MONEY.has(c) && str(r[c]) !== '' && num(r[c]) != null ? num(r[c]) : str(r[c]) === '' ? '' : (/^(High|Medium|Low|Pending Claims|Codes Confirmed)$/.test(c) && num(r[c]) != null ? num(r[c]) : str(r[c]))]));
+    const sCols = AUDIT_COLS.filter((c) => c !== 'Key');
+    const part = (sheet, kind, cols) => { const cs = ['LASFIR', 'MRN', ...cols]; return { name: sheet, columns: cs, rows: pick(saved && saved.lines).filter((r) => r.Part === kind).map(money(cs)) }; };
+    return { sheets: [
+      { name: 'Summary', columns: sCols, rows: pick(saved && saved.summary).map(money(sCols)) },
+      part('Findings', 'Finding', ['Date', 'Severity', 'Source', 'What', 'Status']),
+      part('Visits', 'Visit', ['Date', 'What', 'Codes', 'Allowed', 'Plan Paid', 'Patient Share', 'Calculator', 'Quoted', 'Paid', 'Balance', 'Status', 'Detail']),
+      part('Re-quote', 'Re-quote', ['Date', 'What', 'Codes', 'Patient Share', 'Paid', 'Balance', 'Status', 'Detail']),
+      part('Payments', 'Payment', ['Date', 'What', 'Paid', 'Status', 'Detail']),
+    ] };
+  }
+  /** "Account Audits 2026-11-02.xlsx", or "Account Audit - TESPAT 2026-11-02.xlsx" for one patient. */
+  function exportName(lasfir, d) {
+    const x = d || new Date();
+    const day = `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
+    return lasfir ? `Account Audit - ${str(lasfir).replace(/[^A-Z0-9]/gi, '')} ${day}.xlsx` : `Account Audits ${day}.xlsx`;
+  }
+
   // ---------- demo (made-up patient, codes and amounts; the layouts mimic the real exports) ----------
   /**
    * Rows for the three files, shaped like the real exports, for demo mode and tests: {instamed, arietis, appointments}.
@@ -730,6 +821,7 @@
     return { instamed: I, arietis: A, appointments: P };
   }
 
-  return { detectKind, parseInstamed, demoRows, parseArietis, parseAppointments, identify, chargeCode, expectedFor, codeChecks, familyOf, classOf,
+  return { AUDIT_COLS, AUDIT_LINE_COLS, auditRecord, mergeAudits, savedFor, exportSpec, exportName,
+    detectKind, parseInstamed, demoRows, parseArietis, parseAppointments, identify, chargeCode, expectedFor, codeChecks, familyOf, classOf,
     matchPayments, subsetSum, learnBenefits, planYearOf, requote, runAudit, summaryText, dayOf, iso, us, usd, KEPT_RE };
 });

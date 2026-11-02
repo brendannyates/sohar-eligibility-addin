@@ -92,6 +92,8 @@
     tblFlowResults: { sheet: 'Flow Results', hidden: true },
     // v0.20: visit pre-check ticks from full screen (record.PRECHECK_COLS). Keys are MRNs: hidden.
     tblPreCheck: { sheet: 'Pre-Check', hidden: true },
+    // v0.23.1: the last account audit per patient (audit.AUDIT_COLS / AUDIT_LINE_COLS). LASFIR and MRN, no names: hidden.
+    tblAccountAudits: { sheet: 'Account Audits', hidden: true }, tblAccountAuditLines: { sheet: 'Account Audit Lines', hidden: true },
   };
   // Fee estimate tables by short name (app.js uses readFee / writeFee with these).
   const FEE_TABLES = { schedule: 'tblFeeSchedule', meta: 'tblFeeMeta', locations: 'tblFeeLocations', homes: 'tblProviderHome',
@@ -601,6 +603,10 @@
   const writeFlowResults = (cols, rows) => writeAddinTable('Flow Results', 'tblFlowResults', cols, rows, false); // hidden: OWNED
   const readPreCheck = () => readOwned('tblPreCheck');
   const writePreCheck = (cols, rows) => writeAddinTable('Pre-Check', 'tblPreCheck', cols, rows, false); // hidden: OWNED
+  const readAccountAudits = () => readOwned('tblAccountAudits');
+  const readAccountAuditLines = () => readOwned('tblAccountAuditLines');
+  const writeAccountAudits = (cols, rows) => writeAddinTable('Account Audits', 'tblAccountAudits', cols, rows, false); // hidden: OWNED
+  const writeAccountAuditLines = (cols, rows) => writeAddinTable('Account Audit Lines', 'tblAccountAuditLines', cols, rows, false); // hidden: OWNED
   const writePayerMetrics = (cols, rows) => writeAddinTable('Payer Metrics', 'tblPayerMetrics', cols, rows, false);
   const readPayerMetricHistory = () => readOwned('tblPayerMetricHistory');
   const writePayerMetricHistory = (cols, rows) => writeAddinTable('Payer Metrics History', 'tblPayerMetricHistory', cols, rows, false);
@@ -922,7 +928,7 @@
     readPayerEvidence, writePayerEvidence, tableExists, readClinicFile, ensureConfigRows,
     readPayerOutcomes, writePayerOutcomes, readPayerMapLog, writePayerMapLog, appendPayerMapLog, writePayerLearning,
     readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests, FEE_TABLES, readFee, writeFee,
-    readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, readFlowResults, writeFlowResults, readPreCheck, writePreCheck, writePayerMetrics,
+    readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, readFlowResults, writeFlowResults, readPreCheck, writePreCheck, readAccountAudits, readAccountAuditLines, writeAccountAudits, writeAccountAuditLines, writePayerMetrics,
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
     INBOX, readClinicInbox, createClinicInbox, writeImportRows, importXlsx, lockNameSheets, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
