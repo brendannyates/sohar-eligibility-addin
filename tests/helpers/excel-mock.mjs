@@ -85,6 +85,8 @@ class Workbook {
   deleteSheet(s) {
     this.guardStructure();
     if (s.visibility === 'Visible' && this.visible().length === 1) throw xlErr('InvalidOperation', 'This operation is not permitted for the current object. (cannot delete the last visible sheet)');
+    // Worksheet.delete docs: a VeryHidden sheet can't be deleted; set it to hidden or visible first (seen in Excel, 11/2).
+    if (s.visibility === 'VeryHidden') throw xlErr('InvalidOperation', 'This operation is not permitted for the current object. (cannot delete a very hidden sheet)');
     for (const t of this.tablesOn(s)) this.dropTable(t);
     this.sheets.splice(this.sheets.indexOf(s), 1);
     s.deleted = true;

@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.23.1';
+  const VERSION = '0.23.3';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -10,7 +10,7 @@
   const PRM = window.PayerRules; // esketamine payer credential rules (v0.13, payer-rules.js, shared with other add-ins)
   const PK = window.PayerKnowledge; // built-in payer mappings and fee review flags (v0.17, payer-knowledge.js)
   const REC = window.SoharRecord; // one record per patient and Sohar Flow results (v0.20, record.js)
-  const AU = window.SoharAudit; // saved account audits (v0.23.1, audit.js): column lists and the merge
+  const AU = window.SoharAudit; // saved account audits (v0.23.3, audit.js): column lists and the merge
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
   const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, discoveryVerify: null, pendingFocus: '', demo: false,
@@ -2096,7 +2096,7 @@
     });
     return state.precheckQueue;
   }
-  /** Saved account audits (v0.23.1, hidden Account Audits + Account Audit Lines), read once per pane session. */
+  /** Saved account audits (v0.23.3, hidden Account Audits + Account Audit Lines), read once per pane session. */
   async function currentAudits(fresh) {
     if (state.demo) return state.audits || { summary: [], lines: [] };
     if (fresh || !state.audits) {

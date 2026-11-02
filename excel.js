@@ -104,6 +104,12 @@
   // swap, and rescue() finishes it. Sheet names max 31 chars: '~saving tblDiscoveryVerify' is 26.
   const STAGE_SHEET = (t) => `~saving ${t}`, STG = (t) => `${t}_stg`, STAGE_IMPORT = '~saving Import';
   const visOf = (hidden) => (hidden === 'very' ? Excel.SheetVisibility.veryHidden : hidden ? Excel.SheetVisibility.hidden : Excel.SheetVisibility.visible);
+  /**
+   * Delete a sheet that is hidden or very hidden. Excel refuses to delete a VeryHidden sheet ("This operation is not
+   * permitted for the current object", InvalidOperation), so it is made plain hidden first, in the same batch. Use it
+   * for staging sheets and the very hidden name sheets; a visible sheet is left visible (hiding the last visible one fails).
+   */
+  function dropHidden(ws) { ws.visibility = Excel.SheetVisibility.hidden; ws.delete(); }
 
   /** Finish an interrupted swap: rename the staging sheet and its STG table to the real names. True when done. */
   async function rescue(ctx, tableName) {
@@ -111,10 +117,10 @@
     try {
       const stg = wb.tables.getItem(STG(tableName)), sws = stg.worksheet;
       sws.load('id,name');
-      const clash = wb.worksheets.getItemOrNullObject(sheet); clash.load('isNullObject,id');
+      const clash = wb.worksheets.getItemOrNullObject(sheet); clash.load('isNullObject,id,visibility');
       await ctx.sync();
       // A different sheet still holding the real name has already lost its table: it is the old sheet, half-deleted.
-      if (!clash.isNullObject && clash.id !== sws.id) clash.delete();
+      if (!clash.isNullObject && clash.id !== sws.id) { if (clash.visibility === Excel.SheetVisibility.veryHidden) dropHidden(clash); else clash.delete(); }
       sws.visibility = visOf(hidden);
       if (sws.name !== sheet) sws.name = sheet;
       stg.name = tableName; // last: the real name only ever appears on complete data
@@ -444,7 +450,7 @@
         // copy), so a cut-off upload leaves Import untouched, empty or complete, never a partial report to build from.
         const old = wb.worksheets.getItemOrNullObject(STAGE_IMPORT); old.load('isNullObject');
         await ctx.sync().catch(failed('checking the workbook'));
-        if (!old.isNullObject) old.delete();
+        if (!old.isNullObject) dropHidden(old);
         const stage = wb.worksheets.add(STAGE_IMPORT);
         stage.visibility = Excel.SheetVisibility.veryHidden; // the report has names and DOBs
         await ctx.sync().catch(failed('preparing'));
@@ -458,7 +464,7 @@
         ws.getRange().clear();
         ws.getRangeByIndexes(0, 0, grid.length, width).copyFrom(stage.getRangeByIndexes(0, 0, grid.length, width), Excel.RangeCopyType.all);
         await ctx.sync().catch((e) => { e.message = `Could not load the report: ${e.message}. Upload it again.`; throw e; });
-        stage.delete();
+        dropHidden(stage);
         await ctx.sync().catch((e) => console.warn('report staging sheet left', e));
         return;
       }
@@ -493,7 +499,7 @@
         await ctx.sync();
         return await fn(ctx, used);
       } finally {
-        for (const id of ids) ctx.workbook.worksheets.getItem(id).delete();
+        for (const id of ids) dropHidden(ctx.workbook.worksheets.getItem(id)); // an uploaded workbook can carry very hidden sheets
         await ctx.sync();
       }
     });
@@ -661,7 +667,7 @@
         throw new Error(`Could not set up ${label}: this workbook already has a sheet named "${spec.sheet}" without the ${spec.table} table. Rename or delete that sheet, then ${retry}. Nothing was changed.`);
       }
       if (!home) {
-        if (!stage.isNullObject) wb.worksheets.getItem(STAGE_SHEET(spec.table)).delete(); // an earlier try cut off before its table
+        if (!stage.isNullObject) dropHidden(wb.worksheets.getItem(STAGE_SHEET(spec.table))); // an earlier try cut off before its table
         const s = wb.worksheets.add(STAGE_SHEET(spec.table));
         s.visibility = Excel.SheetVisibility.hidden;
         const rg = s.getRangeByIndexes(0, 0, 2, cols.length);
@@ -779,7 +785,7 @@
       // in this same batch (see sweepStage), so a sheet another window has just swapped into place is never hit.
       if (!p.stage.isNullObject && p.stage.id !== oldTableSheetId) {
         if (!p.real.isNullObject) sweepStage(ctx, tableName);
-        else wb.worksheets.getItem(STAGE_SHEET(tableName)).delete(); // first save ever: nothing real to protect
+        else dropHidden(wb.worksheets.getItem(STAGE_SHEET(tableName))); // first save ever: nothing real to protect
       }
       // A stray STG table off the staging sheet (the real table is intact here) would block the name: drop it.
       else if (!p.stg.isNullObject) wb.tables.getItem(STG(tableName)).delete();
@@ -805,7 +811,8 @@
       const vis = own.hidden ? visOf(own.hidden) : p.ws.isNullObject ? Excel.SheetVisibility.visible : p.ws.visibility;
       stage.visibility = vis; // before the delete, so a visible sheet always remains
       if (!p.real.isNullObject && oldTableSheetId !== (p.ws.isNullObject ? null : p.ws.id)) p.real.delete(); // old table on a renamed sheet
-      if (!p.ws.isNullObject) p.ws.delete(); // takes the old table with it
+      // takes the old table with it; a very hidden one (Sohar Uploads, IR Uploads) is made plain hidden first
+      if (!p.ws.isNullObject) { if (p.ws.visibility === Excel.SheetVisibility.veryHidden) dropHidden(p.ws); else p.ws.delete(); }
       stage.name = sheetName;
       wb.tables.getItem(STG(tableName)).name = tableName;
       if (!p.ws.isNullObject) stage.position = p.ws.position;
@@ -826,7 +833,7 @@
           // sheet (by id: it is ours whatever it is named now) and say the save did not happen.
           const mine = wb.worksheets.getItemOrNullObject(stageId); mine.load('isNullObject');
           await ctx.sync().catch(() => {});
-          if (mine.isNullObject === false) { mine.delete(); await ctx.sync().catch(() => {}); }
+          if (mine.isNullObject === false) { dropHidden(mine); await ctx.sync().catch(() => {}); }
           unchanged('swapping in the new sheet')(e);
         }
         // Otherwise the swap (or the rescue) put this save's table in place: the save stands.
@@ -870,7 +877,7 @@
       });
       const imp = wb.worksheets.getItemOrNullObject(STAGE_IMPORT); imp.load('isNullObject');
       await ctx.sync();
-      if (!imp.isNullObject) { imp.delete(); await ctx.sync().catch((e) => console.warn('report staging sheet left', e)); }
+      if (!imp.isNullObject) { dropHidden(imp); await ctx.sync().catch((e) => console.warn('report staging sheet left', e)); }
       for (let i = 0; i < names.length; i++) {
         const p = ps[i];
         if (p.real.isNullObject && !p.stg.isNullObject) { if (await rescue(ctx, names[i])) recovered.add(OWNED[names[i]].sheet); }
@@ -887,7 +894,7 @@
    */
   function sweepStage(ctx, tableName) {
     ctx.workbook.tables.getItem(tableName).getRange().load('address');
-    ctx.workbook.worksheets.getItem(STAGE_SHEET(tableName)).delete();
+    dropHidden(ctx.workbook.worksheets.getItem(STAGE_SHEET(tableName)));
   }
   /** Sheets whose interrupted save was finished since the last call (by a read, a save or recoverAll). */
   function takeRecovered() { const out = [...recovered]; recovered.clear(); return out; }
