@@ -239,7 +239,9 @@
   // ---------- codes ----------
   const FAMILY = [
     [/^9921[1-5]$/, 'E/M established'], [/^9920[2-5]$/, 'E/M new'], [/^9079[12]$/, 'Psychiatric evaluation'], [/^(9083[368]|90785)$/, 'Psychotherapy add-on'],
-    [/^9083[247]$/, 'Psychotherapy'], [/^9086[78]$/, 'TMS'], [/^90869$/, 'TMS motor threshold'], [/^G208[23]$/, 'Esketamine'], [/^961[3-4]\d$/, 'Testing'],
+    // 90867 is the MT (motor threshold) visit and 90869 the MTR (MT redo), Brendan 11/2: one family, so one billed for
+    // the other reads as a level mismatch.
+    [/^9083[247]$/, 'Psychotherapy'], [/^90868$/, 'TMS'], [/^9086[79]$/, 'TMS motor threshold'], [/^G208[23]$/, 'Esketamine'], [/^961[3-4]\d$/, 'Testing'],
   ];
   const familyOf = (code) => { for (const [re, f] of FAMILY) if (re.test(code)) return f; return 'Other'; };
   const isAddon = (code) => familyOf(code) === 'Psychotherapy add-on';
@@ -247,7 +249,9 @@
   // Interventions: the Estimate Codes sheet says "none" for them (no cost estimate), but the audit still knows what a
   // TMS or esketamine visit bills. First match wins.
   const AUDIT_EVENTS = [
-    [/motor\s*threshold|\bmt\b|re-?determin/i, ['90869'], 'TMS motor threshold'],
+    // MTR (MT redo) before MT: "MT-Redo" also has the word MT.
+    [/\bmtr\b|\bmt\s*-?\s*re-?do\b|motor\s*threshold\s*re-?do|re-?determin/i, ['90869'], 'TMS motor threshold redo (MTR)'],
+    [/motor\s*threshold|\bmt\b/i, ['90867'], 'TMS motor threshold (MT)'],
     [/\btms\b.*\b(mapping|initial)\b|\bmapping\b/i, ['90867'], 'TMS initial session with mapping'],
     [/\b(esketamine|spravato|esk)\b(?!.*consult)/i, ['G2082|G2083'], 'Esketamine session (dose code G2082 or G2083)'],
     [/\btms\b(?!.*\b(f\/?u|follow|consult)\b)/i, ['90868'], 'TMS treatment session'],

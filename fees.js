@@ -669,7 +669,9 @@
   // Codes "none": the event is labeled and never estimated. Interventions (TMS, motor threshold, esketamine) are checked
   // for eligibility, deductible and OOP max, not cost.
   const VERIFY_NOTE = 'verify deductible, OOP max and insurance status';
-  const TMS_NOTE = `TMS (intervention): no estimate; ${VERIFY_NOTE}`, MT_NOTE = `TMS motor threshold (intervention): no estimate; ${VERIFY_NOTE}`;
+  // MT (90867) is the motor threshold visit and MTR (90869) the MT redo (Brendan, 11/2).
+  const TMS_NOTE = `TMS (intervention): no estimate; ${VERIFY_NOTE}`, MT_NOTE = `TMS motor threshold, MT (intervention): no estimate; ${VERIFY_NOTE}`;
+  const MTR_NOTE = `TMS motor threshold redo, MTR (intervention): no estimate; ${VERIFY_NOTE}`;
   const ESK_NOTE = `Esketamine (intervention): no estimate; ${VERIFY_NOTE}`;
   const IVK_NOTE = 'IV ketamine infusion: provider visit, plus the self-pay medication (Config IVK medication rows)';
   const VISIT_30 = '30-minute visit';
@@ -677,7 +679,8 @@
   // found in the event wins; on a tie the earlier row wins.
   const ESTIMATE_CODE_SEEDS = seedRows([
     ['TMS', 'none', TMS_NOTE], ['TMS treatment', 'none', TMS_NOTE], ['TMS theta', 'none', TMS_NOTE], ['TMS mapping', 'none', TMS_NOTE],
-    ['TMS initial', 'none', TMS_NOTE], ['MT', 'none', MT_NOTE], ['motor threshold', 'none', MT_NOTE],
+    ['TMS initial', 'none', TMS_NOTE], ['MT', 'none', MT_NOTE], ['motor threshold', 'none', MT_NOTE], ['MTR', 'none', MTR_NOTE], ['MT redo', 'none', MTR_NOTE],
+    ['motor threshold redo', 'none', MTR_NOTE],
     ['esketamine', 'none', ESK_NOTE], ['esketamine follow up', 'none', ESK_NOTE], ['ESK', 'none', ESK_NOTE], ['Spravato', 'none', ESK_NOTE],
     // New patient intakes and consults.
     ['intake', '90792 x1', 'New patient intake'], ['new patient', '90792 x1', 'New patient intake'], ['new', '90792 x1', 'New patient'],

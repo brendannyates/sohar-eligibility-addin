@@ -146,7 +146,11 @@ test('codes billed against the visit\'s event', () => {
   assert.match(AU.codeChecks([v('Telepsych TMS F/U')], [ch('99214')])[0].text, /without modifier 95/);
   assert.deepEqual(AU.codeChecks([v('Telepsych TMS F/U')], [ch('99214', ['95'])]), []);
   assert.deepEqual(AU.codeChecks([v('Esketamine Treatment')], [ch('G2082')]), []);
-  assert.deepEqual(AU.expectedFor('TMS Motor Threshold').lines, [['90869']]);
+  // 90867 is the MT visit, 90869 the MTR (MT redo) (Brendan, 11/2).
+  assert.deepEqual(AU.expectedFor('TMS Motor Threshold').lines, [['90867']]);
+  assert.deepEqual(AU.expectedFor('MT').lines, [['90867']]);
+  for (const ev of ['MTR', 'MT-Redo', 'MT Redo', 'Motor Threshold Redo', 'Motor threshold re-determination']) assert.deepEqual(AU.expectedFor(ev).lines, [['90869']], ev);
+  assert.match(AU.codeChecks([v('MT-Redo')], [ch('90867')])[0].text, /expected 90869, billed 90867 \(different TMS motor threshold level\)/);
 });
 
 // ---------- payments ----------
