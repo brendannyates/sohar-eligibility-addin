@@ -405,6 +405,8 @@ ul.visits { margin: 0; padding-left: 16px; font-size: 12.5px; }
 .calcgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 6px 10px; margin: 6px 0; }
 .calcgrid.off { opacity: .45; pointer-events: none; }
 .estcode input[data-ecoins] { width: 6em; }
+.estcode { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.estcode select[data-erule] { width: auto; max-width: 22em; }
 label.inline { display: inline-flex; align-items: center; gap: 6px; }
 label.inline input { width: auto; }
 .dgroup.timeline { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }

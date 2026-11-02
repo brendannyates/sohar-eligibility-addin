@@ -884,7 +884,8 @@
       if (!x || x.none) return `<div class="estcol"><h4>${esc(label)}: —</h4><p class="hint">${esc((x && x.none) || 'No estimate')}</p></div>`;
       return `<div class="estcol"><h4>${esc(label)}: ${esc(F.usd(x.total))} over ${x.visits.length} visit${x.visits.length === 1 ? '' : 's'}</h4>
         <ul class="estlines">${x.visits.map((v) => `<li>Visit ${v.n}: ${esc(F.usd(v.patient))}${v.towardDeductible ? ` (${esc(F.usd(v.towardDeductible))} toward the deductible)` : ''}</li>`).join('')}</ul>
-        <p class="hint">${esc([x.dedAt ? `Deductible met at visit ${x.dedAt}` : '', x.oopAt ? `OOP max met at visit ${x.oopAt}` : ''].filter(Boolean).join(' · ') || 'Neither the deductible nor the OOP max is met by these visits.')}</p></div>`;
+        <p class="hint">${esc([!(Number(b.deductible) > 0) ? 'No deductible' : x.dedAlready ? 'Deductible already met' : x.dedAt ? `Deductible met at visit ${x.dedAt}` : 'Deductible not met by these visits',
+          !(Number(b.oopMax) > 0) ? 'No OOP max' : x.oopAlready ? 'OOP max already met' : x.oopAt ? `OOP max met at visit ${x.oopAt}` : 'OOP max not met by these visits'].join(' · '))}.</p></div>`;
     };
     return `${sr.flags.length ? `<ul class="pc-items">${sr.flags.map((f) => `<li class="sev-medium">${esc(f)}</li>`).join('')}</ul>` : ''}
       ${sr.basis ? `<p class="hint">${esc(sr.basis)}${estOver.start === 'booked' ? ' · starting after the booked visits' : ''}</p>` : ''}

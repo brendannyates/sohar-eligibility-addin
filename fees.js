@@ -1424,7 +1424,7 @@
         if (dedOpen && !dedAt && n0(b.deductibleMet) >= n0(b.deductible)) dedAt = i;
         if (oopOpen && !oopAt && n0(b.oopMax) > 0 && n0(b.oopMet) >= n0(b.oopMax)) oopAt = i;
       }
-      return { visits, total: cents(total), dedAt, oopAt };
+      return { visits, total: cents(total), dedAt, oopAt, dedAlready: !dedOpen && n0(b.deductible) > 0, oopAlready: !oopOpen && n0(b.oopMax) > 0 };
     };
     if (!first.md && !first.np) return { md: null, np: null, same: true, flags: first.flags, basis: first.basis };
     const md = run((e) => e.md), np = first.same ? md : run((e) => e.np);
