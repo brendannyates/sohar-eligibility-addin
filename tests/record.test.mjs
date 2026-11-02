@@ -336,3 +336,70 @@ test('Flow import rows: one per in-scope patient; chart policy only for verifica
   assert.deepEqual(out.skipped, [{ key: '730004', why: 'verified eligible recently (skip window)' }, { key: '730005', why: 'no name, DOB or state' }]);
   assert.equal(REC.flowImportRows([p({ MRN: '730007' })], {}).rows[0].specialtyCode, 'PSY');
 });
+
+// ---------- patient view (v0.22): plans, milestones, what changed, projection, action items ----------
+const ver = (o) => row({ 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', MRN: '740001', 'Per Nbr': '940001', ...o });
+test('plansOf groups results by payer and member ID; the lead result\'s plan is current', () => {
+  const now = ver({ 'Sohar Payer': 'Synth Mutual', 'Sohar Member ID': 'SYN-A1', 'Sohar Date': '2026-10-29T16:40:00Z' });
+  const disc = row({ 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', MRN: '740001', 'Sohar Payer': 'Synth Mutual', 'Sohar Date': '2026-10-29T16:31:00Z' });
+  const old = ver({ 'Sohar Payer': 'Old Synth HMO', 'Sohar Member ID': 'OLD-9', 'Sohar Status': 'error.member.inactive', 'Sohar Date': '2026-09-03T18:12:00Z', Action: 'Superseded by a later result' });
+  const plans = REC.plansOf([old, disc, now], now);
+  assert.equal(plans.length, 2);
+  assert.equal(plans[0].current, true);
+  assert.deepEqual(plans[0].results, [now, disc], 'a discovery with no member ID joins the same payer');
+  assert.equal(plans[1].payer, 'Old Synth HMO');
+  assert.equal(plans[1].superseded, true);
+  const marks = REC.milestones([old, disc, now], plans);
+  assert.deepEqual(marks.get(disc), ['New plan, first seen']);
+  assert.deepEqual(REC.sinceLast(plans), { a: 'Status changed', sub: 'Status Coverage found → complete.eligible since Oct 29.' });
+  assert.equal(REC.sinceLast([{ ...plans[0], results: [now] }, plans[1]]).a, 'New plan');
+});
+
+test('milestones mark the first result each benefit state was seen on', () => {
+  const a = ver({ 'Sohar Date': '2026-09-22T21:10:00Z', 'Deductible Status': 'Met', 'OOP Status': 'Not met' });
+  const b = ver({ 'Sohar Date': '2026-10-20T16:30:00Z', 'Deductible Status': 'Met', 'OOP Status': 'Approaching' });
+  const c = ver({ 'Sohar Date': '2026-10-27T17:05:00Z', 'Deductible Status': 'Met', 'OOP Status': 'Approaching' });
+  const m = REC.milestones([c, b, a], REC.plansOf([c, b, a], c));
+  assert.deepEqual(m.get(a), ['Deductible met, first seen']);
+  assert.deepEqual(m.get(b), ['Approaching OOP max, first seen']);
+  assert.equal(m.get(c), undefined);
+});
+
+const fv = (date, est, o) => ({ Key: `k-${date}`, MRN: '740001', 'Appt Date': date, Time: '11:00 AM', Event: 'Med management', 'Run Status': 'COMPLETE', 'Sohar Est Patient': est, File: 'Flow Results.csv', ...o });
+test('projection walks the booked visits and marks where the OOP max is met', () => {
+  const fin = { Deductible: '1000', 'Deductible Remaining': '0', 'OOP Max': '3000', 'OOP Remaining': '290', Copay: '' };
+  const fl = ['11/03/2026', '11/10/2026', '11/17/2026', '11/24/2026', '12/01/2026'].map((d) => fv(d, '96.40'));
+  const p = REC.projection(fin, fl);
+  assert.equal(p.oop.at, fl[3], 'met at visit 4 of 5');
+  assert.deepEqual(p.rows.map((r) => r.applied), [96.4, 96.4, 96.4, 0.8, 0]);
+  assert.deepEqual(p.rows[3].marks, ['OOP max met at this visit']);
+  assert.equal(p.ded.at, null, 'already met');
+  assert.equal(REC.leadLine({ lead: ver({}), proj: p }).text, 'Approaching OOP max: $290.00 left. Met at the Nov 24 visit if visits go as booked (visit 4 of 5).');
+});
+
+test('projection: copays skip the deductible, and sandbox or missing estimates are left out', () => {
+  const fin = { Deductible: '2500', 'Deductible Remaining': '2200', 'OOP Max': '6000', 'OOP Remaining': '5700', Copay: '55' };
+  const fl = [fv('11/02/2026', '55'), fv('11/09/2026', '210', { File: 'Flow Results (SANDBOX).csv' }), fv('11/16/2026', '', { Event: 'TMS mapping' })];
+  const p = REC.projection(fin, fl);
+  assert.equal(p.ded.applied, 0, 'a $55 copay goes to the OOP max only');
+  assert.equal(p.oop.applied, 55);
+  assert.deepEqual(p.missing, [fl[1], fl[2]]);
+  assert.equal(REC.projection({ Deductible: '', 'OOP Max': '' }, fl), null);
+  assert.equal(REC.projection(null, fl), null);
+});
+
+test('actionItems: most urgent first; leadLine names the worst problem', () => {
+  const now = new Date(2026, 9, 30, 9, 15);
+  const fresh = REC.freshness({ report: '2026-10-22T14:05:00Z', sohar: '2026-10-29T21:15:00Z', flow: '' }, now);
+  const visit = (date, done) => ({ date, time: '1:00 PM', items: [{ id: 'precheck', done }, { id: 'nextgen', done: false }] });
+  const lead = row({ 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', 'Sohar Payer': 'Synth North', MRN: '740002' });
+  const items = REC.actionItems({ lead, fresh, checks: [{ severity: 'high' }], visits: [visit('11/06/2026', false), visit('11/20/2026', false), visit('11/04/2026', true)],
+    flow: [fv('11/20/2026', '', { Event: 'Esketamine session' })], tasks: [{ Task: 'Add insurance', 'Due By': '11/05/2026' }], now });
+  assert.deepEqual(items.map((i) => [i.tone, i.tag]), [['red', 'Fix now'], ['red', 'Fix now'], ['amber', 'Before visit'], ['amber', 'Pre-check'], ['amber', 'NextGen task'], ['grey', 'Later'], ['grey', 'Verify']]);
+  assert.equal(items[0].text, 'Upload a new NextGen report. It is 8 days old.');
+  assert.equal(items[2].text, 'Run verification on Synth North.');
+  assert.equal(items[6].text, 'Check deductible, OOP max and status for Nov 20 Esketamine session');
+  assert.equal(REC.leadLine({ lead, checks: [{ severity: 'high' }], fresh, next: '11/06/2026' }).text, 'Guarantor and subscriber are different people. Fix the guarantor in NextGen before the Nov 6 visit.');
+  assert.equal(REC.leadLine({ lead, fresh: REC.freshness({ report: now, sohar: now }, now), next: '11/06/2026' }).text, 'Discovery found Synth North. Run verification to get benefits before the Nov 6 visit.');
+  assert.equal(REC.leadLine({ lead: ver({ 'Work Queue': 'Clear' }) }).tone, 'green');
+});
