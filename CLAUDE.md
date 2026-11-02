@@ -25,6 +25,11 @@ Hard rules:
 - The West Coast Patient Responsibility Calculator's code lives in `fees.js` (`calcEstimate`, `calcInputs`,
   `calcPatient`), but its built-in rates never go in this repo: staff drop the calculator .html once, and
   `parseCalculatorHtml` + `mergeSchedules` put the rates on the hidden fee sheets (a saved rate is never changed).
+- Per-code rules (v0.23): an Estimate Defaults row with a `Code` says how that code counts for the fee payer
+  (`CODE_CLASSES`: deductible applies or waived, coinsurance, copay); a row with no Code is the plan-level default, as
+  before. Staff classify codes in the patient view (saved with their name, `rememberCodeRule`). `estimateMath`,
+  `calcEstimate` / `calcPatient` / `calcSeries` and the projection all follow them; with no rule, results are unchanged
+  and the projection keeps its copay rule (an estimate equal to the copay counts toward the OOP max only).
 - Never add a network call. `connect-src 'none'` in `index.html` is deliberate; the only remote script is Office.js.
 - `VERIFICATION_COLS`, `DISCOVERY_COLS` and `record.FLOW_IMPORT_COLS` (the "MHS Eligibility - Discovery vs NextGen" Flow's CSV
   template, v0.21) match the Sohar CSV templates exactly, in order. Do not rename or reorder. The Flow file has no
