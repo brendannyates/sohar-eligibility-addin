@@ -244,3 +244,54 @@ test('the copied summary has LASFIR and MRN but no names or card numbers', () =>
   assert.doesNotMatch(s, /tester|\bpat\b/i);
   assert.doesNotMatch(s, /4242/);
 });
+
+// ---------- saved audits and the export (v0.23.1) ----------
+const NAME_COLS = ['Last Name', 'First Name', 'DOB', 'Patient', 'Pat Name', 'Patient Last Name', 'Patient First Name', 'Card Holder Name', 'Card # - Last 4 Digits'];
+test('saved audit columns: LASFIR and MRN, no name, DOB or card columns', () => {
+  for (const cols of [AU.AUDIT_COLS, AU.AUDIT_LINE_COLS]) {
+    assert.deepEqual(cols.filter((c) => NAME_COLS.includes(c)), []);
+    assert.ok(cols.includes('LASFIR') && cols.includes('MRN') && cols[0] === 'Key');
+  }
+});
+test('auditRecord: one summary row and its lines, with no names or card numbers anywhere', () => {
+  const a = demoAudit({ booked: [{ date: '11/03/2026', event: 'TMS Treatment Unilateral' }] });
+  const rec = AU.auditRecord(a, { ...WHO, key: '700001' }, { by: 'Synthetic Admin', when: '11/2/2026 1:30 PM', sources: ['InstaMed payments', 'Arietis account detail'] });
+  assert.equal(rec.summary.Key, '700001'); assert.equal(rec.summary['True Balance'], a.balance.true); assert.equal(rec.summary.High, a.counts.high);
+  const parts = new Set(rec.lines.map((l) => l.Part));
+  assert.deepEqual([...parts], ['Finding', 'Visit', 'Re-quote', 'Payment']);
+  const all = JSON.stringify(rec);
+  assert.doesNotMatch(all, /tester|4242/i);
+  assert.ok(rec.lines.every((l) => AU.AUDIT_LINE_COLS.every((c) => c in l)));
+  assert.ok(rec.lines.some((l) => l.Part === 'Payment' && l.Status === 'Not posted' && l.Paid === 71.51));
+});
+test('saving again replaces only that patient\'s audit', () => {
+  const a = demoAudit();
+  const r1 = AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'first' });
+  const other = AU.auditRecord(a, { lasfir: 'OTHPER', mrn: '700002', key: '700002' }, { when: 'other' });
+  let saved = AU.mergeAudits(AU.mergeAudits({ summary: [], lines: [] }, r1), other);
+  const r2 = AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'second' });
+  saved = AU.mergeAudits(saved, r2);
+  assert.equal(saved.summary.length, 2);
+  assert.equal(AU.savedFor(saved, '700001').Saved, 'second');
+  assert.equal(saved.lines.filter((l) => l.Key === '700001').length, r2.lines.length);
+  assert.ok(saved.lines.filter((l) => l.Key === '700001').every((l) => l.Saved === 'second'));
+  assert.equal(saved.lines.filter((l) => l.Key === '700002').length, other.lines.length);
+});
+test('the export compiles saved audits into Summary, Findings, Visits, Re-quote and Payments, money as numbers', async () => {
+  const a = demoAudit();
+  const rec = AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'w' });
+  // as read back from the hidden sheet: every value is text
+  const asText = (r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, v === '' ? '' : String(v)]));
+  const saved = { summary: [asText(rec.summary)], lines: rec.lines.map(asText) };
+  const spec = AU.exportSpec(saved);
+  assert.deepEqual(spec.sheets.map((s) => s.name), ['Summary', 'Findings', 'Visits', 'Re-quote', 'Payments']);
+  assert.equal(spec.sheets[0].rows[0]['True Balance'], a.balance.true);
+  assert.equal(typeof spec.sheets[2].rows[0].Balance, 'number');
+  assert.ok(!spec.sheets[0].columns.includes('Key'));
+  assert.equal(AU.exportSpec(saved, ['nobody']).sheets[0].rows.length, 0);
+  const wb = await XL.readWorkbook(XL.buildWorkbook(spec));
+  assert.equal(wb.sheets.length, 5);
+  assert.equal(wb.sheets[0].rows[1][wb.sheets[0].rows[0].indexOf('LASFIR')], 'TESPAT');
+  assert.match(AU.exportName('TESPAT', new Date(2026, 10, 2)), /^Account Audit - TESPAT 2026-11-02\.xlsx$/);
+  assert.match(AU.exportName('', new Date(2026, 10, 2)), /^Account Audits 2026-11-02\.xlsx$/);
+});

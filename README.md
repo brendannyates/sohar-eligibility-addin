@@ -180,7 +180,9 @@ In full screen, a patient's record has an **Account audit** section. Drop up to 
 - re-quotes the pending claims and the booked visits in date order with the deductible and OOP max carried forward, next to any Sohar Flow estimate;
 - adds up the **true patient balance** = processed balance + re-quoted patient share of pending claims - InstaMed payments not posted, beside the Arietis balance (which counts unprocessed claims at the full charge).
 
-The files carry names, so they stay in the full-screen window's memory only: never on a sheet, never sent to the pane, gone when full screen closes. **Copy audit summary** gives LASFIR, MRN and the findings with no names or card numbers. `xlsx.readXls` (v0.23) reads the old binary .xls InstaMed and NextGen export.
+The files carry names, so they stay in the full-screen window's memory only: never on a sheet, never sent to the pane, gone when full screen closes. **Copy audit summary** gives LASFIR, MRN and the findings with no names or card numbers.
+
+**Save this audit** (v0.23.1) keeps the last result per patient, not the files: a summary row and its findings, visits, re-quote and payment lines on the hidden `Account Audits` and `Account Audit Lines` sheets (LASFIR and MRN, no names or card numbers, the admin's name from "Working as"). Saving again replaces that patient's audit. With no files dropped, the section shows the last saved audit. **Export this patient** (what is on screen) and **Export all saved audits** download one workbook, `Account Audit(s) ... YYYY-MM-DD.xlsx`, with Summary, Findings, Visits, Re-quote and Payments sheets. It has PHI: keep it in MHS OneDrive or Teams. `xlsx.readXls` (v0.23) reads the old binary .xls InstaMed and NextGen export.
 
 ## What it does (detail)
 

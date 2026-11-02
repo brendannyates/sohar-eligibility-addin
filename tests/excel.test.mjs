@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { createMock } from './helpers/excel-mock.mjs';
 const C = createRequire(import.meta.url)('../core.js');
 const REC = createRequire(import.meta.url)('../record.js');
+const AU = createRequire(import.meta.url)('../audit.js');
 
 // Runs the real excel.js against tests/helpers/excel-mock.mjs. Synthetic data only.
 // The fail-safe sweeps fail a save at every op / sync / Excel close and check nothing is ever lost.
@@ -41,6 +42,7 @@ const clinicPayerNotes = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'Nex
   Note: i % 3 ? '' : 'new card', By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z` }));
 // v0.20 Sohar Flow results: made-up runs, LASFIR-style tags, no names.
 const flowRows = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(REC.FLOW_SHEET_COLS.map((c) => [c, c === 'Key' ? `${tag}-run-${i}` : c === 'MRN' ? `00800${i}` : `${tag} ${c} ${i}`])));
+const auditRows = (n, tag) => Array.from({ length: n }, (_, i) => ({ Key: `00900${i}`, MRN: `00900${i}`, LASFIR: 'TESPAT', Saved: `${tag} ${i}` }));
 const precheckRows = (n, tag) => Array.from({ length: n }, (_, i) => ({ Key: `00800${i}|11/0${(i % 9) + 1}/2026|9:00 AM`, MRN: `00800${i}`, 'Appt Date': `11/0${(i % 9) + 1}/2026`, Time: '9:00 AM', Item: 'precheck', Done: i % 2 ? 'Yes' : 'No', When: `${tag} ${i}` }));
 const clinicApplied = (n, tag) => Array.from({ length: n }, (_, i) => ({ Location: `${tag} Clinic`, Kind: 'Task done', Key: `00900${i}|Fix member ID in NextGen`, When: `2026-10-22T1${i % 10}:00:00.000Z` }));
 
@@ -74,6 +76,22 @@ test('writeUploads keeps Sohar Uploads hidden and round-trips the JSON records',
   await X.writeUploads(C.UPLOAD_COLS, []);
   assert.deepEqual(await X.readUploads(), []);
   assert.equal(m.tableInfo('tblSoharUploads').rows, 1, 'an empty table keeps one blank body row');
+});
+
+// v0.23.2 (seen in Excel 11/2): Excel won't delete a VeryHidden sheet. A save of the very hidden Sohar Uploads sheet failed
+// at the swap and left its very hidden staging sheet; the next save failed "preparing" on deleting that leftover.
+test('Sohar Uploads saves over a very hidden sheet and sweeps a very hidden leftover staging sheet', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  await X.writeUploads(C.UPLOAD_COLS, uploads(3, 'a'));
+  await m.Excel.run(async (ctx) => {
+    const s = ctx.workbook.worksheets.add('~saving tblSoharUploads');
+    s.visibility = 'VeryHidden';
+    await ctx.sync();
+  });
+  await X.writeUploads(C.UPLOAD_COLS, uploads(4, 'b'));
+  assert.deepEqual(await X.readUploads(), expected(C.UPLOAD_COLS, uploads(4, 'b')));
+  assert.equal(m.sheetVisibility('Sohar Uploads'), 'VeryHidden');
+  assert.throws(() => m.sheetVisibility('~saving tblSoharUploads'), /no sheet/, 'the leftover is gone');
 });
 
 test('writeIrUploads / readIrUploads round-trip records on a hidden sheet', async () => {
@@ -415,6 +433,8 @@ const CASES = {
   clinicPayerNotes: { write: (X, rows) => X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, rows), read: (X) => X.readClinicPayerNotes(), cols: RL.CLINIC_PAYER_NOTE_COLS, make: clinicPayerNotes, sheet: 'Clinic Payer Notes', hidden: false },
   flow: { write: (X, rows) => X.writeFlowResults(REC.FLOW_SHEET_COLS, rows), read: (X) => X.readFlowResults(), cols: REC.FLOW_SHEET_COLS, make: flowRows, sheet: 'Flow Results', hidden: true },
   precheck: { write: (X, rows) => X.writePreCheck(REC.PRECHECK_COLS, rows), read: (X) => X.readPreCheck(), cols: REC.PRECHECK_COLS, make: precheckRows, sheet: 'Pre-Check', hidden: true },
+  audits: { write: (X, rows) => X.writeAccountAudits(AU.AUDIT_COLS, rows), read: (X) => X.readAccountAudits(), cols: AU.AUDIT_COLS, make: auditRows, sheet: 'Account Audits', hidden: true },
+  auditLines: { write: (X, rows) => X.writeAccountAuditLines(AU.AUDIT_LINE_COLS, rows), read: (X) => X.readAccountAuditLines(), cols: AU.AUDIT_LINE_COLS, make: auditRows, sheet: 'Account Audit Lines', hidden: true },
   clinicApplied: { write: (X, rows) => X.writeClinicWorkApplied(RL.CLINIC_APPLIED_COLS, rows), read: (X) => X.readClinicWorkApplied(), cols: RL.CLINIC_APPLIED_COLS, make: clinicApplied, sheet: 'Clinic Work Applied', hidden: true },
 };
 const KNOBS = { op: 'failAtOp', sync: 'failAtSync', kill: 'killAfterSync' };
@@ -475,7 +495,7 @@ test('fail-safe: reopening the pane after any failure recovers or keeps the old 
 // Payer learning tables (v0.10): the ledger grows past one chunk; the log and the rollup are rewritten from fewer rows.
 // Sohar Refs grows past one chunk (append-only); Re-verify Requests shrinks when requests are dropped.
 for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2], ['credRules', 6, 40],
-  ['clinicNotes', 4, 1100], ['clinicPayerNotes', 30, 2], ['clinicApplied', 4, 1100], ['flow', 4, 600], ['precheck', 600, 3]]) {
+  ['clinicNotes', 4, 1100], ['clinicPayerNotes', 30, 2], ['clinicApplied', 4, 1100], ['flow', 4, 600], ['precheck', 600, 3], ['audits', 3, 4], ['auditLines', 40, 1100]]) {
   test(`fail-safe: ${CASES[kase].sheet} survives a failure at every op, a failed sync, and Excel closing`, async () => {
     await sweep(kase, 'op', nOld, nNew);
     await sweep(kase, 'sync', nOld, nNew);

@@ -26,6 +26,10 @@ Hard rules:
   names: they stay in the full-screen window's memory only (never a sheet, never `toPane`, never localStorage), and
   the copied summary is LASFIR + MRN with no names, file names or card numbers. Matching and balance rules live in
   `runAudit` with tests in `tests/audit.test.mjs`; the demo files come from `audit.demoRows` (made-up data).
+  v0.23.1: "Save this audit" keeps the RESULTS, not the files: one summary row (`AUDIT_COLS`) and its lines
+  (`AUDIT_LINE_COLS`) per patient on the hidden `Account Audits` / `Account Audit Lines` sheets (LASFIR + MRN, card
+  digits scrubbed by `auditRecord`); saving again replaces that patient's rows (`mergeAudits`). "Export" builds one
+  .xlsx in full screen (`exportSpec`: Summary, Findings, Visits, Re-quote, Payments).
 - The West Coast Patient Responsibility Calculator's code lives in `fees.js` (`calcEstimate`, `calcInputs`,
   `calcPatient`), but its built-in rates never go in this repo: staff drop the calculator .html once, and
   `parseCalculatorHtml` + `mergeSchedules` put the rates on the hidden fee sheets (a saved rate is never changed).

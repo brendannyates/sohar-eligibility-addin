@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.23.0';
+  const VERSION = '0.23.3';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -10,6 +10,7 @@
   const PRM = window.PayerRules; // esketamine payer credential rules (v0.13, payer-rules.js, shared with other add-ins)
   const PK = window.PayerKnowledge; // built-in payer mappings and fee review flags (v0.17, payer-knowledge.js)
   const REC = window.SoharRecord; // one record per patient and Sohar Flow results (v0.20, record.js)
+  const AU = window.SoharAudit; // saved account audits (v0.23.3, audit.js): column lists and the merge
   let X = null; // SoharExcel when running inside Excel; demo adapter otherwise
 
   const state = { rows: null, detection: null, cfg: null, payerMap: null, soharPayers: null, patients: null, review: null, exports: null, results: null, resultsAsOf: null, tasks: null, ir: null, discoveryVerify: null, pendingFocus: '', demo: false,
@@ -1999,7 +2000,7 @@
       guarantor: { count: (state.guarantorCandidates || []).length, noDob: (state.guarantorCandidates || []).filter((x) => !x.hasDob).length },
       // v0.20 patient record: Sohar Flow results and the Payer Outcomes ledger (older checks, for the timeline), trimmed.
       flow: await currentFlow(), outcomes: await timelineOutcomes(), profiles: await patientProfiles(),
-      visits: await patientVisits(), notes: await patientNotesByKey(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
+      visits: await patientVisits(), notes: await patientNotesByKey(), audits: await currentAudits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -2095,6 +2096,35 @@
     });
     return state.precheckQueue;
   }
+  /** Saved account audits (v0.23.3, hidden Account Audits + Account Audit Lines), read once per pane session. */
+  async function currentAudits(fresh) {
+    if (state.demo) return state.audits || { summary: [], lines: [] };
+    if (fresh || !state.audits) {
+      const read = async () => ({ summary: await X.readAccountAudits(), lines: await X.readAccountAuditLines() });
+      state.audits = fresh ? await read() : await read().catch((e) => { console.error(e); return null; });
+    }
+    return state.audits || { summary: [], lines: [] };
+  }
+  /**
+   * The last account audit for one patient, from full screen: it replaces that patient's saved rows (audit.mergeAudits).
+   * Two saves: the summary and then its lines. Saves run in order, like the pre-check ticks.
+   */
+  function saveAudit(m) {
+    state.auditQueue = (state.auditQueue || Promise.resolve()).catch(() => {}).then(async () => {
+      const pick = (cols, r) => Object.fromEntries(cols.map((c) => [c, r[c] == null ? '' : r[c]]));
+      const rec = { summary: pick(AU.AUDIT_COLS, { ...m.record.summary, Saved: fmtStamp(new Date()) }), lines: (m.record.lines || []).map((r) => pick(AU.AUDIT_LINE_COLS, r)) };
+      rec.lines.forEach((r) => { r.Saved = rec.summary.Saved; });
+      const next = AU.mergeAudits(await currentAudits(true), rec);
+      await X.writeAccountAudits(AU.AUDIT_COLS, next.summary);
+      try { await X.writeAccountAuditLines(AU.AUDIT_LINE_COLS, next.lines); } catch (e) {
+        state.audits = null; // the summary was saved but not its lines: read both again next time
+        throw new Error(`the summary was saved, but its visits and findings were not (${e.message}). Save again.`);
+      }
+      state.audits = next;
+      return rec.summary.Saved;
+    });
+    return state.auditQueue;
+  }
   /** When each source was last brought in, for the full-screen "Last updated" pill. */
   async function lastUpdatedStamps() {
     const flowRows = await currentFlow();
@@ -2151,6 +2181,11 @@
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
+    } else if (m.type === 'audit-save') {
+      try {
+        const when = await saveAudit(m);
+        await sendToDialog({ type: 'audits', audits: state.audits, notice: { ok: true, text: `Audit for ${m.record.summary.LASFIR} saved ${when}. It replaces this patient's earlier saved audit.` } });
+      } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Audit not saved: ${e.message}` }); throw e; }
     } else if (m.type === 'precheck' || m.type === 'precheck-note') {
       try { await savePrecheck(m); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `${m.type === 'precheck' ? 'Pre-check' : 'Note'} not saved: ${e.message}` }); throw e; }
     } else if (m.type === 'fee-upload' && feesOn()) {
@@ -2500,6 +2535,8 @@
       async readFee(kind) { return feeStore[kind] || []; }, async writeFee(kind, c, r) { feeStore[kind] = r; return r.length; },
       async readFlowResults() { return state.flow || []; }, async writeFlowResults(c, r) { state.flow = r; return r.length; },
       async readPreCheck() { return state.precheck || []; }, async writePreCheck(c, r) { state.precheck = r; return r.length; },
+      async readAccountAudits() { return (state.audits && state.audits.summary) || []; }, async readAccountAuditLines() { return (state.audits && state.audits.lines) || []; },
+      async writeAccountAudits(c, r) { state.audits = { ...(state.audits || {}), summary: r }; return r.length; }, async writeAccountAuditLines(c, r) { state.audits = { ...(state.audits || {}), lines: r }; return r.length; },
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
       async writeImportRows(r) { rows = r; },
