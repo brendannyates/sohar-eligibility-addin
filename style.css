@@ -424,3 +424,8 @@ ul.visits.pc { list-style: none; padding-left: 0; display: grid; gap: 8px; }
 .pnote-add { display: flex; gap: 6px; margin-top: 4px; }
 .pnote-add input { flex: 1; min-width: 0; }
 .pcheck label.inline { flex-wrap: wrap; align-items: baseline; gap: 2px 6px; }
+.whobar { margin: -2px 0 8px; }
+/* Upcoming visits and pre-check: its own full-width section under the top (result + financial progress) */
+.dgroup.visitsec { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.visitsec ul.visits.pc { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 16px; }
+.visitsec ul.visits.pc > li { padding: 6px 8px; border-left: 3px solid var(--line); }

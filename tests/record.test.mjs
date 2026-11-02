@@ -257,20 +257,32 @@ test('reportVisits reads Appointment Pre-Check Complete by header; precheckItems
   assert.deepEqual([items[1].when, items[1].by], ['10/30/2026 9:02 AM', 'Sam Ortiz']);
   assert.throws(() => REC.setPrecheck([], { ...t, item: 'nope' }), /Unknown pre-check item/);
   assert.throws(() => REC.setPrecheck([], { ...t, by: '', item: 'precheck', done: true }), /Pick your name/);
-  // Notes: every note kept, newest first, with the admin; ticks are not notes.
-  saved = REC.addPrecheckNote(saved, { ...t, note: '  Called,   left message ', when: '10/30/2026 9:05 AM' });
-  saved = REC.addPrecheckNote(saved, { ...t, by: 'Sam Ortiz', note: 'Patient called back', when: '10/30/2026 9:30 AM' });
-  assert.deepEqual(REC.precheckNotes(first, '720001', saved), [{ note: 'Patient called back', by: 'Sam Ortiz', when: '10/30/2026 9:30 AM' }, { note: 'Called, left message', by: 'Jordan Lee', when: '10/30/2026 9:05 AM' }]);
+  // Notes: one list per patient (not per visit), every note kept, newest first, with the admin; ticks are not notes.
+  const pt = { key: '720001', lasfir: 'SYNPAT', by: 'Jordan Lee' };
+  saved = REC.addPatientNote(saved, { ...pt, note: '  Called,   left message ', when: '10/30/2026 9:05 AM' });
+  saved = REC.addPatientNote(saved, { ...pt, by: 'Sam Ortiz', note: 'Patient called back', when: '10/30/2026 9:30 AM' });
+  // A note saved per visit by v0.20 still shows, with its visit.
+  saved = saved.concat({ Key: '720001|11/05/2026|9:00 AM', MRN: '720001', LASFIR: 'SYNPAT', 'Appt Date': '11/05/2026', Time: '9:00 AM', Item: 'note', Done: '', Note: 'Old visit note', By: 'Alex Kim', When: '10/30/2026 8:00 AM' });
+  assert.deepEqual(REC.patientNotes('720001', saved), [
+    { note: 'Old visit note', by: 'Alex Kim', when: '10/30/2026 8:00 AM', visit: '11/05/2026 9:00 AM' },
+    { note: 'Patient called back', by: 'Sam Ortiz', when: '10/30/2026 9:30 AM', visit: '' },
+    { note: 'Called, left message', by: 'Jordan Lee', when: '10/30/2026 9:05 AM', visit: '' }]);
+  const noteRow = saved.find((r) => r.Note === 'Patient called back');
+  assert.deepEqual([noteRow.Key, noteRow.MRN, noteRow.LASFIR, noteRow['Appt Date'], noteRow.Time], ['720001', '720001', 'SYNPAT', '', ''], 'a patient note has no visit');
+  assert.deepEqual(REC.patientNotes('799999', saved), []);
   assert.equal(REC.precheckItems(first, '720001', saved).length, 2, 'notes are not checklist items');
-  assert.throws(() => REC.addPrecheckNote(saved, { ...t, note: '   ' }), /empty/);
-  assert.throws(() => REC.addPrecheckNote(saved, { ...t, by: '', note: 'x' }), /Pick your name/);
-  assert.equal(REC.addPrecheckNote([], { ...t, note: 'x'.repeat(900) })[0].Note.length, REC.NOTE_MAX);
+  assert.throws(() => REC.addPatientNote(saved, { ...pt, note: '   ' }), /empty/);
+  assert.throws(() => REC.addPatientNote(saved, { ...pt, by: '', note: 'x' }), /Pick your name/);
+  assert.equal(REC.addPatientNote([], { ...pt, note: 'x'.repeat(900) })[0].Note.length, REC.NOTE_MAX);
   assert.deepEqual(REC.PRECHECK_COLS, ['Key', 'MRN', 'LASFIR', 'Appt Date', 'Time', 'Item', 'Done', 'Note', 'By', 'When']);
   for (const c of REC.PRECHECK_COLS) assert.doesNotMatch(c, /first|last name|dob|birth/i);
   assert.deepEqual(REC.adminNames(' Jordan Lee; Sam Ortiz ;;Jordan Lee\nAlex Kim'), ['Jordan Lee', 'Sam Ortiz', 'Alex Kim']);
   assert.equal(REC.PRECHECK_CONFIG_ROWS[0].setting, 'Admin names');
   const old = REC.setPrecheck(saved, { ...t, date: '10/01/2026', time: '9:00 AM', item: 'precheck', done: true, when: '' });
-  assert.equal(REC.prunePrecheck(old, '10/30/2026').length, 4, 'ticks and notes for past visits are dropped');
+  const kept = REC.prunePrecheck(old, '10/30/2026');
+  assert.equal(kept.length, old.length - 1, 'ticks for past visits are dropped');
+  assert.equal(kept.filter((r) => r.Item === 'note').length, 3, 'notes are the patient\'s: never pruned, even one saved against a past visit');
+  assert.equal(REC.prunePrecheck(old.concat({ ...noteRow, 'Appt Date': '09/01/2026' }), '10/30/2026').filter((r) => r.Item === 'note').length, 4);
 });
 
 test('freshness: newest source time; fresh within a day, aging after, stale after 7 days', () => {

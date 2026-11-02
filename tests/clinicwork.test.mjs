@@ -82,7 +82,7 @@ test('pane wiring: Clinic Template Tool file in the Admin tab and full screen, b
 
 test('release: VERSION, package.json and every ?v= agree', () => {
   const v = src('app.js').match(/const VERSION = '([\d.]+)';/)[1];
-  assert.equal(v, '0.21.0');
+  assert.equal(v, '0.21.1');
   assert.equal(JSON.parse(src('package.json')).version, v);
   for (const f of ['index.html', 'dashboard.html', 'save.html']) {
     const found = [...src(f).matchAll(/\?v=([\d.]+)/g)].map((x) => x[1]);

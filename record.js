@@ -277,7 +277,7 @@
 
   // ---------- visit pre-check (v0.20) ----------
   // The report's "Appointment Pre-Check Complete" (Yes / No / blank) per visit, plus a checklist and notes staff add in
-  // full screen. Saved on the hidden Pre-Check sheet (PRECHECK_COLS: MRN key, the patient's LASFIR, the admin's name);
+  // full screen (notes are per patient). Saved on the hidden Pre-Check sheet (PRECHECK_COLS: MRN key, the patient's LASFIR, the admin's name);
   // a tick wins over the report's value. The add-in never writes to NextGen: "Updated in NextGen" is the person saying
   // they did it. Admins pick their name from Config "Admin names" (Excel does not give the add-in the signed-in user).
   const PRECHECK_HEADERS = ['Appointment Pre-Check Complete', 'Pre-Check Complete', 'Precheck Complete', 'Pre-Check', 'Precheck'];
@@ -337,11 +337,14 @@
       return { ...it, done: false, source: '', when: '', by: '' };
     });
   }
-  /** One visit's notes, newest first: [{note, by, when}]. */
-  function precheckNotes(visit, key, saved) {
-    const vk = visitKey(key, visit.date, visit.time);
-    return (saved || []).map((r, i) => ({ r, i })).filter(({ r }) => str(r.Key) === vk && str(r.Item) === 'note' && str(r.Note))
-      .sort((a, b) => b.i - a.i).map(({ r }) => ({ note: str(r.Note), by: str(r.By), when: str(r.When) }));
+  /**
+   * The patient's notes (one notes list per patient, not per visit), newest first: [{note, by, when, visit}]. visit is
+   * the visit date and time a note was written against before v0.21.1 (per-visit notes), else ''.
+   */
+  function patientNotes(key, saved) {
+    const k = str(key);
+    return (saved || []).map((r, i) => ({ r, i })).filter(({ r }) => str(r.MRN) === k && str(r.Item) === 'note' && str(r.Note))
+      .sort((a, b) => b.i - a.i).map(({ r }) => ({ note: str(r.Note), by: str(r.By), when: str(r.When), visit: [str(r['Appt Date']), str(r.Time)].filter(Boolean).join(' ') }));
   }
   const rowOf = (t, item, extra) => ({ Key: visitKey(t.key, t.date, t.time), MRN: str(t.key), LASFIR: str(t.lasfir), 'Appt Date': str(t.date), Time: str(t.time),
     Item: item, Done: '', Note: '', By: str(t.by), When: str(t.when), ...extra });
@@ -355,18 +358,21 @@
     rows.push(rowOf(t, t.item, { Done: t.done ? 'Yes' : 'No' }));
     return rows;
   }
-  /** Add a note to a visit (kept with every earlier note). Trimmed, at most NOTE_MAX characters. */
-  function addPrecheckNote(saved, t) {
+  /**
+   * Add a note to the patient (kept with every earlier note). t: {key, lasfir, note, by, when}; no visit. Trimmed, at
+   * most NOTE_MAX characters.
+   */
+  function addPatientNote(saved, t) {
     needBy(t);
     const note = str(t.note).replace(/\s+/g, ' ').slice(0, NOTE_MAX);
     if (!note) throw new Error('The note is empty.');
-    return (saved || []).concat(rowOf(t, 'note', { Note: note }));
+    return (saved || []).concat({ ...rowOf({ ...t, date: '', time: '' }, 'note', { Note: note }), Key: str(t.key) });
   }
-  /** Drop ticks for visits before `from` (a day), so the sheet does not grow forever. */
+  /** Drop ticks for visits before `from` (a day), so the sheet does not grow forever. Notes are the patient's: always kept. */
   function prunePrecheck(saved, from) {
     const t0 = from ? C.parseDate(from instanceof Date ? from : String(from)) : null;
     if (!t0) return saved || [];
-    return (saved || []).filter((r) => { const d = C.parseDate(r['Appt Date']); return !d || d >= t0; });
+    return (saved || []).filter((r) => { if (str(r.Item) === 'note') return true; const d = C.parseDate(r['Appt Date']); return !d || d >= t0; });
   }
 
   // ---------- Sohar Flow import (v0.21) ----------
@@ -426,6 +432,6 @@
 
   return { FLOW_COLS, FLOW_SHEET_COLS, isFlowFile, flowRecords, mergeFlow, flowFor, flowAmount, isSandbox, patientRecord, byPatient, upcomingOf, leadOf,
     PROFILE_HEADERS, profiles, samePerson, guarantorCheck, subscriberOf,
-    PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, precheckNotes, setPrecheck,
-    addPrecheckNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName };
+    PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,
+    addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName };
 });

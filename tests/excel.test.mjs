@@ -306,6 +306,24 @@ test('writeImportRows / readImportRows round-trip text', async () => {
   assert.deepEqual(await X.readImportRows(), [['Per Nbr', 'Zip'], ['001', '02134'], ['002', '']]);
 });
 
+test('v0.21.1: a workbook with no Import sheet reads as empty, and an upload makes the sheet (very hidden)', async () => {
+  // "The specified worksheet cannot be found" on open and on upload: the template check looks for tables, and Import has none.
+  const m = createMock(), X = m.SoharExcel;
+  await m.Excel.run(async (ctx) => { ctx.workbook.worksheets.add('Start'); await ctx.sync(); ctx.workbook.worksheets.getItem('Import').delete(); await ctx.sync(); });
+  assert.deepEqual(m.sheetNames(), ['Start']);
+  assert.deepEqual(await X.readImportRows(), []);
+  await X.writeImportRows([['Per Nbr', 'Appt Dt'], ['001', '11/05/2026']]);
+  assert.deepEqual(await X.readImportRows(), [['Per Nbr', 'Appt Dt'], ['001', '11/05/2026']]);
+  assert.equal(m.sheetVisibility('Import'), 'VeryHidden');
+  // The .xlsx path too.
+  const m2 = createMock();
+  await m2.Excel.run(async (ctx) => { ctx.workbook.worksheets.add('Start'); await ctx.sync(); ctx.workbook.worksheets.getItem('Import').delete(); await ctx.sync(); });
+  m2.registerXlsx('b64-new-report', [{ name: 'Sheet1', rows: [['Per Nbr', 'Appt Dt'], ['P002', '11/06/2026']] }]);
+  await m2.SoharExcel.importXlsx('b64-new-report');
+  assert.deepEqual(await m2.SoharExcel.readImportRows(), [['Per Nbr', 'Appt Dt'], ['P002', '11/06/2026']]);
+  assert.deepEqual(m2.sheetNames().sort(), ['Import', 'Start']);
+});
+
 // ---------- mock fidelity ----------
 
 test('mock: deferred loads, dimension checks, overlap and name rules behave like Excel', async () => {
