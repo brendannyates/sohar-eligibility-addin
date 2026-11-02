@@ -76,6 +76,22 @@ test('writeUploads keeps Sohar Uploads hidden and round-trips the JSON records',
   assert.equal(m.tableInfo('tblSoharUploads').rows, 1, 'an empty table keeps one blank body row');
 });
 
+// v0.23.2 (seen in Excel 11/2): Excel won't delete a VeryHidden sheet. A save of the very hidden Sohar Uploads sheet failed
+// at the swap and left its very hidden staging sheet; the next save failed "preparing" on deleting that leftover.
+test('Sohar Uploads saves over a very hidden sheet and sweeps a very hidden leftover staging sheet', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  await X.writeUploads(C.UPLOAD_COLS, uploads(3, 'a'));
+  await m.Excel.run(async (ctx) => {
+    const s = ctx.workbook.worksheets.add('~saving tblSoharUploads');
+    s.visibility = 'VeryHidden';
+    await ctx.sync();
+  });
+  await X.writeUploads(C.UPLOAD_COLS, uploads(4, 'b'));
+  assert.deepEqual(await X.readUploads(), expected(C.UPLOAD_COLS, uploads(4, 'b')));
+  assert.equal(m.sheetVisibility('Sohar Uploads'), 'VeryHidden');
+  assert.throws(() => m.sheetVisibility('~saving tblSoharUploads'), /no sheet/, 'the leftover is gone');
+});
+
 test('writeIrUploads / readIrUploads round-trip records on a hidden sheet', async () => {
   const m = createMock(), X = m.SoharExcel;
   assert.deepEqual(await X.readIrUploads(), []);
