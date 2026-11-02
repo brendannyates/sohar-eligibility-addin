@@ -756,10 +756,11 @@
   }
 
   // ---------- defaults remembered per fee payer ----------
-  // v0.23: a row with a Code is a per-code rule (how that code counts for the fee payer: deductible applies or is
-  // waived, coinsurance, copay); a row with no Code is the fee payer's plan-level default, as before. By: the admin.
-  const ESTIMATE_DEFAULT_COLS = ['Fee Payer', 'Code', 'Deductible', 'Coinsurance', 'Copay', 'Updated', 'By'];
-  const planRow = (x) => !str(x.Code);
+  // v0.24: a row with a Code is a per-code rule (how that code counts: deductible applies or is waived, coinsurance,
+  // copay) for the fee payer and the Plan (Sohar's plan name; blank = every plan of the payer). A row with no Code is
+  // the fee payer's plan-level default, as before. By: the admin.
+  const ESTIMATE_DEFAULT_COLS = ['Fee Payer', 'Plan', 'Code', 'Deductible', 'Coinsurance', 'Copay', 'Updated', 'By'];
+  const planRow = (x) => !str(x.Code) && !str(x.Plan);
   /**
    * Toggle defaults for a fee payer: each toggle staff chose for it (a filled cell on Estimate Defaults), else Config.
    * copayRemembered says whether staff chose the copay; if not, the copay is only added when Sohar returned one > $0.
@@ -780,11 +781,11 @@
     const old = (rows || []).find((x) => planRow(x) && keyOf(x['Fee Payer']) === keyOf(feePayer)) || {};
     const ch = changes || {};
     const val = (kind, col) => (str(ch[kind]) ? pickToggle(kind, ch[kind], TOGGLE_DEFAULTS[kind]) : str(old[col]) ? pickToggle(kind, old[col], TOGGLE_DEFAULTS[kind]) : '');
-    const row = { 'Fee Payer': str(feePayer), Code: '', Deductible: val('deductible', 'Deductible'), Coinsurance: val('coinsurance', 'Coinsurance'), Copay: val('copay', 'Copay'), Updated: str(when), By: str(by) };
+    const row = { 'Fee Payer': str(feePayer), Plan: '', Code: '', Deductible: val('deductible', 'Deductible'), Coinsurance: val('coinsurance', 'Coinsurance'), Copay: val('copay', 'Copay'), Updated: str(when), By: str(by) };
     const rest = (rows || []).filter((x) => keyOf(x['Fee Payer']) && !(planRow(x) && keyOf(x['Fee Payer']) === keyOf(feePayer)));
     return sortDefaults(rest.concat([row]));
   }
-  const sortDefaults = (rows) => rows.sort((a, b) => str(a['Fee Payer']).localeCompare(str(b['Fee Payer'])) || str(a.Code).localeCompare(str(b.Code)));
+  const sortDefaults = (rows) => rows.sort((a, b) => str(a['Fee Payer']).localeCompare(str(b['Fee Payer'])) || str(a.Plan).localeCompare(str(b.Plan)) || str(a.Code).localeCompare(str(b.Code)));
   /**
    * How a code counts, as staff classify it in the patient view. Each class is the three toggles for that code's line.
    * "After deductible" with the deductible waived means coinsurance on the whole allowed amount.
@@ -808,10 +809,11 @@
   /** True when a code with these toggles counts toward the deductible (it applies, or coinsurance before it lowers it). */
   const countsTowardDeductible = (t) => !!t && t.deductible === 'Applies';
   /**
-   * Per-code rules for a fee payer: {CODE: {deductible, coinsurance, copay}}. Rows for "All payers" apply first; the fee
-   * payer's own rows win. A blank toggle on a code row takes the fee payer's plan-level default.
+   * Per-code rules for a fee payer and plan: {CODE: {deductible, coinsurance, copay}}. Most specific wins: "All payers"
+   * rows, then the payer's rows with no Plan, then the payer's rows for this plan. A blank toggle on a code row takes
+   * the fee payer's plan-level default.
    */
-  function codeRulesFor(rows, feePayer, planDefaults) {
+  function codeRulesFor(rows, feePayer, planDefaults, plan) {
     const d = { ...TOGGLE_DEFAULTS, ...(planDefaults || {}) };
     const out = {};
     const take = (x) => {
@@ -820,16 +822,19 @@
     };
     const codeRows = (rows || []).filter((x) => !planRow(x));
     for (const x of codeRows) if (/^(all|all payers|\*)$/i.test(str(x['Fee Payer']))) take(x);
-    if (keyOf(feePayer)) for (const x of codeRows) if (keyOf(x['Fee Payer']) === keyOf(feePayer)) take(x);
+    const mine = keyOf(feePayer) ? codeRows.filter((x) => keyOf(x['Fee Payer']) === keyOf(feePayer)) : [];
+    for (const x of mine) if (!str(x.Plan)) take(x);
+    if (keyOf(plan)) for (const x of mine) if (keyOf(x.Plan) === keyOf(plan)) take(x);
     return out;
   }
-  /** Save (toggles) or clear (null) one code's rule for a fee payer. */
-  function rememberCodeRule(rows, feePayer, code, toggles, when, by) {
+  /** Save (toggles) or clear (null) one code's rule for a fee payer and plan (blank plan = every plan of the payer). */
+  function rememberCodeRule(rows, feePayer, code, toggles, when, by, plan) {
     const c = str(code).toUpperCase();
-    const rest = (rows || []).filter((x) => keyOf(x['Fee Payer']) && !(str(x.Code).toUpperCase() === c && keyOf(x['Fee Payer']) === keyOf(feePayer)));
+    const same = (x) => str(x.Code).toUpperCase() === c && keyOf(x['Fee Payer']) === keyOf(feePayer) && keyOf(x.Plan) === keyOf(plan);
+    const rest = (rows || []).filter((x) => keyOf(x['Fee Payer']) && !same(x));
     if (!toggles) return sortDefaults(rest);
     const t = (kind) => pickToggle(kind, toggles[kind], TOGGLE_DEFAULTS[kind]);
-    return sortDefaults(rest.concat([{ 'Fee Payer': str(feePayer), Code: c, Deductible: t('deductible'), Coinsurance: t('coinsurance'), Copay: t('copay'), Updated: str(when), By: str(by) }]));
+    return sortDefaults(rest.concat([{ 'Fee Payer': str(feePayer), Plan: str(plan), Code: c, Deductible: t('deductible'), Coinsurance: t('coinsurance'), Copay: t('copay'), Updated: str(when), By: str(by) }]));
   }
 
   // ---------- estimate math ----------
@@ -1118,8 +1123,10 @@
       if (ctx.tab) addTab(ctx.tab);
       const d = defaultsFor(inp.defaults, ctx.feePayer, inp.cfgDefaults);
       // Per-code rules (v0.23), keyed on the fee payer column, else the payer's name (out of network has no column).
+      // Scoped to the payer and Sohar's plan name (v0.24, Brendan: payer + plan).
       ctx.ruleKey = ctx.feePayer || ctx.payer;
-      ctx.codeRules = codeRulesFor(inp.defaults, ctx.ruleKey, d);
+      ctx.rulePlan = str(ctx.cand && ctx.cand.plan);
+      ctx.codeRules = codeRulesFor(inp.defaults, ctx.ruleKey, d, ctx.rulePlan);
       const ben = ctx.oon ? ctx.benefits.oon : ctx.benefits.inn;
       // Copay is Added by default only when Sohar returned one above $0, unless staff chose Added for this fee payer.
       if (!d.copayRemembered && d.copay === 'Added' && !((num(ben.copay) || 0) > 0)) d.copay = 'None';

@@ -447,7 +447,7 @@ test('estimatePatient: MD and NP, copay default only when Sohar returned one, OO
 
 test('defaults remembered per fee payer win over Config; manual mapping edits feed the estimate', () => {
   const defaults = F.rememberDefaults([], 'Blue Shield', { deductible: 'Waived', coinsurance: 'Before deductible', copay: 'Added' }, 'now');
-  assert.deepEqual(defaults, [{ 'Fee Payer': 'Blue Shield', Code: '', Deductible: 'Waived', Coinsurance: 'Before deductible', Copay: 'Added', Updated: 'now', By: '' }]);
+  assert.deepEqual(defaults, [{ 'Fee Payer': 'Blue Shield', Plan: '', Code: '', Deductible: 'Waived', Coinsurance: 'Before deductible', Copay: 'Added', Updated: 'now', By: '' }]);
   const p = prep({ defaults });
   assert.deepEqual(p.contexts[1].defaults, { deductible: 'Waived', coinsurance: 'Before deductible', copay: 'Added' }, 'remembered: copay stays Added');
   const locations = F.feeLocationRows([], ['Faraway'], [], ['Tele']).map((r) => ({ ...r, 'Fee Tab': 'Ridge' }));
@@ -619,9 +619,9 @@ test('fix: a code with no rate makes the total partial; the pane card does not c
 
 test('fix: changing one toggle remembers only that toggle; a $0-copay patient never saves Copay None for the fee payer', () => {
   const d1 = F.rememberDefaults([], 'Blue Shield', { deductible: 'Waived' }, 't1');
-  assert.deepEqual(d1, [{ 'Fee Payer': 'Blue Shield', Code: '', Deductible: 'Waived', Coinsurance: '', Copay: '', Updated: 't1', By: '' }]);
+  assert.deepEqual(d1, [{ 'Fee Payer': 'Blue Shield', Plan: '', Code: '', Deductible: 'Waived', Coinsurance: '', Copay: '', Updated: 't1', By: '' }]);
   const d2 = F.rememberDefaults(d1, 'Blue Shield', { coinsurance: 'None' }, 't2');
-  assert.deepEqual(d2[0], { 'Fee Payer': 'Blue Shield', Code: '', Deductible: 'Waived', Coinsurance: 'None', Copay: '', Updated: 't2', By: '' }, 'merged into the row');
+  assert.deepEqual(d2[0], { 'Fee Payer': 'Blue Shield', Plan: '', Code: '', Deductible: 'Waived', Coinsurance: 'None', Copay: '', Updated: 't2', By: '' }, 'merged into the row');
   const res = RESULTS.concat([mk({ 'Per Nbr': '8', 'Next Appt': '11/09/2026', 'Next Event': 'TMS Treatment', 'Next Location': 'Harbor Point', 'Sohar Payer': 'Blue Shield of California',
     Copay: '71.11', Coinsurance: '20%', 'Deductible Remaining': '0', 'OOP Remaining': '3091.11' })]);
   const p = prep({ results: res, defaults: d1 });
@@ -932,4 +932,20 @@ test('prepareEstimates: an intervention patient gets the payer column when alrea
   assert.deepEqual(c.codeRules, { 99214: CLS.copay_waived });
   assert.equal(p.counts.labeled, 5, 'still counted as labeled, not ready');
   assert.deepEqual(F.estimatePatient(c, p.tables).flags, ['No estimate: TMS (intervention): no estimate; verify deductible, OOP max and insurance status']);
+});
+
+test('code rules are scoped to payer + plan: a plan rule wins over a payer-wide one, which wins over "All payers" (v0.24)', () => {
+  let rows = F.rememberCodeRule([], 'All payers', '99214', CLS.ded_coins, 't1', 'Mei T.');
+  rows = F.rememberCodeRule(rows, 'Blue Shield', '99214', CLS.all, 't2', 'Mei T.');
+  rows = F.rememberCodeRule(rows, 'Blue Shield', '99214', CLS.copay_waived, 't3', 'Mei T.', 'Synth Gold PPO');
+  assert.deepEqual(F.codeRulesFor(rows, 'Blue Shield', null, 'SYNTH GOLD PPO')['99214'], CLS.copay_waived, 'plan names match whatever their case');
+  assert.deepEqual(F.codeRulesFor(rows, 'Blue Shield', null, 'Synth Silver HMO')['99214'], CLS.all, 'another plan of the payer');
+  assert.deepEqual(F.codeRulesFor(rows, 'Acme Health', null, 'Synth Gold PPO')['99214'], CLS.ded_coins, 'another payer');
+  assert.equal(F.defaultsFor(rows, 'Blue Shield', F.TOGGLE_DEFAULTS).remembered, false, 'code rows are not plan-level defaults');
+  const cleared = F.rememberCodeRule(rows, 'Blue Shield', '99214', null, 't4', 'Mei T.', 'Synth Gold PPO');
+  assert.deepEqual(cleared.map((r) => [r['Fee Payer'], r.Plan]), [['All payers', ''], ['Blue Shield', '']], 'clearing the plan rule keeps the payer-wide one');
+  const payerMap = [{ Payer: 'Blue Shield of California', 'Fee Tab': 'Bayview', 'Fee Payer': 'Blue Shield', Confidence: 'High', Source: 'manual', 'Auto Match': '' }];
+  const res = RESULTS.map((r) => (r['Per Nbr'] === '1' ? { ...r, Plan: 'Synth Gold PPO' } : r));
+  const c = prep({ results: res, payerMap, defaults: rows }).contexts[1];
+  assert.deepEqual([c.ruleKey, c.rulePlan, c.codeRules['99214']], ['Blue Shield', 'Synth Gold PPO', CLS.copay_waived]);
 });

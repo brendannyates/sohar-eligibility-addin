@@ -1836,12 +1836,12 @@
    * How one code counts for a fee payer (v0.23), classified in the patient view: a CODE_CLASSES id, or '' to clear the
    * rule. Saved on Estimate Defaults (a row with the Code) with the admin's name; every estimate then follows it.
    */
-  async function saveCodeRule(ruleKey, code, cls, by) {
+  async function saveCodeRule(ruleKey, code, cls, by, plan) {
     if (!feesOn() || !ruleKey || !code) return;
     const c = F.CODE_CLASSES.find((k) => k.id === cls);
     if (cls && !c) throw new Error(`Unknown code class: ${cls}`);
     const f = await loadFeeData();
-    const rows = F.rememberCodeRule(f.defaults, ruleKey, code, c ? c.toggles : null, fmtStamp(new Date()), by);
+    const rows = F.rememberCodeRule(f.defaults, ruleKey, code, c ? c.toggles : null, fmtStamp(new Date()), by, plan);
     await X.writeFee('defaults', F.ESTIMATE_DEFAULT_COLS, rows);
     f.defaults = rows;
     await refreshFees();
@@ -2226,8 +2226,9 @@
     } else if (m.type === 'fee-defaults' && feesOn()) {
       await saveFeeDefaults(m.feePayer, m.toggles, m.by);
     } else if (m.type === 'fee-code-rule' && feesOn()) {
-      try { await saveCodeRule(m.ruleKey, m.code, m.cls, m.by); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Code rule not saved: ${e.message}` }); throw e; }
-      await sendToDialog({ type: 'notice', ok: true, text: m.cls ? `${m.code} saved for ${m.ruleKey}: ${F.CODE_CLASSES.find((k) => k.id === m.cls).label}.` : `${m.code} for ${m.ruleKey} follows the plan's charge mode again.` });
+      const scope = [m.ruleKey, m.plan].filter(Boolean).join(' · ');
+      try { await saveCodeRule(m.ruleKey, m.code, m.cls, m.by, m.plan); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Code rule not saved: ${e.message}` }); throw e; }
+      await sendToDialog({ type: 'notice', ok: true, text: m.cls ? `${m.code} saved for ${scope}: ${F.CODE_CLASSES.find((k) => k.id === m.cls).label}.` : `${m.code} for ${scope} follows the plan's charge mode again.` });
     }
   }
   function base64Bytes(b64) {

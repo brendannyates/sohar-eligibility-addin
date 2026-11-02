@@ -331,6 +331,8 @@
     if (ruled.some(F.countsTowardDeductible)) return true;
     return ruled.length && ruled.length === codes.length ? false : null;
   }
+  /** Where a code rule is saved: the payer and Sohar's plan name (v0.24, payer + plan). */
+  const ruleScope = (fx) => [fx.ruleKey, fx.rulePlan].filter(Boolean).join(' · ');
   /** Report visits (with their ticks) and Flow rows joined on date and time, soonest first. */
   function visitItems(vs, fl) {
     const key = (d, t) => { const x = C.parseDate(d); return `${x ? x.getTime() : d}|${minsOf(t)}`; };
@@ -548,11 +550,11 @@
     const mode = (F.CALC_MODES.find(([k]) => k === F.calcModeOf(fx.defaults)) || ['', 'the plan default'])[1];
     return `${head}${codes.map((cd) => {
       const t = (fx.codeRules || {})[cd.code], id = t ? F.codeClassOf(t) : '';
-      return `<label class="pv-crule"><b>${esc(cd.code)}</b><select data-crule="${esc(cd.code)}" aria-label="How ${esc(cd.code)} counts for ${esc(fx.ruleKey)}">
+      return `<label class="pv-crule"><b>${esc(cd.code)}</b><select data-crule="${esc(cd.code)}" aria-label="How ${esc(cd.code)} counts for ${esc(ruleScope(fx))}">
         <option value=""${id ? '' : ' selected'}>Plan charge mode: ${esc(mode)}</option>
         ${F.CODE_CLASSES.map((k) => `<option value="${k.id}"${k.id === id ? ' selected' : ''}>${esc(k.label)}</option>`).join('')}
         ${id === 'custom' ? `<option value="custom" selected disabled>As typed on Estimate Defaults: ${esc(F.ruleLabel(t))}</option>` : ''}</select></label>`;
-    }).join('')}<p class="hint">Saved for ${esc(fx.ruleKey)} with your name. Estimates and the projection follow it.</p>`;
+    }).join('')}<p class="hint">Saved for ${esc(ruleScope(fx))} with your name${fx.rulePlan ? '' : ' (every plan of the payer: Sohar returned no plan name)'}. Estimates and the projection follow it.</p>`;
   }
   function estimateHtml(x) {
     const f = x.f;
@@ -987,8 +989,8 @@
     if (!fx || !fx.ruleKey) return;
     const by = byOrAsk();
     if (!by) { renderDetail(); return; }
-    notice(`Saving how ${s.dataset.crule} counts for ${fx.ruleKey}…`, true);
-    toPane({ type: 'fee-code-rule', ruleKey: fx.ruleKey, code: s.dataset.crule, cls: s.value, by });
+    notice(`Saving how ${s.dataset.crule} counts for ${ruleScope(fx)}…`, true);
+    toPane({ type: 'fee-code-rule', ruleKey: fx.ruleKey, plan: fx.rulePlan || '', code: s.dataset.crule, cls: s.value, by });
   });
   function addNote() {
     const r = detailRow(), input = $('pnText');
@@ -1121,7 +1123,7 @@
     const cur = c.cls == null ? 'saved' : c.cls;
     const savedLabel = saved ? `Saved: ${F.ruleLabel(saved)}` : 'Plan charge mode';
     const save = ctx.ruleKey && c.code && ((cur !== 'saved' && cur !== 'mode') || (cur === 'mode' && saved))
-      ? ` <button class="link" data-erulesave="${i}">${cur === 'mode' ? `Clear the saved rule for ${esc(ctx.ruleKey)}` : `Save for ${esc(ctx.ruleKey)}`}</button>` : '';
+      ? ` <button class="link" data-erulesave="${i}">${cur === 'mode' ? `Clear the saved rule for ${esc(ruleScope(ctx))}` : `Save for ${esc(ruleScope(ctx))}`}</button>` : '';
     return `<select data-erule="${i}" aria-label="How code ${i + 1} counts"><option value="saved"${cur === 'saved' ? ' selected' : ''}>${esc(savedLabel)}</option>
       ${saved ? `<option value="mode"${cur === 'mode' ? ' selected' : ''}>Plan charge mode</option>` : ''}
       ${F.CODE_CLASSES.map((k) => `<option value="${k.id}"${cur === k.id ? ' selected' : ''}>${esc(k.label)}</option>`).join('')}</select>${save}`;
@@ -1176,8 +1178,8 @@
     if (!by) return;
     const cls = c.cls === 'mode' ? '' : c.cls;
     c.cls = undefined; // after the save, the saved rule is this one
-    notice(`Saving how ${c.code} counts for ${ctx.ruleKey}…`, true);
-    toPane({ type: 'fee-code-rule', ruleKey: ctx.ruleKey, code: String(c.code).toUpperCase(), cls, by });
+    notice(`Saving how ${c.code} counts for ${ruleScope(ctx)}…`, true);
+    toPane({ type: 'fee-code-rule', ruleKey: ctx.ruleKey, plan: ctx.rulePlan || '', code: String(c.code).toUpperCase(), cls, by });
   });
   function refreshEstimate() {
     const p = $('estPanel');
@@ -1539,7 +1541,7 @@
       const s = F.demoSchedule();
       // UMR is mapped on Marin (as another patient's visit would have done) and 99214 is classified copay only for it.
       const payerMap = [{ Payer: 'UMR', 'Fee Tab': 'Marin', 'Fee Payer': 'UMR', Confidence: 'High', Source: 'manual', 'Auto Match': '' }];
-      const defaults = F.rememberCodeRule([], 'UMR', '99214', F.CODE_CLASSES.find((k) => k.id === 'copay_waived').toggles, '10/19/2026 4:15 PM', 'Jordan Lee');
+      const defaults = F.rememberCodeRule([], 'UMR', '99214', F.CODE_CLASSES.find((k) => k.id === 'copay_waived').toggles, '10/19/2026 4:15 PM', 'Jordan Lee', 'SYNTH GOLD PPO');
       const prep = F.prepareEstimates({ results: res, scheduleRows: s.rows, tabSummary: s.tabs, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: '', payerMap, defaults });
       demoFees = { on: true, status: F.feeStatus(F.feeMetaRows('Demo fee schedule (made-up rates).xlsx', new Date().toISOString(), s), s.rows.length, new Date()), contexts: prep.contexts, tables: prep.tables, toggles: F.TOGGLES,
         codeRows: prep.codeRows.map((r) => ({ 'Event keyword': r['Event keyword'], Codes: r.Codes, Note: r.Note })) };
