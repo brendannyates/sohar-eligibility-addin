@@ -195,6 +195,25 @@
       calcBalance: r2(c.billed + sum(L.filter((l) => l.type !== 'statement' && !RESP_RE[l.type]), (l) => l.amount)) };
   }
 
+  // The patient's share on a remit is group code PR with a reason: PR-1 deductible, PR-2 coinsurance, PR-3 copay.
+  const PR_PARTS = [['PR1', 'Deductible', 'ded'], ['PR2', 'Coinsurance', 'coins'], ['PR3', 'Copay', 'copay']];
+  const PR_NAMES = { PR27: 'Coverage ended before this date', PR96: 'Non-covered charge', PR204: 'Not covered by the current plan' };
+  /**
+   * One charge for a balance's list (v0.24): date of service, code, billed, plan paid, its PR amounts (PR-1, PR-2,
+   * PR-3 from the patient-share lines, then any other PR code on its adjustment lines), patient paid and balance.
+   */
+  function chargeRow(c) {
+    const pr = PR_PARTS.map(([code, label, k]) => ({ code, label, amount: r2(c[k] || 0) })).filter((p) => p.amount);
+    const other = new Map();
+    for (const l of c.lines || []) {
+      if (!l.carc || !/^PR/.test(l.carc) || /^PR[123]$/.test(l.carc)) continue;
+      other.set(l.carc, r2((other.get(l.carc) || 0) + Math.abs(l.resp || l.amount || 0)));
+    }
+    for (const [code, amount] of other) pr.push({ code, label: PR_NAMES[code] || 'Other patient responsibility: see the remit', amount });
+    return { dos: c.dos, code: c.code, mods: c.mods || [], desc: c.desc, billed: c.billed, insPaid: c.insPaid, contractual: c.contractual, pr, resp: c.resp,
+      patPaid: c.patPaid, balance: c.balance, processed: c.processed };
+  }
+
   const KEPT_RE = /^(kept|checked\s*out|check\s*out|complete|completed|arrived|seen)$/i;
   /** NextGen appointments listing (any of its layouts): one row per appointment, kept or not. */
   function parseAppointments(rows) {
@@ -653,6 +672,14 @@
       unposted, true: r2(sum(proc, (c) => c.balance) + pendingPatient - unposted),
       booked: sum(quoted.filter((q) => q.kind === 'Booked'), (q) => q.patient),
       instamedCollected: im ? im.total : null, arietisPatientPaid: pay.postedTotal,
+      // What each balance is made of (v0.24), for opening it in the patient view: the charges with their dates of
+      // service and PR amounts; pending claims with their re-quote; the InstaMed payments not posted (no card digits).
+      lines: {
+        processed: proc.filter((c) => Math.abs(c.balance) > 0.005).map(chargeRow),
+        earlier: proc.filter((c) => !inPlan(c.dos) && Math.abs(c.balance) > 0.005).map(chargeRow),
+        pending: pend.map((c) => { const q = quoted.find((x) => x.kind === 'Pending claim' && x.day === c.dos); return { ...chargeRow(c), quote: q ? { patient: q.patient, paid: q.paid || 0, due: q.due } : null }; }),
+        unposted: ar ? pay.unposted.map((t) => ({ day: t.day, amount: t.amount, type: t.type })) : [],
+      },
     };
     anomalies.sort((a, b) => SEV[a.sev] - SEV[b.sev] || (b.day ?? 0) - (a.day ?? 0));
     return { plan, asOf, charges, days, payments: pay, learned, inputs, defaults: dflt, calc, sohar: { oopMet: sohOop, dedMet: sohDed, date: sDate, coins: sohCoins, copay: num(sohar.Copay), oopAfter, dedAfter },
@@ -827,5 +854,5 @@
 
   return { AUDIT_COLS, AUDIT_LINE_COLS, auditRecord, mergeAudits, savedFor, exportSpec, exportName,
     detectKind, parseInstamed, demoRows, parseArietis, parseAppointments, identify, chargeCode, expectedFor, codeChecks, familyOf, classOf,
-    matchPayments, subsetSum, learnBenefits, planYearOf, requote, runAudit, summaryText, dayOf, iso, us, usd, KEPT_RE };
+    matchPayments, subsetSum, learnBenefits, planYearOf, requote, runAudit, summaryText, dayOf, iso, us, usd, KEPT_RE, chargeRow, PR_PARTS };
 });

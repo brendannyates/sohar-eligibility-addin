@@ -782,12 +782,25 @@
     const findings = a.anomalies.filter((x) => x.sev !== 'info' || x.confirmed), shown = s.more ? findings : findings.slice(0, 8);
     const findHtml = `<section class="pv-card pv-todo" aria-labelledby="auFindH"><div class="pv-card-h"><h3 id="auFindH">Anomalies · ${a.counts.high} high, ${a.counts.medium} medium, ${a.counts.low} low</h3>${findings.length > 8 ? `<button type="button" class="pv-link" data-au-more="1" aria-expanded="${s.more}">${s.more ? 'Show fewer' : `Show all ${findings.length}`}</button>` : ''}</div>
       ${findings.length ? `<div class="pv-scroll${s.more ? ' open' : ''}"><ul tabindex="0" aria-label="Anomalies">${shown.map((x) => `<li>${tag(x.confirmed ? 'green' : auTone[x.sev], x.confirmed ? 'Confirmed' : x.sev)}${tag('grey', x.source)}<span class="pv-todo-t">${esc(x.text)}</span><span class="pv-due">${esc(x.day != null ? sd(AU.us(x.day)) : '')}</span></li>`).join('')}</ul></div>` : '<p class="hint">No anomalies across the files added.</p>'}</section>`;
-    const balHtml = `<section class="pv-card au-bal"><h3>How the true balance adds up</h3><table class="watch"><tbody>
-        <tr><td>Processed charges, balance in Arietis</td><td class="num">${esc(money(b.processed))}</td></tr>
-        ${b.earlier ? `<tr><td class="hint">of which from earlier plan years</td><td class="num hint">${esc(money(b.earlier))}</td></tr>` : ''}
-        <tr><td>Pending claims: re-quoted patient share less what was paid on them (Arietis shows ${esc(money(b.pendingBilled))})</td><td class="num">${esc(money(b.pendingPatient))}</td></tr>
-        <tr><td>InstaMed payments not posted in Arietis</td><td class="num">${esc(b.unposted ? `-${money(b.unposted)}` : money(0))}</td></tr>
-        <tr class="au-tot"><td><b>True patient balance</b></td><td class="num"><b>${esc(money(b.true))}</b></td></tr></tbody></table>
+    // Each balance opens to the charges behind it (v0.24): date of service, code, billed, plan paid, the PR amounts
+    // (PR-1 deductible, PR-2 coinsurance, PR-3 copay, any other PR code), patient paid and balance.
+    const bl = b.lines || { processed: [], earlier: [], pending: [], unposted: [] };
+    const prText = (r) => (r.pr.length ? r.pr.map((p) => `${p.code.replace(/^PR/, 'PR-')} ${p.label}: ${money(p.amount)}`).join('\n') : 'None posted');
+    const chargeTable = (list, pending) => (!list.length ? '<p class="hint">No charges.</p>' : `<div class="au-scroll"><table class="watch au-lines"><thead><tr>
+        <th>Date of service</th><th>Code</th><th class="num">Billed</th><th class="num">Plan paid</th><th>Patient responsibility (PR)</th><th class="num">Patient paid</th><th class="num">Balance</th>${pending ? '<th class="num">Re-quote due</th>' : ''}</tr></thead>
+      <tbody>${list.map((r) => `<tr><td>${esc(AU.us(r.dos))}</td><td>${esc([r.code, ...r.mods].join(' '))}${r.desc ? `<br><span class="hint">${esc(r.desc.slice(0, 40))}</span>` : ''}</td>
+        <td class="num">${esc(money(r.billed))}</td><td class="num">${esc(money(r.insPaid))}</td><td class="au-pr">${esc(pending && !r.pr.length ? 'Not processed yet' : prText(r))}</td>
+        <td class="num">${esc(money(r.patPaid))}</td><td class="num">${esc(money(r.balance))}</td>${pending ? `<td class="num">${esc(r.quote ? money(r.quote.due) : '—')}</td>` : ''}</tr>`).join('')}</tbody></table></div>`);
+    const prSum = (list) => { const t = {}; for (const r of list) for (const p of r.pr) t[p.code] = (t[p.code] || 0) + p.amount; return Object.entries(t).map(([k, v]) => `${k.replace(/^PR/, 'PR-')} ${money(v)}`).join(' · '); };
+    const bucket = (label, amount, body, n, sub) => `<details class="au-bucket"><summary><span class="au-b-l">${esc(label)}${n ? ` <span class="hint">· ${n} charge${n === 1 ? '' : 's'}</span>` : ''}${sub ? `<br><span class="hint">${esc(sub)}</span>` : ''}</span><span class="num">${esc(amount)}</span></summary>${body}</details>`;
+    const balHtml = `<section class="pv-card au-bal"><h3>How the true balance adds up</h3><p class="hint">Open a line to see the charges behind it.</p>
+        ${bucket('Processed charges, balance in Arietis', money(b.processed), chargeTable(bl.processed), bl.processed.length, prSum(bl.processed))}
+        ${b.earlier ? bucket('of which from earlier plan years', money(b.earlier), chargeTable(bl.earlier), bl.earlier.length) : ''}
+        ${bucket(`Pending claims: re-quoted patient share less what was paid on them (Arietis shows ${money(b.pendingBilled)})`, money(b.pendingPatient), chargeTable(bl.pending, true), bl.pending.length)}
+        ${bucket('InstaMed payments not posted in Arietis', b.unposted ? `-${money(b.unposted)}` : money(0), bl.unposted.length
+          ? `<div class="au-scroll"><table class="watch au-lines"><thead><tr><th>Date</th><th>Type</th><th class="num">Amount</th></tr></thead><tbody>${bl.unposted.map((t) => `<tr><td>${esc(AU.us(t.day))}</td><td>${esc(t.type)}</td><td class="num">${esc(money(t.amount))}</td></tr>`).join('')}</tbody></table></div>`
+          : '<p class="hint">Every InstaMed payment is posted.</p>')}
+        <div class="au-tot"><b>True patient balance</b><b class="num">${esc(money(b.true))}</b></div>
       <p class="hint">Patient payments posted in Arietis: ${esc(money(b.arietisPatientPaid))}${b.instamedCollected != null ? ` · InstaMed collected in its report: ${esc(money(b.instamedCollected))}` : ''}. A re-quote is not a guarantee.</p></section>`;
     // benefits: learned from claims vs Sohar, editable
     const so = a.sohar;
@@ -1591,6 +1604,8 @@
       if (ph[1] && SECTIONS.some(([k]) => k === ph[1])) { sec = ph[1]; renderDetail(); }
       // ?fees=1&svc=med management&visits=4&start=booked#patient/calc prices a service in the calculator.
       const qs = new URLSearchParams(location.search);
+      // ?open=1#patient/audit opens every balance line.
+      if (qs.get('open') === '1') document.querySelectorAll('#detail .au-bucket').forEach((x) => { x.open = true; });
       if (sec === 'calc' && estOver && qs.get('svc')) {
         const svc = pricedServices().find((o) => fees.codeRows[o.i]['Event keyword'] === qs.get('svc'));
         if (svc) { estOver.service = String(svc.i); estOver.codes = svc.codes.map((c) => ({ ...c, coins: '' })); }

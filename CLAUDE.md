@@ -30,12 +30,16 @@ Hard rules:
   (`AUDIT_LINE_COLS`) per patient on the hidden `Account Audits` / `Account Audit Lines` sheets (LASFIR + MRN, card
   digits scrubbed by `auditRecord`); saving again replaces that patient's rows (`mergeAudits`). "Export" builds one
   .xlsx in full screen (`exportSpec`: Summary, Findings, Visits, Re-quote, Payments).
+  v0.24: `runAudit` balance.lines lists what each balance is made of (`chargeRow`: date of service, code, billed,
+  plan paid, PR-1 deductible / PR-2 coinsurance / PR-3 copay and any other PR code, patient paid, balance); each
+  balance in the patient view opens to it. 90867 is the MT (motor threshold) visit, 90869 the MTR (MT redo).
 - The West Coast Patient Responsibility Calculator's code lives in `fees.js` (`calcEstimate`, `calcInputs`,
   `calcPatient`), but its built-in rates never go in this repo: staff drop the calculator .html once, and
   `parseCalculatorHtml` + `mergeSchedules` put the rates on the hidden fee sheets (a saved rate is never changed).
-- Per-code rules (v0.23): an Estimate Defaults row with a `Code` says how that code counts for the fee payer
-  (`CODE_CLASSES`: deductible applies or waived, coinsurance, copay); a row with no Code is the plan-level default, as
-  before. Staff classify codes in the patient view (saved with their name, `rememberCodeRule`). `estimateMath`,
+- Per-code rules (v0.24): an Estimate Defaults row with a `Code` says how that code counts for the fee payer and
+  `Plan` (Sohar's plan name; Brendan: payer + plan). Most specific wins: payer + plan, then the payer with no Plan,
+  then "All payers" (`CODE_CLASSES`: deductible applies or waived, coinsurance, copay). A row with no Code and no Plan
+  is the plan-level default, as before. Staff classify codes in the patient view (saved with their name, `rememberCodeRule`). `estimateMath`,
   `calcEstimate` / `calcPatient` / `calcSeries` and the projection all follow them; with no rule, results are unchanged
   and the projection keeps its copay rule (an estimate equal to the copay counts toward the OOP max only).
 - Never add a network call. `connect-src 'none'` in `index.html` is deliberate; the only remote script is Office.js.
