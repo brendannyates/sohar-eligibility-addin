@@ -389,7 +389,7 @@ test('projection: copays skip the deductible, and sandbox or missing estimates a
 });
 
 test('actionItems: most urgent first; leadLine names the worst problem', () => {
-  const now = new Date(2026, 9, 30, 9, 15);
+  const now = new Date('2026-10-30T16:15:00Z'); // 9:15 AM Pacific; fixed in UTC so the day counts match in any time zone
   const fresh = REC.freshness({ report: '2026-10-22T14:05:00Z', sohar: '2026-10-29T21:15:00Z', flow: '' }, now);
   const visit = (date, done) => ({ date, time: '1:00 PM', items: [{ id: 'precheck', done }, { id: 'nextgen', done: false }] });
   const lead = row({ 'Sent As': 'Discovery', 'Sohar Status': 'Coverage found', 'Sohar Payer': 'Synth North', MRN: '740002' });
