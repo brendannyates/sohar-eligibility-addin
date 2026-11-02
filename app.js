@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.22.0';
+  const VERSION = '0.23.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -1818,7 +1818,8 @@
   function feePayload() {
     if (!feesOn() || !state.fees) return null;
     const f = state.fees;
-    return { on: true, status: f.status || null, contexts: f.prep ? f.prep.contexts : {}, tables: f.prep ? f.prep.tables : { rates: {}, gross: {}, desc: {} }, toggles: F.TOGGLES };
+    return { on: true, status: f.status || null, contexts: f.prep ? f.prep.contexts : {}, tables: f.prep ? f.prep.tables : { rates: {}, gross: {}, desc: {} }, toggles: F.TOGGLES,
+      codeRows: f.prep ? f.prep.codeRows : [] }; // codeRows (v0.23): the account audit's expected codes per event
   }
   /** "Remember these toggles for this fee payer" from the full-screen estimate panel. */
   async function saveFeeDefaults(feePayer, toggles) {

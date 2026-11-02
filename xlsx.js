@@ -1,5 +1,6 @@
 /* xlsx.js — tiny .xlsx writer and reader. Pure: no Office.js, no DOM, no dependencies, no network.
-   readWorkbook(bytes) -> {sheets: [{name, hidden, rows, merges}]} (v0.11, for the fee schedule upload).
+   readWorkbook(bytes) -> {sheets: [{name, hidden, rows, merges}]} (v0.11, for the fee schedule upload); readXls (v0.23) reads
+   the old binary .xls the same way, and readAnyWorkbook picks the reader from the bytes.
    buildWorkbook(spec) -> Uint8Array (a valid Office Open XML workbook, ZIP STORE, no compression).
    Each sheet gets a real Excel table, a frozen header row, text-format ID columns and optional hyperlinks.
    Optional webExtension tags the file so the add-in task pane opens with the document. */
@@ -594,9 +595,155 @@
     return { sheets };
   }
 
+  // ---------- legacy .xls (BIFF8 in a Compound File), v0.23 ----------
+  // InstaMed and NextGen still export the old binary .xls. readXls reads its cell values (text, numbers, booleans,
+  // formula results) into the same {sheets: [{name, hidden, rows, merges}]} shape as readWorkbook. Dates stay Excel
+  // serial numbers, as readWorkbook leaves them. No formatting, formulas or charts.
+  const CFB_SIG = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+  const isCfb = (u8) => u8.length >= 512 && CFB_SIG.every((b, i) => u8[i] === b);
+  const END = 0xFFFFFFFA; // sector ids at or above this end a chain
+  /** One stream (by name) out of a Compound File, or null. */
+  function cfbStream(u8, wanted) {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const secSize = 1 << dv.getUint16(0x1E, true), miniSize = 1 << dv.getUint16(0x20, true);
+    const nFat = dv.getUint32(0x2C, true), dirStart = dv.getUint32(0x30, true), cutoff = dv.getUint32(0x38, true);
+    const miniFatStart = dv.getUint32(0x3C, true);
+    const secOff = (s) => 512 + s * secSize;
+    const fatSecs = [];
+    for (let i = 0; i < 109 && fatSecs.length < nFat; i++) fatSecs.push(dv.getUint32(0x4C + i * 4, true));
+    for (let d = dv.getUint32(0x44, true), n = 0; fatSecs.length < nFat && d < END && n < 1e5; n++) {
+      const o = secOff(d);
+      if (o + secSize > u8.length) break;
+      for (let i = 0; i < secSize / 4 - 1 && fatSecs.length < nFat; i++) fatSecs.push(dv.getUint32(o + i * 4, true));
+      d = dv.getUint32(o + secSize - 4, true);
+    }
+    const fat = [];
+    for (const s of fatSecs) { const o = secOff(s); for (let i = 0; i < secSize / 4; i++) fat.push(o + i * 4 + 4 <= u8.length ? dv.getUint32(o + i * 4, true) : 0xFFFFFFFE); }
+    const chain = (start, table) => { const out = []; for (let s = start, n = 0; s < END && n < 1e7 && s < table.length; n++) { out.push(s); s = table[s]; } return out; };
+    const readChain = (start, size) => {
+      const secs = chain(start, fat), out = new Uint8Array(secs.length * secSize);
+      secs.forEach((s, i) => out.set(u8.subarray(secOff(s), Math.min(u8.length, secOff(s) + secSize)), i * secSize));
+      return size == null ? out : out.subarray(0, Math.min(size, out.length));
+    };
+    const dir = readChain(dirStart), ddv = new DataView(dir.buffer, dir.byteOffset, dir.byteLength);
+    const entries = [];
+    for (let o = 0; o + 128 <= dir.length; o += 128) {
+      const nl = Math.min(64, ddv.getUint16(o + 64, true));
+      let name = '';
+      for (let i = 0; i + 2 < nl; i += 2) name += String.fromCharCode(ddv.getUint16(o + i, true));
+      entries.push({ name, type: dir[o + 66], start: ddv.getUint32(o + 116, true), size: ddv.getUint32(o + 120, true) });
+    }
+    const ent = entries.find((e) => e.type === 2 && wanted.includes(e.name));
+    if (!ent) return null;
+    if (ent.size >= cutoff) return readChain(ent.start, ent.size);
+    const root = entries[0], mini = readChain(root.start, root.size), mf = readChain(miniFatStart);
+    const mdv = new DataView(mf.buffer, mf.byteOffset, mf.byteLength), miniFat = [];
+    for (let i = 0; i + 4 <= mf.length; i += 4) miniFat.push(mdv.getUint32(i, true));
+    const secs = chain(ent.start, miniFat), out = new Uint8Array(secs.length * miniSize);
+    secs.forEach((s, i) => out.set(mini.subarray(s * miniSize, s * miniSize + miniSize), i * miniSize));
+    return out.subarray(0, ent.size);
+  }
+  /** Read a BIFF8 .xls (Uint8Array or ArrayBuffer): {sheets: [{name, hidden, rows, merges: []}]}, worksheets only. */
+  function readXls(bytes) {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (!isCfb(u8)) throw new Error('This file is not an Excel 97-2003 workbook (.xls).');
+    const wb = cfbStream(u8, ['Workbook', 'Book']);
+    if (!wb) throw new Error('This .xls file has no workbook in it.');
+    const dv = new DataView(wb.buffer, wb.byteOffset, wb.byteLength);
+    const recs = [];
+    for (let o = 0; o + 4 <= wb.length;) { const t = dv.getUint16(o, true), n = dv.getUint16(o + 2, true); recs.push({ t, o: o + 4, n }); o += 4 + n; }
+    // An Excel 5 (BIFF5) file has no shared strings; say so instead of reading garbage.
+    if (recs[0] && recs[0].t === 0x0809 && dv.getUint16(recs[0].o, true) !== 0x0600) throw new Error('This .xls is an old Excel 5 file. Open it in Excel and save it as .xlsx, then upload that.');
+    const ustr = (o, cch, flags) => { const hi = flags & 1; let s = ''; for (let i = 0; i < cch && o + (i + 1) * (hi ? 2 : 1) <= wb.length; i++) s += String.fromCharCode(hi ? dv.getUint16(o + i * 2, true) : wb[o + i]); return s; };
+    const sst = [], sheets = [];
+    for (let i = 0; i < recs.length; i++) {
+      const r = recs[i];
+      if (r.t === 0x0085) sheets.push({ pos: dv.getUint32(r.o, true), hidden: (wb[r.o + 4] & 3) !== 0, kind: wb[r.o + 5], name: ustr(r.o + 8, wb[r.o + 6], wb[r.o + 7]), rows: [] });
+      else if (r.t === 0x00FC) {
+        // Shared strings: the record and its CONTINUE records. A string split across records restarts with a flags byte.
+        const segs = [[r.o, r.o + r.n]];
+        let j = i + 1;
+        for (; j < recs.length && recs[j].t === 0x003C; j++) segs.push([recs[j].o, recs[j].o + recs[j].n]);
+        let si = 0, p = r.o + 8;
+        const next = () => { si++; if (si < segs.length) p = segs[si][0]; };
+        const ensure = (k) => { if (p + k > segs[si][1] && si + 1 < segs.length) next(); };
+        const skip = (k) => { while (k > 0 && si < segs.length) { const left = segs[si][1] - p; if (k <= left) { p += k; return; } k -= left; next(); } };
+        const total = dv.getUint32(r.o + 4, true);
+        for (let n = 0; n < total && si < segs.length; n++) {
+          ensure(3);
+          const cch = dv.getUint16(p, true);
+          let flags = wb[p + 2];
+          p += 3;
+          let runs = 0, ext = 0;
+          if (flags & 8) { ensure(2); runs = dv.getUint16(p, true); p += 2; }
+          if (flags & 4) { ensure(4); ext = dv.getUint32(p, true); p += 4; }
+          let s = '', left = cch;
+          while (left > 0 && si < segs.length) {
+            if (p >= segs[si][1]) { next(); if (si >= segs.length) break; flags = wb[p]; p += 1; }
+            const w = flags & 1 ? 2 : 1, take = Math.min(left, Math.floor((segs[si][1] - p) / w));
+            for (let k = 0; k < take; k++) s += String.fromCharCode(w === 2 ? dv.getUint16(p + k * 2, true) : wb[p + k]);
+            p += take * w; left -= take;
+            if (take === 0 && p < segs[si][1]) break; // malformed: stop rather than loop
+          }
+          sst.push(s);
+          skip(runs * 4 + ext);
+        }
+        i = j - 1;
+      }
+    }
+    const rk = (v) => {
+      let n;
+      if (v & 2) n = v >> 2;
+      else { const b = new DataView(new ArrayBuffer(8)); b.setUint32(4, v & 0xFFFFFFFC, true); n = b.getFloat64(0, true); }
+      return v & 1 ? n / 100 : n;
+    };
+    const byPos = new Map(sheets.map((s) => [s.pos, s]));
+    let cur = null, pending = null;
+    const put = (row, col, v) => { if (!cur) return; const rr = cur.rows[row] || (cur.rows[row] = []); rr[col] = v; };
+    for (const r of recs) {
+      const o = r.o;
+      if (r.t === 0x0809) { cur = byPos.get(o - 4) || null; continue; }
+      if (!cur) continue;
+      const row = () => dv.getUint16(o, true), col = () => dv.getUint16(o + 2, true);
+      switch (r.t) {
+        case 0x00FD: put(row(), col(), sst[dv.getUint32(o + 6, true)] ?? ''); break; // LABELSST
+        case 0x0203: put(row(), col(), dv.getFloat64(o + 6, true)); break; // NUMBER
+        case 0x027E: put(row(), col(), rk(dv.getUint32(o + 6, true))); break; // RK
+        case 0x00BD: { // MULRK
+          const c0 = col(), c1 = dv.getUint16(o + r.n - 2, true);
+          for (let c = c0; c <= c1; c++) put(row(), c, rk(dv.getUint32(o + 4 + (c - c0) * 6 + 2, true)));
+          break;
+        }
+        case 0x0204: put(row(), col(), ustr(o + 9, dv.getUint16(o + 6, true), wb[o + 8])); break; // LABEL
+        case 0x0205: put(row(), col(), wb[o + 7] ? '' : !!wb[o + 6]); break; // BOOLERR
+        case 0x0006: // FORMULA: the cached result; a string result follows in a STRING record
+          if (dv.getUint16(o + 12, true) === 0xFFFF) {
+            const k = wb[o + 6];
+            if (k === 0) pending = [row(), col()];
+            else put(row(), col(), k === 1 ? !!wb[o + 8] : '');
+          } else put(row(), col(), dv.getFloat64(o + 6, true));
+          break;
+        case 0x0207: if (pending) { put(pending[0], pending[1], ustr(o + 3, dv.getUint16(o, true), wb[o + 2])); pending = null; } break;
+        case 0x000A: cur = null; break;
+        default: break;
+      }
+    }
+    const dense = (rows) => Array.from(rows, (r) => (r ? Array.from(r, (v) => (v === undefined ? '' : v)) : []));
+    return { sheets: sheets.filter((s) => s.kind === 0).map((s) => ({ name: s.name, hidden: s.hidden, rows: dense(s.rows), merges: [] })) };
+  }
+  /** .xls or .xlsx by its bytes (not its name): staff often rename one as the other. */
+  async function readAnyWorkbook(bytes) {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    if (isCfb(u8)) return readXls(u8);
+    if (u8[0] === 0x50 && u8[1] === 0x4B) return readWorkbook(u8);
+    const head = new TextDecoder('utf-8').decode(u8.subarray(0, 200)).trim();
+    if (/^</.test(head)) throw new Error('This file is a web page saved with an Excel name. Open it in Excel, save it as .xlsx and upload that.');
+    throw new Error('This file is not an Excel workbook (.xls or .xlsx).');
+  }
+
   return {
     MIME, ID_COL_RE,
-    readWorkbook, zipEntries, unescapeXml, parseRef,
+    readWorkbook, readXls, readAnyWorkbook, isCfb, zipEntries, unescapeXml, parseRef,
     buildWorkbook, buildParts, toBase64,
     zip, unzipStored, crc32, utf8,
     escapeXml, stripControl, colLetter, cellRef, tableRef, uniqueNames, sanitizeSheetName, sanitizeTableName,
