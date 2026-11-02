@@ -263,7 +263,7 @@
   // admin's name and previous / next patient; the main area shows one section. The derivations are in record.js
   // (plansOf, milestones, sinceLast, projection, actionItems, leadLine); this lays them out.
   const SECTIONS = [['overview', 'Overview'], ['visits', 'Visits and pre-check'], ['benefits', 'Benefits projection'], ['activity', 'Activity and plans'],
-    ['guarantor', 'Guarantor'], ['calc', 'Calculator'], ['tasks', 'NextGen tasks']];
+    ['guarantor', 'Guarantor'], ['calc', 'Calculator'], ['audit', 'Account audit'], ['tasks', 'NextGen tasks']];
   let detailKey = '', detailDk = '', sec = 'overview', order = [], animKey = '';
   const ui = {}; // patient key -> {open: visit row open on Visits, sel: timeline row open, todoOpen: all action items shown}
   const uiOf = (k) => (ui[k] = ui[k] || { open: 0, sel: '', todoOpen: false });
@@ -403,6 +403,7 @@
       case 'guarantor': return guarantorSection(c);
       case 'calc': return calcSection(c);
       case 'tasks': return tasksSection(c);
+      case 'audit': return auditSection(c);
       default: return overviewSection(c, anim);
     }
   }
@@ -638,6 +639,202 @@
           ${open(t) ? tag('amber', 'Open') : tag('green', 'Done')}</label>`).join('') : '<p class="hint">No NextGen tasks for this patient.</p>'}
         <p class="hint">Tasks come from the Sohar results. Done ticks stay in this workbook.</p></section>`;
   }
+
+  // ----- Account audit (v0.23): InstaMed + Arietis + NextGen kept visits, checked against the calculator -----
+  // The files carry names, so they are read here and kept in this window's memory only (never sent to the pane or a
+  // sheet). Closing full screen forgets them. The checks and the re-quote are audit.js (runAudit).
+  const AU = window.SoharAudit, XLR = window.SoharXlsx;
+  const audits = {}; // patient key -> {files: {instamed, arietis, appointments}, inputs, confirms, quotes, plan, all, more}
+  const auditOf = (k) => (audits[k] = audits[k] || { files: {}, inputs: { cls: {} }, confirms: {}, quotes: {}, plan: null, all: false, more: false });
+  const AU_KINDS = [['instamed', 'InstaMed payments', 'Payment Transactions report (.xls)'], ['arietis', 'Arietis account detail', 'Account activity detail (.xlsx)'],
+    ['appointments', 'NextGen kept visits', 'Appointments report for the plan year (.xls, .xlsx or .csv)']];
+  const whoOf = (c) => ({ lasfir: name(c.r), mrn: /^(PER-|ref:)/.test(c.k) ? '' : c.k });
+  /** The patient's audit, or null before any file is in. */
+  function auditRun(c) {
+    const s = auditOf(c.k), f = s.files;
+    const ok = (k) => (f[k] && f[k].id.ok ? f[k].parsed : null);
+    if (!ok('instamed') && !ok('arietis') && !ok('appointments')) return null;
+    const ctx = fees && fees.contexts ? fees.contexts[c.per] : null, rates = ctx && ctx.rateKey ? (fees.tables.rates[ctx.rateKey] || {}) : null;
+    const rateOf = rates ? (code) => { const x = rates[code]; return x ? { rate: x.MD ?? x.NP, alt: x.MD != null ? x.NP : null, basis: `${ctx.tab} · ${ctx.feePayer}` } : null; } : null;
+    const fin = c.rec && c.rec.financial ? { ...c.rec.financial, 'Coverage Start': c.rec.financial['Coverage Start'] || c.r['Coverage Start'] } : {};
+    const appts = ok('appointments') ? { ...f.appointments.parsed, visits: f.appointments.id.visits } : null;
+    return AU.runAudit({ who: whoOf(c), instamed: ok('instamed'), arietis: ok('arietis'), appointments: appts, sohar: fin, flow: c.fl,
+      booked: c.items.map((x) => ({ date: x.date, time: x.time, event: x.event })), codeRows: fees && fees.codeRows, rateOf, today: Date.now(),
+      plan: s.plan, inputs: s.inputs, confirms: s.confirms, quotes: s.quotes });
+  }
+  async function auditFiles(files) {
+    const c = detailKey ? patientCtx(detailKey) : null;
+    if (!c || !files.length) return;
+    const s = auditOf(c.k), msgs = [];
+    for (const file of files) {
+      try {
+        let sheets;
+        if (/\.csv$/i.test(file.name)) {
+          const buf = await file.arrayBuffer();
+          let text; try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch (e) { text = new TextDecoder('windows-1252').decode(buf); }
+          sheets = [{ rows: C.parseCSV(text) }];
+        } else sheets = (await XLR.readAnyWorkbook(new Uint8Array(await file.arrayBuffer()))).sheets.filter((x) => !x.hidden);
+        const sh = sheets.find((x) => AU.detectKind(x.rows));
+        const kind = sh ? AU.detectKind(sh.rows) : '';
+        if (!kind) { msgs.push(`${file.name}: not an InstaMed, Arietis or NextGen appointments file.`); continue; }
+        const parsed = kind === 'instamed' ? AU.parseInstamed(sh.rows) : kind === 'arietis' ? AU.parseArietis(sh.rows) : AU.parseAppointments(sh.rows);
+        s.files[kind] = { name: file.name, parsed, id: AU.identify(kind, parsed, whoOf(c)) };
+        if (!s.files[kind].id.ok) msgs.push(`${file.name}: ${s.files[kind].id.text}`);
+      } catch (e) { msgs.push(`${file.name}: ${e.message}`); }
+    }
+    if (msgs.length) notice(msgs.join(' '), false);
+    renderDetail('#auDrop');
+  }
+  const auTone = { high: 'red', medium: 'amber', low: 'grey', info: 'grey' };
+  const auMoney = (n) => (n == null || n === '' ? '—' : money(n));
+  const auCodes = (cs) => cs.map((x) => `${x.code}${x.mods.length ? `-${x.mods.join('-')}` : ''}`).join(', ');
+  function auditSection(c) {
+    const s = auditOf(c.k), f = s.files, a = auditRun(c);
+    const chip = ([k, label, what]) => {
+      const x = f[k];
+      const st = !x ? tag('grey', 'Not added') : x.id.ok ? tag('green', 'Read') : tag('red', 'Not used');
+      return `<div class="au-src"><div><b>${esc(label)}</b> ${st}</div><div class="hint">${esc(x ? `${x.name} · ${x.id.text}` : what)}</div>${x ? `<button type="button" class="pv-link" data-au-rm="${k}">Remove</button>` : ''}</div>`;
+    };
+    const head = `<div class="pv-hrow"><h3 class="pv-h">Account audit</h3><span class="hint">The files stay in this window only: nothing goes on a sheet. Closing full screen clears them.</span></div>
+      <section class="pv-card au-in">
+        <div id="auDrop" class="drop slim" tabindex="0" role="button" aria-label="Add audit files">Drop the InstaMed, Arietis and NextGen files here, or <u>choose files</u><br><span class="hint">Each is recognised by its columns. Use one patient's InstaMed and Arietis exports; the NextGen report can be a whole clinic's.</span></div>
+        <input type="file" id="auFile" multiple accept=".xls,.xlsx,.xlsm,.csv" hidden>
+        <div class="au-srcs">${AU_KINDS.map(chip).join('')}</div>
+        ${a ? `<div class="filters au-plan"><label>Plan year from<input type="date" data-au-plan="start" value="${esc(AU.iso(a.plan.start))}"></label><label>to<input type="date" data-au-plan="end" value="${esc(AU.iso(a.plan.end))}"></label>
+          <span class="hint">${s.plan ? 'Set here.' : c.rec && c.rec.financial && c.rec.financial['Coverage Start'] ? 'From the Sohar coverage start.' : 'January to December (no coverage start from Sohar).'}</span></div>` : ''}
+      </section>`;
+    if (!a) return head;
+    const b = a.balance, inp = a.inputs;
+    const tiles = [
+      { label: 'True patient balance', tag: b.true > 0.005 ? ['amber', 'Owes'] : b.true < -0.005 ? ['blue', 'Credit'] : ['green', 'Even'], num: money(b.true),
+        sub: f.arietis && f.arietis.id.ok ? 'Processed balance + re-quoted pending claims - unposted payments' : 'Needs the Arietis account detail', lines: [] },
+      { label: 'Arietis balance', tag: ['grey', 'As exported'], num: f.arietis && f.arietis.id.ok ? money(b.arietis) : '—', sub: f.arietis && f.arietis.id.ok ? `Through ${AU.us(a.asOf)}` : 'Not added',
+        lines: [b.pendingCount ? `${money(b.pendingBilled)} of it is ${b.pendingCount} unprocessed claim${b.pendingCount === 1 ? '' : 's'} at the full charge` : ''] },
+      { label: 'Pending claims, patient share', tag: ['grey', 'Re-quote'], num: money(b.pendingPatient), sub: `${b.pendingCount} claim${b.pendingCount === 1 ? '' : 's'} not processed yet`, lines: [b.booked ? `Booked visits: ${money(b.booked)} more` : ''] },
+      { label: 'InstaMed not in Arietis', tag: b.unposted ? ['amber', 'Unposted'] : ['green', 'All posted'], num: f.instamed && f.instamed.id.ok ? money(b.unposted) : '—',
+        sub: f.instamed && f.instamed.id.ok ? `${a.payments.unposted.length} of ${f.instamed.parsed.txns.filter((t) => t.counted).length} payments · InstaMed total ${money(f.instamed.parsed.total)}` : 'Not added', lines: [] },
+    ];
+    const tile = (t) => `<div class="pv-tile"><div class="pv-tile-top"><span>${esc(t.label)}</span>${tag(t.tag[0], t.tag[1])}</div><div class="pv-num"><span>${esc(t.num)}</span></div><div class="pv-sub">${esc(t.sub)}</div>${t.lines.filter(Boolean).map((l) => `<div class="pv-line">${esc(l)}</div>`).join('')}</div>`;
+    const findings = a.anomalies.filter((x) => x.sev !== 'info' || x.confirmed), shown = s.more ? findings : findings.slice(0, 8);
+    const findHtml = `<section class="pv-card pv-todo" aria-labelledby="auFindH"><div class="pv-card-h"><h3 id="auFindH">Anomalies · ${a.counts.high} high, ${a.counts.medium} medium, ${a.counts.low} low</h3>${findings.length > 8 ? `<button type="button" class="pv-link" data-au-more="1" aria-expanded="${s.more}">${s.more ? 'Show fewer' : `Show all ${findings.length}`}</button>` : ''}</div>
+      ${findings.length ? `<div class="pv-scroll${s.more ? ' open' : ''}"><ul tabindex="0" aria-label="Anomalies">${shown.map((x) => `<li>${tag(x.confirmed ? 'green' : auTone[x.sev], x.confirmed ? 'Confirmed' : x.sev)}${tag('grey', x.source)}<span class="pv-todo-t">${esc(x.text)}</span><span class="pv-due">${esc(x.day != null ? sd(AU.us(x.day)) : '')}</span></li>`).join('')}</ul></div>` : '<p class="hint">No anomalies across the files added.</p>'}</section>`;
+    const balHtml = `<section class="pv-card au-bal"><h3>How the true balance adds up</h3><table class="watch"><tbody>
+        <tr><td>Processed charges, balance in Arietis</td><td class="num">${esc(money(b.processed))}</td></tr>
+        ${b.earlier ? `<tr><td class="hint">of which from earlier plan years</td><td class="num hint">${esc(money(b.earlier))}</td></tr>` : ''}
+        <tr><td>Pending claims: re-quoted patient share less what was paid on them (Arietis shows ${esc(money(b.pendingBilled))})</td><td class="num">${esc(money(b.pendingPatient))}</td></tr>
+        <tr><td>InstaMed payments not posted in Arietis</td><td class="num">${esc(b.unposted ? `-${money(b.unposted)}` : money(0))}</td></tr>
+        <tr class="au-tot"><td><b>True patient balance</b></td><td class="num"><b>${esc(money(b.true))}</b></td></tr></tbody></table>
+      <p class="hint">Patient payments posted in Arietis: ${esc(money(b.arietisPatientPaid))}${b.instamedCollected != null ? ` · InstaMed collected in its report: ${esc(money(b.instamedCollected))}` : ''}. A re-quote is not a guarantee.</p></section>`;
+    // benefits: learned from claims vs Sohar, editable
+    const so = a.sohar;
+    const numIn = (k, label, v, hint) => `<label>${esc(label)}<input type="number" min="0" step="any" data-au-in="${k}" value="${esc(v === '' || v == null ? '' : v)}">${hint ? `<span class="hint">${esc(hint)}</span>` : ''}</label>`;
+    const clsRow = (k) => {
+      const x = inp.cls[k], l = a.learned.classes[k];
+      if (!l && !(s.inputs.cls[k])) return '';
+      return `<tr><td><b>${esc(k)}</b><br><span class="hint">${esc(l ? `${l.claims} processed claim${l.claims === 1 ? '' : 's'}${l.covered ? ` · ${l.covered} fully covered` : ''}` : 'no processed claims')}</span></td>
+        <td><select data-au-cls="${k}" data-au-f="rule" aria-label="${esc(k)} rule">${[['copay', 'Copay per visit'], ['coins', 'Deductible, then coinsurance'], ['covered', 'Covered in full'], ['unknown', 'Unknown: use Sohar']].map(([v, t]) => `<option value="${v}"${x.rule === v ? ' selected' : ''}>${t}</option>`).join('')}</select></td>
+        <td><input type="number" min="0" step="any" data-au-cls="${k}" data-au-f="copay" value="${esc(x.copay ?? '')}" aria-label="${esc(k)} copay"></td>
+        <td><input type="number" min="0" max="100" step="any" data-au-cls="${k}" data-au-f="coins" value="${esc(x.coins == null ? '' : Math.round(x.coins * 1000) / 10)}" aria-label="${esc(k)} coinsurance %"></td>
+        <td class="hint">${esc(x.from === 'claims' ? 'from claims' : x.from)}</td></tr>`;
+    };
+    const benHtml = `<section class="pv-card au-ben"><div class="pv-card-h"><h3>Benefits to date</h3><span class="hint">From how claims processed this plan year; Sohar for anything claims don't show. Edit with what you know.</span></div>
+      <div class="filters calcgrid">${numIn('deductible', 'Deductible ($)', inp.deductible)}${numIn('dedMet', 'Deductible met ($)', inp.dedMet, `claims ${money(a.learned.dedApplied)}${so.dedMet != null ? ` · Sohar ${money(so.dedMet)} on ${AU.us(so.date)}` : ''}`)}
+        ${numIn('oopMax', 'OOP max ($, blank = none known)', inp.oopMax)}${numIn('oopMet', 'OOP met ($)', inp.oopMet, `claims ${money(a.learned.oopMet)}${so.oopMet != null ? ` · Sohar ${money(so.oopMet)} on ${AU.us(so.date)} + ${money(so.oopAfter)} posted since` : ''}`)}</div>
+      <div class="au-wrap"><table class="watch au-cls"><thead><tr><th>Service</th><th>How the plan charges</th><th>Copay ($)</th><th>Coinsurance (%)</th><th>Source</th></tr></thead><tbody>${['TMS', 'Visit', 'Esketamine'].map(clsRow).join('')}</tbody></table></div>
+      <p class="hint">Sohar: ${esc([so.copay != null ? `copay ${money(so.copay)}` : '', so.coins != null ? `coinsurance ${Math.round(so.coins * 1000) / 10}%` : '', so.date ? `checked ${AU.us(so.date)}` : 'no verification with benefits'].filter(Boolean).join(' · '))}. Met amounts default to the larger of our claims and Sohar's figure plus what posted since.</p></section>`;
+    // visits by date of service
+    const rows = a.days.filter((d) => s.all || d.inPlan);
+    const dayRow = (d) => {
+      const worst = d.checks.concat(...d.charges.map((x) => x.checks)).filter((x) => x.sev !== 'info');
+      const st = !d.charges.length ? tag('amber', 'Not billed') : d.processed ? tag('green', 'Processed') : tag('grey', 'Pending');
+      const codeFlag = d.checks.some((x) => x.source === 'Codes');
+      return `<tr class="${worst.some((x) => x.sev === 'high') ? 'au-hi' : ''}">
+        <td><b>${esc(sd(AU.us(d.day)))}</b>${d.inPlan ? '' : '<br><span class="hint">earlier plan year</span>'}</td>
+        <td>${d.visits.length ? d.visits.map((v) => `${esc(v.event)}<br><span class="hint">${esc([v.status, v.time].filter(Boolean).join(' · '))}</span>`).join('<br>') : `<span class="hint">${f.appointments && f.appointments.id.ok ? 'Not on the report' : '—'}</span>`}</td>
+        <td>${esc(auCodes(d.charges)) || '<span class="hint">none</span>'}</td>
+        <td class="num">${esc(d.charges.length ? auMoney(d.charges.reduce((t, x) => t + (x.allowed ?? x.expected ?? 0), 0)) : '—')}${d.charges.some((x) => x.feeRate != null) ? `<br><span class="hint">fee sched. ${esc(money(d.charges.reduce((t, x) => t + (x.feeRate || 0), 0)))}</span>` : ''}</td>
+        <td class="num">${esc(d.processed ? money(d.charges.reduce((t, x) => t + x.insPaid, 0)) : '—')}</td>
+        <td class="num">${esc(d.processed ? money(d.resp) : '—')}</td>
+        <td class="num">${esc(d.calc != null ? money(d.calc) : '—')}</td>
+        <td><input type="number" min="0" step="any" class="au-q" data-au-q="${esc(d.iso)}" value="${esc(s.quotes[d.iso] ?? '')}" placeholder="${esc(d.quote && d.quote.source !== 'typed' ? `${d.quote.amount}` : '')}" aria-label="Quoted amount for ${esc(AU.us(d.day))}"></td>
+        <td class="num">${esc(money(d.patPaid))}</td><td class="num">${esc(money(d.balance))}</td>
+        <td>${st}${worst.length ? `<ul class="au-ck">${worst.map((x) => `<li class="tone-${auTone[x.sev]}">${esc(x.text)}</li>`).join('')}</ul>` : ''}</td>
+        <td>${d.charges.length ? `<label class="au-ok"><input type="checkbox" data-au-ok="${esc(d.iso)}"${d.confirmed ? ' checked' : ''}> <span>${codeFlag || d.confirmed ? 'Codes OK' : 'OK'}</span></label>` : ''}</td></tr>`;
+    };
+    const visHtml = `<section class="pv-card au-vis"><div class="pv-card-h"><h3>Visits and charges · ${rows.length}</h3><button type="button" class="pv-link" data-au-all="1">${s.all ? 'This plan year only' : 'Show earlier dates too'}</button></div>
+      <p class="hint">Calculator: the West Coast calculator's math with Sohar's benefits and <select class="au-inline" data-au-in="calcMode" aria-label="Calculator charge mode">${(F ? F.CALC_MODES : []).map(([k, l]) => `<option value="${k}"${a.calc.mode === k ? ' selected' : ''}>${esc(l.toLowerCase())}</option>`).join('')}</select>${a.calc.days ? `, carried from the plan year start: ${esc(money(a.calc.calcTotal))} vs ${esc(money(a.calc.planTotal))} charged` : ' (needs a Sohar verification with benefits)'}.
+        Quoted: type what the patient was told; a Sohar Flow estimate shows greyed. Tick OK once you've checked the codes billed.</p>
+      <div class="au-wrap"><table class="watch au-tbl"><thead><tr><th>Date</th><th>NextGen visit</th><th>Billed</th><th>Allowed</th><th>Plan paid</th><th>Patient share</th><th>Calculator</th><th>Quoted</th><th>Paid</th><th>Balance</th><th>Checks</th><th>OK</th></tr></thead>
+      <tbody>${rows.map(dayRow).join('') || '<tr><td colspan="12" class="hint">No dates of service yet.</td></tr>'}</tbody></table></div></section>`;
+    // payments
+    const p = a.payments, im = f.instamed && f.instamed.id.ok;
+    const payHtml = `<section class="pv-card au-pay"><h3>Payments: InstaMed against Arietis</h3>
+      ${im ? `<div class="au-wrap"><table class="watch"><thead><tr><th>InstaMed</th><th>Amount</th><th>Card</th><th>In Arietis</th></tr></thead><tbody>
+        ${f.instamed.parsed.txns.map((t) => { const m = p.matches.find((x) => x.txns.includes(t)); const un = p.unposted.includes(t);
+          return `<tr><td>${esc(`${sd(AU.us(t.day))}${t.time ? `, ${t.time}` : ''}`)}<br><span class="hint">${esc(t.outlet)}</span></td><td class="num">${esc(money(t.amount))}</td><td>${esc(t.last4 ? `…${t.last4}` : '')}</td>
+          <td>${!t.counted ? tag('grey', t.status || 'Not counted') : m ? `${tag('green', 'Posted')} <span class="hint">${esc([...new Set(m.lines.map((l) => sd(AU.us(l.posted))))].join(', '))} · batch ${esc([...new Set(m.lines.map((l) => l.batch))].join(', '))}${m.lines.length > 1 ? ` · split across ${m.lines.length} charges` : ''}${m.txns.length > 1 ? ` · with ${m.txns.length - 1} other payment${m.txns.length > 2 ? 's' : ''}` : ''}</span>` : un ? tag(t.recent ? 'amber' : 'red', t.recent ? 'Not posted yet' : 'Not posted') : ''}</td></tr>`; }).join('')}</tbody></table></div>` : '<p class="hint">Add the InstaMed payment transactions report to check payments.</p>'}
+      ${p.notInInstamed.length ? `<p><b>Posted in Arietis as InstaMed, but not in the InstaMed report:</b> ${esc(p.notInInstamed.map((l) => `${sd(AU.us(l.posted))} ${money(l.pay)} (ref ${l.ref})`).join('; '))}</p>` : ''}
+      ${p.other.length ? `<p class="hint">${p.other.length} other patient payment${p.other.length === 1 ? '' : 's'} in Arietis (${esc(money(p.other.reduce((t, l) => t + l.pay, 0)))}): another card system, cash or check, or before the InstaMed report's dates${im ? ` (${esc(AU.us(f.instamed.parsed.start))} to ${esc(AU.us(f.instamed.parsed.end))})` : ''}.</p>` : ''}
+      ${p.reversed.length ? `<p class="hint">${p.reversed.length} payment line${p.reversed.length === 1 ? '' : 's'} reversed and re-posted (left out).</p>` : ''}</section>`;
+    // re-quote
+    const rq = a.requote;
+    const rqHtml = `<section class="pv-card au-rq"><div class="pv-card-h"><h3>Re-quote from benefits to date</h3><span class="hint">Pending claims and booked visits in date order, the deductible and OOP max carried forward. Sohar's verification should give the same numbers; its Flow estimate shows when there is one.</span></div>
+      ${rq.length ? `<div class="au-wrap"><table class="watch"><thead><tr><th>Date</th><th>What</th><th>Codes and allowed</th><th>Patient</th><th>OOP left</th><th>Sohar Flow</th></tr></thead><tbody>
+        ${rq.map((q) => `<tr><td><b>${esc(sd(AU.us(q.day)))}</b></td><td>${esc(q.kind)}<br><span class="hint">${esc(q.event || '')}</span></td>
+          <td>${q.lines.length ? q.lines.map((l) => `${esc(l.code)} ${esc(auMoney(l.allowed))} <span class="hint">${esc(l.src)}</span>`).join('<br>') : `<span class="hint">${esc(q.note || 'no codes')}</span>`}</td>
+          <td class="num"><b>${esc(money(q.patient))}</b>${q.unknown.length ? `<br><span class="hint">no rate: ${esc(q.unknown.join(', '))}</span>` : ''}${q.capped ? '<br><span class="hint">reaches the OOP max</span>' : ''}${q.paid ? `<br><span class="hint">paid ${esc(money(q.paid))}</span>` : ''}</td>
+          <td class="num">${esc(q.oopLeft == null ? '—' : money(q.oopLeft))}</td>
+          <td class="num">${q.flow == null ? '<span class="hint">—</span>' : `${esc(money(q.flow))}${q.sandbox ? ' <span class="hint">sandbox</span>' : Math.abs(q.flow - q.patient) > 1 ? ` ${tag('amber', 'Differs')}` : ` ${tag('green', 'Same')}`}`}</td></tr>`).join('')}</tbody></table></div>
+        <p><b>Pending claims ${esc(money(b.pendingPatient))}</b> · booked visits ${esc(money(b.booked))}${inp.oopMax === '' ? ' · no OOP max known, so nothing is capped' : ''}.</p>` : '<p class="hint">No pending claims or booked visits in this plan year.</p>'}</section>`;
+    return `${head}<div class="pv-tiles">${tiles.map(tile).join('')}</div>${findHtml}
+      <div class="pv-row">${balHtml}${benHtml}</div>${visHtml}${payHtml}${rqHtml}
+      <div class="au-acts"><button type="button" class="pv-btn" data-au-copy="1">Copy audit summary</button><span class="hint">LASFIR and MRN only, no names or card numbers, for a ticket or a patient note.</span></div>`;
+  }
+  const auDetailCtx = () => (detailKey ? patientCtx(detailKey) : null);
+  async function auCopy(text) {
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* fall through: Office dialogs may block the clipboard API */ }
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.select();
+    let ok = false; try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+  $('detail').addEventListener('click', (e) => {
+    const t = e.target.closest('#auDrop,[data-au-rm],[data-au-more],[data-au-all],[data-au-copy]');
+    if (!t || !detailKey) return;
+    const s = auditOf(detailKey);
+    if (t.id === 'auDrop') { $('auFile').click(); return; }
+    if (t.dataset.auRm) { delete s.files[t.dataset.auRm]; renderDetail('#auDrop'); return; }
+    if (t.dataset.auMore) { s.more = !s.more; renderDetail('[data-au-more]'); return; }
+    if (t.dataset.auAll) { s.all = !s.all; renderDetail('[data-au-all]'); return; }
+    if (t.dataset.auCopy) {
+      const c = auDetailCtx(), a = c && auditRun(c);
+      if (!a) return;
+      // File names can carry a patient's name, so the summary names the sources only.
+      const srcs = AU_KINDS.filter(([k]) => s.files[k] && s.files[k].id.ok).map(([, l]) => l);
+      auCopy(AU.summaryText(a, whoOf(c), srcs)).then((ok) => notice(ok ? 'Audit summary copied.' : 'Copy was blocked. Select the text and copy it yourself.', ok));
+    }
+  });
+  $('detail').addEventListener('keydown', (e) => { if (e.target.id === 'auDrop' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); $('auFile').click(); } });
+  $('detail').addEventListener('change', (e) => {
+    const t = e.target;
+    if (!detailKey) return;
+    if (t.id === 'auFile') { auditFiles([...t.files]); return; }
+    const s = auditOf(detailKey);
+    if (t.dataset.auIn) { s.inputs[t.dataset.auIn] = t.value; renderDetail(`[data-au-in="${t.dataset.auIn}"]`); return; }
+    if (t.dataset.auCls) { const x = (s.inputs.cls[t.dataset.auCls] = s.inputs.cls[t.dataset.auCls] || {}); x[t.dataset.auF] = t.value; renderDetail(`[data-au-cls="${t.dataset.auCls}"][data-au-f="${t.dataset.auF}"]`); return; }
+    if (t.dataset.auQ) { if (t.value === '') delete s.quotes[t.dataset.auQ]; else s.quotes[t.dataset.auQ] = t.value; renderDetail(`[data-au-q="${t.dataset.auQ}"]`); return; }
+    if (t.dataset.auOk) { s.confirms[t.dataset.auOk] = t.checked; renderDetail(`[data-au-ok="${t.dataset.auOk}"]`); return; }
+    if (t.dataset.auPlan) {
+      const c = auDetailCtx(), a = c && auditRun(c);
+      const v = t.value ? Date.parse(`${t.value}T00:00:00Z`) : null;
+      if (a && v != null) { s.plan = { ...a.plan, [t.dataset.auPlan]: v }; renderDetail(`[data-au-plan="${t.dataset.auPlan}"]`); }
+    }
+  });
+  $('detail').addEventListener('dragover', (e) => { const d = e.target.closest('#auDrop'); if (d) { e.preventDefault(); d.classList.add('over'); } });
+  $('detail').addEventListener('dragleave', (e) => { const d = e.target.closest('#auDrop'); if (d) d.classList.remove('over'); });
+  $('detail').addEventListener('drop', (e) => { const d = e.target.closest('#auDrop'); if (!d) return; e.preventDefault(); d.classList.remove('over'); auditFiles([...e.dataTransfer.files]); });
 
   // ----- the admin's name, ticks and notes (saved on the hidden Pre-Check sheet by the pane) -----
   // The name is picked once from Config "Admin names" and remembered on this computer; every tick and note records it.
@@ -1173,6 +1370,16 @@
     const ph = location.hash.match(/^#patient(?:\/(\w+))?$/);
     if (ph) {
       const dk = `${keyOf(res[0])}|${res[0]['Sohar Ref']}`;
+      // #patient/audit: the account audit with made-up InstaMed, Arietis and NextGen files (audit.demoRows) already in.
+      if (ph[1] === 'audit' && AU) {
+        const r0 = res[0], k0 = keyOf(r0), w = { lasfir: name(r0), mrn: k0 };
+        const d = AU.demoRows(w.lasfir.slice(0, 3), w.lasfir.slice(3), k0, Date.now()); // names that give the same LASFIR
+        const s = auditOf(k0);
+        const put = (kind, file, parsed) => { s.files[kind] = { name: file, parsed, id: AU.identify(kind, parsed, w) }; };
+        put('instamed', 'ReportOutput (demo).xls', AU.parseInstamed(d.instamed));
+        put('arietis', 'AccountDetailReport (demo).xlsx', AU.parseArietis(d.arietis));
+        put('appointments', 'Appointments (demo).xls', AU.parseAppointments(d.appointments));
+      }
       showDetail(dk, document.querySelector(`#prepList tr[data-key="${CSS.escape(dk)}"]`));
       if (ph[1] && SECTIONS.some(([k]) => k === ph[1])) { sec = ph[1]; renderDetail(); }
     }

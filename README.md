@@ -169,6 +169,19 @@ IR Portal and the secondary files are under collapsed sections. Full screen adds
 
 **Saving on Excel on the web.** Every save tries a normal download first. If the frame blocks it, the note under the button offers **Save in a new tab** (`save.html`, same site, receives the CSV by `postMessage`, no network) or the Export sheet.
 
+### Account audit (v0.23)
+
+In full screen, a patient's record has an **Account audit** section. Drop up to three files: the InstaMed **Payment Transactions** report (.xls), the Arietis **account activity detail** (.xlsx) and a fresh NextGen **appointments report** covering the plan year's kept visits (one patient's or a whole clinic's). Each is recognised by its columns and checked against the patient (LASFIR, MRN); another patient's file is not used. The audit (`audit.js`):
+
+- checks every charge: balance arithmetic, plan paid + patient share = allowed, allowed vs Arietis expected and the fee schedule (MD or NP), claims not sent or not processed, credits, odd adjustment reasons;
+- matches kept visits to charges by date of service and the codes billed to the event (TMS 90868 / mapping 90867 / motor threshold 90869 / esketamine G2082-G2083 built in, everything else from Estimate Codes; E/M level, add-ons and modifier 95 flagged); staff tick **OK** once they have checked a day's codes;
+- matches InstaMed payments to Arietis `GUARPMT` lines by card last 4, amount and posting window (one batch, one line, split lines, several payments in one batch); unposted payments in Arietis's last 7 days are "not posted yet";
+- learns the benefits from processed claims (copay per visit day, coinsurance rate, deductible and OOP met), compares them with Sohar's, runs the West Coast calculator with Sohar's benefits on each processed day, and compares typed quotes or Sohar Flow estimates with what the plan charged;
+- re-quotes the pending claims and the booked visits in date order with the deductible and OOP max carried forward, next to any Sohar Flow estimate;
+- adds up the **true patient balance** = processed balance + re-quoted patient share of pending claims - InstaMed payments not posted, beside the Arietis balance (which counts unprocessed claims at the full charge).
+
+The files carry names, so they stay in the full-screen window's memory only: never on a sheet, never sent to the pane, gone when full screen closes. **Copy audit summary** gives LASFIR, MRN and the findings with no names or card numbers. `xlsx.readXls` (v0.23) reads the old binary .xls InstaMed and NextGen export.
+
 ## What it does (detail)
 
 1. **Upload or paste** the report. **Upload report file** takes `.csv` or `.xlsx` (xlsx needs ExcelApi 1.13) and replaces the `Import` sheet, which is very hidden (v0.19), so upload rather than paste. Then it **scans** the `Import` sheet. Finds the NextGen header row under the title block, maps columns by name (synonyms live in `core.js`), and reports which fields are present.
@@ -238,7 +251,8 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 | `core.js` | Pure logic: header detection, name/date parsing, routing, auto payer matching, exports, CSV. Shared with tests. |
 | `rules.js` | Pure clinic rules (R5-R10): flags and pills, Review rows, clinic sheet and email, payer evidence; the Clinic Eligibility file (v0.14: `clinicPack`, `clinicUnpack`, `clinicDerive`, `workRows`, `mergeClinicWork`). Loads after `core.js` (R9 uses `core.reverifyCheck`). Copied byte-identical into the Clinic Template Tool with `core.js`. |
 | `payer-rules.js` | Pure esketamine payer credential rules (read the sheet/CSV, match a payer, check credential × ESK step, Besse). Byte-identical copy shared with the Clinic Template Tool and ESK Tracker repos: change all three together. Loads before `core.js`. |
-| `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts), and a small reader (`readWorkbook`) for the fee schedule upload. |
+| `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts), and a small reader (`readWorkbook`) for the fee schedule upload; `readXls` / `readAnyWorkbook` (v0.23) read the old binary .xls too. |
+| `audit.js` | Pure account audit (v0.23): InstaMed, Arietis and NextGen appointment readers, charge and code checks, payment matching, benefits learned from claims, re-quote, true balance, made-up demo files. Loads after `core.js` and `fees.js`, in full screen only. |
 | `fees.js` | Pure fee estimate logic (v0.11, a test, Off by default): fee schedule parsing, location / payer matching, estimate math, made-up demo schedule. Loads after `core.js`. |
 | `save.html`, `save.js` | Fallback save tab for Excel on the web; takes CSV text or base64 (.xlsx). |
 | `excel.js` | Everything that reads or writes the workbook. Table names must match the template. The Clinic Work Inbox is the one table it only creates and reads (flow-owned). |
