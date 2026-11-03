@@ -299,9 +299,10 @@ test('estimate codes: seeds marked default, review; longest keyword wins; units'
   const c = (ev) => { const r = F.codesForEvent(ev, F.ESTIMATE_CODE_SEEDS); return r.none ? 'none' : r.codes.map((x) => `${x.code}x${x.units}`).join(' '); };
   // Every NextGen event name in use (10/2026, event text only) gets codes, or is labeled "none".
   const expect = {
-    'TMS Treatment Unilateral': 'none', 'TMS Treatment Bilateral': 'none', 'TMS Theta Tx Bilateral': 'none', 'TMS Theta Tx Unilateral': 'none',
-    'MT Redo': 'none', 'MT MagV': 'none', 'MT BW': 'none', 'MT BW H7': 'none', 'MT Hold - MagVenture': 'none', 'TMS Motor Threshold': 'none', 'TMS Mapping Session': 'none',
-    'Esketamine Follow Up': 'none', 'Esketamine Follow Up Telepsych': 'none', 'Esketamine Tx Start': 'none', 'Hold-Esketamine Tx Start': 'none', 'Esketamine Daily Tx': 'none', 'Spravato Tx': 'none',
+    // v0.26: interventions are priced by code (MT 90867, TMS 90868, MTR 90869, esketamine G2083 until the dose is confirmed).
+    'TMS Treatment Unilateral': '90868x1', 'TMS Treatment Bilateral': '90868x1', 'TMS Theta Tx Bilateral': '90868x1', 'TMS Theta Tx Unilateral': '90868x1',
+    'MT Redo': '90869x1', 'MT MagV': '90867x1', 'MT BW': '90867x1', 'MT BW H7': '90867x1', 'MT Hold - MagVenture': '90867x1', 'TMS Motor Threshold': '90867x1', 'TMS Mapping Session': '90867x1',
+    'Esketamine Follow Up': 'G2083x1', 'Esketamine Follow Up Telepsych': 'G2083x1', 'Esketamine Tx Start': 'G2083x1', 'Hold-Esketamine Tx Start': 'G2083x1', 'Esketamine Daily Tx': 'G2083x1', 'Spravato Tx': 'G2083x1',
     'Tel New Patient - Mature': '90792x1', 'IP New Patient - Mature': '90792x1', 'TMS ConsultTelepsych': '90792x1', 'TMS Consult In Person': '90792x1',
     'TMS Consult+Med Mgt In Person': '90792x1', 'TMS Consult+Med Mgt Telepsych': '90792x1', 'TMS Consult Telepsych Internal': '90792x1', 'TMS Consult In Person Internal': '90792x1',
     'Esk ConsultTelepsych': '90792x1', 'Esketamine Consult In Person': '90792x1', 'ESK Consult+Med Mgt Telepsych': '90792x1', 'IV Ketamine Consult Tele': '90792x1',
@@ -315,7 +316,7 @@ test('estimate codes: seeds marked default, review; longest keyword wins; units'
   };
   for (const [ev, want] of Object.entries(expect)) assert.equal(c(ev), want, ev);
   assert.equal(c('Peer To Peer'), '');
-  assert.match(F.codesForEvent('TMS Treatment Unilateral', F.ESTIMATE_CODE_SEEDS).note, /^TMS \(intervention\): no estimate; verify deductible, OOP max and insurance status$/);
+  assert.ok(F.codesForEvent('TMS Treatment Unilateral', F.ESTIMATE_CODE_SEEDS).note.startsWith('TMS treatment session (intervention); verify deductible, OOP max and insurance status'));
   assert.match(F.codesForEvent('Esketamine Tx Start', F.ESTIMATE_CODE_SEEDS).note, /^Esketamine \(intervention\)/);
   assert.deepEqual(F.parseCodeList('None'), { codes: [], bad: [], none: true });
   assert.deepEqual(F.parseCodeList('90868 x2; 90869, g2083 X1'), { codes: [{ code: '90868', units: 2 }, { code: '90869', units: 1 }, { code: 'G2083', units: 1 }], bad: [] });
@@ -500,7 +501,7 @@ test('fee sheets: the schedule and its info are hidden, mapping sheets visible; 
   await XL.writeFee('locations', F.FEE_LOCATION_COLS, [{ 'NextGen Location': 'Harbor Point', 'Fee Tab': 'Bayview', Source: 'auto', 'Auto Match': 'Bayview', Note: '' }]);
   assert.equal(m.sheetVisibility('Fee Schedule'), 'Hidden');
   assert.equal(m.sheetVisibility('Fee Schedule Info'), 'Hidden');
-  assert.equal(m.sheetVisibility('Fee Locations'), 'Visible');
+  assert.equal(m.sheetVisibility('Fee Locations'), 'Hidden');
   assert.equal((await XL.readFee('schedule')).length, 5);
   await XL.writeFee('schedule', F.FEE_COLS, rows.slice(0, 2));
   assert.equal((await XL.readFee('schedule')).length, 2, 're-upload replaces it completely');
@@ -798,13 +799,27 @@ test('v0.16 seeds: untouched v1 Estimate Codes are upgraded to the current seeds
   assert.equal(prep({ codes: [] }).seeded, true);
 });
 
-test('v0.16 interventions: labeled "No estimate", not flagged, no Fee Payer Map pair', () => {
-  const p = prep({ codes: undefined });   // current seeds: every fixture "TMS Treatment" is an intervention
-  assert.deepEqual(p.counts, { patients: 6, ready: 1, flagged: 0, labeled: 5, tabs: 2 });
-  const e = F.estimatePatient(p.contexts[1], p.tables);
-  assert.deepEqual([e.md, e.np, e.flags], [null, null, ['No estimate: TMS (intervention): no estimate; verify deductible, OOP max and insurance status']]);
-  assert.ok(!p.payerRows.some((r) => r.Payer === 'Kaiser Synthetic'), 'interventions add no Fee Payer Map rows');
+test('v0.26 interventions are priced by code; old "none" defaults upgrade, edited rows stay', () => {
+  const p = prep({ codes: undefined }); // current seeds: every fixture "TMS Treatment" is a TMS session, 90868
+  assert.equal(p.counts.labeled, 0, 'nothing labeled "No estimate" any more');
+  const c = p.contexts[1];
+  assert.equal(c.noEstimate, undefined);
+  assert.deepEqual(c.codes, [{ code: '90868', units: 1 }]);
+  assert.ok(c.codeNote.startsWith('TMS treatment session (intervention); verify deductible, OOP max and insurance status'));
+  assert.ok(p.payerRows.some((r) => r.Payer === 'Kaiser Synthetic'), 'interventions get a Fee Payer Map row like any visit');
   assert.equal(F.estimatePatient(p.contexts[2], p.tables).md.patient, 51.11, 'a 30-minute visit is still estimated');
+  // A sheet seeded v0.16-v0.25: intervention rows were "none". Untouched ones take the codes; one staff edited stays.
+  const OLD_NOTE = 'TMS (intervention): no estimate; verify deductible, OOP max and insurance status';
+  const sheet = F.ESTIMATE_CODE_SEEDS.map((r) => (r['Event keyword'] === 'TMS' || r['Event keyword'] === 'TMS treatment' ? { ...r, Codes: 'none', Note: OLD_NOTE } : r))
+    .concat({ 'Event keyword': 'TMS theta', Codes: 'none', Source: 'manual', Note: 'we do not quote theta' });
+  const up = F.upgradeInterventionSeeds(sheet);
+  assert.equal(up.changed, 2);
+  assert.equal(up.rows.find((r) => r['Event keyword'] === 'TMS').Codes, '90868 x1');
+  assert.equal(up.rows.find((r) => r.Source === 'manual').Codes, 'none', 'an edited row is left alone');
+  const p2 = prep({ codes: sheet });
+  assert.equal(p2.seeded, true, 'the pane saves the upgraded rows');
+  assert.equal(p2.codeRows.find((r) => r['Event keyword'] === 'TMS treatment').Codes, '90868 x1');
+  assert.deepEqual(F.upgradeInterventionSeeds(F.ESTIMATE_CODE_SEEDS), { rows: F.ESTIMATE_CODE_SEEDS, changed: 0 });
 });
 
 const IVK_RESULTS = [
@@ -925,13 +940,15 @@ test('calcSeries prices a service over future visits, carrying the deductible an
 test('prepareEstimates: an intervention patient gets the payer column when already mapped, and the payer\'s code rules', () => {
   const payerMap = [{ Payer: 'Blue Shield of California', 'Fee Tab': 'Bayview', 'Fee Payer': 'Blue Shield', Confidence: 'High', Source: 'manual', 'Auto Match': '' }];
   const defaults = F.rememberCodeRule([], 'Blue Shield', '99214', CLS.copay_waived, 't', 'Dana P.');
-  const p = prep({ codes: undefined, payerMap, defaults });
+  // Staff can still mark an event "none" (never estimated) on Estimate Codes.
+  const codes = [{ 'Event keyword': 'TMS', Codes: 'none', Source: 'manual', Note: 'not quoted' }, ...OLD_CODES.filter((r) => !/^TMS$/i.test(r['Event keyword']))];
+  const p = prep({ codes, payerMap, defaults });
   const c = p.contexts[1];
-  assert.ok(c.noEstimate, 'the TMS visit is still not estimated');
+  assert.ok(c.noEstimate, 'the TMS visit is not estimated');
   assert.deepEqual([c.feePayer, c.ok, c.ruleKey], ['Blue Shield', true, 'Blue Shield']);
   assert.deepEqual(c.codeRules, { 99214: CLS.copay_waived });
   assert.equal(p.counts.labeled, 5, 'still counted as labeled, not ready');
-  assert.deepEqual(F.estimatePatient(c, p.tables).flags, ['No estimate: TMS (intervention): no estimate; verify deductible, OOP max and insurance status']);
+  assert.deepEqual(F.estimatePatient(c, p.tables).flags, ['No estimate: not quoted']);
 });
 
 test('code rules are scoped to payer + plan: a plan rule wins over a payer-wide one, which wins over "All payers" (v0.24)', () => {

@@ -443,7 +443,8 @@ button.small:hover { background: var(--t-sunken); border-color: var(--t-line2); 
 #btnRefresh { padding: 0 9px; }
 button.link, a.link { color: var(--t-primary); font-weight: 600; text-decoration: none; }
 button.link:hover, a.link:hover { color: var(--t-primary-deep); text-decoration: underline; }
-select, input[type="date"], input[type="search"], input[type="text"], input[type="number"] { min-height: 40px; padding: 0 10px; border-radius: 10px; border-color: var(--t-line2); }
+select, input[type="date"], input[type="search"], input[type="text"], input[type="number"] { min-height: 40px; padding: 0 10px; border: 1px solid var(--t-line2); border-radius: 10px; background: var(--t-raised); color: var(--t-fg); }
+.estcode input, .estcode select { min-height: 36px; padding: 0 8px; border: 1px solid var(--t-line2); border-radius: 10px; background: var(--t-raised); color: var(--t-fg); }
 .filters select, .filters input { height: auto; }
 label { font-size: 13px; }
 /* tabs: the patient view's section buttons, in a row */
@@ -752,3 +753,8 @@ select.au-inline { display: inline-block; width: auto; min-height: 30px; margin:
 .au-pay p, .au-rq p, .au-bal p, .au-ben p { margin: 8px 0 0; }
 .au-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
 .au-acts .pv-btn { flex: none; }
+/* v0.26: one dropdown assigns a payer match (keep, Sohar's suggestion, a close Sohar payer, not a payer, search) */
+.assign { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
+.assign label { flex: 1 1 220px; min-width: 0; }
+.assign select { width: 100%; }
+.assign button.small { min-height: 40px; padding: 0 14px; }

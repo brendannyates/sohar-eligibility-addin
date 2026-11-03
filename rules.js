@@ -728,8 +728,7 @@
   const clinicDoneMark = (loc) => `Yes (clinic${str(loc) ? ` ${str(loc)}` : ''})`;
   const isClinicDone = (v) => /^yes \(clinic\b[^)]*\)$/i.test(str(v));
   // Tasks the clinic can do with the patient (the rest stay with the admin).
-  const CLINIC_TASK_TYPES = ['Add insurance in NextGen', 'Update insurance in NextGen', 'Fix member ID in NextGen', 'Fix name in NextGen',
-    'Update benefits in NextGen', 'Confirm self-pay or get card'];
+  const CLINIC_TASK_TYPES = ['Add insurance in NextGen', 'Update insurance in NextGen', 'Policy newly ineligible', 'Check guarantor in NextGen'];
   const CELL_MAX = 32000; // Excel holds 32,767 characters a cell, and xlsx.js cuts a longer one silently
   // Never in the file. Subscriber First / Last / DOB are the guarantor when "Use guarantor as subscriber" is on.
   const PHI_COLS = ['Last Name', 'First Name', 'DOB', 'Zip', 'Subscriber First', 'Subscriber Last', 'Subscriber DOB'];
@@ -1014,7 +1013,7 @@
     const sentNotes = new Map((pk.done || []).map((d) => [str(d['Task Key']), str(d['Clinic Note'])]).filter((e) => e[0] && e[1]));
     // A Task Key starts with the patient key (the MRN column can differ for a shared MRN).
     const who = (t) => str(t['Task Key']).split('|')[0];
-    const tasks = C.buildTasks(results).filter((t) => byKey.has(who(t))).map((t) => {
+    const tasks = C.buildTasks(results, { flags: all, patients }).filter((t) => byKey.has(who(t))).map((t) => {
       const k = str(t['Task Key']), was = sent.get(k) || '', cw = get('done', k);
       // SE Done holds the admin's Done, or a clinic tick brought back earlier (clinicDoneMark), which the clinic can still undo.
       const admin = isClinicDone(was) ? '' : was;

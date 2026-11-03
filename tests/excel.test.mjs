@@ -219,15 +219,15 @@ test('Payer Outcomes (hidden), Payer Map Log and Payer Learning round-trip as te
   assert.equal(await X.appendPayerMapLog(C.PAYER_MAP_LOG_COLS, []), 0);
   await X.appendPayerMapLog(C.PAYER_MAP_LOG_COLS, mapLog(1, 'second'));
   assert.deepEqual(await X.readPayerMapLog(), expected(C.PAYER_MAP_LOG_COLS, [...mapLog(2, 'first'), ...mapLog(1, 'second')]));
-  assert.equal(m.sheetVisibility('Payer Map Log'), 'Visible');
-  assert.ok(m.autofits('Payer Map Log') > 0, 'visible sheets are still autofit');
+  assert.equal(m.sheetVisibility('Payer Map Log'), 'Hidden');
+  assert.equal(m.autofits('Payer Map Log'), 0, 'hidden since v0.26, so not autofit');
   assert.equal((await X.readPayerMapLog())[0]['New payerId'], '01111');
 
   await X.writePayerLearning(C.PAYER_LEARNING_COLS, learning(3, 'x'));
   assert.deepEqual(m.tableRows('tblPayerLearning'), expected(C.PAYER_LEARNING_COLS, learning(3, 'x')));
   await X.writePayerLearning(C.PAYER_LEARNING_COLS, learning(1, 'y'));
   assert.deepEqual(m.tableRows('tblPayerLearning'), expected(C.PAYER_LEARNING_COLS, learning(1, 'y')), 'rewritten each refresh');
-  assert.equal(m.sheetVisibility('Payer Learning'), 'Visible');
+  assert.equal(m.sheetVisibility('Payer Learning'), 'Hidden');
   assert.equal(m.activeSheet(), 'Import', 'none of them activates');
   // Clearing the saved Sohar results leaves the ledger alone.
   await X.writeUploads(C.UPLOAD_COLS, []);
@@ -424,8 +424,8 @@ const CASES = {
   uploads: { write: (X, rows) => X.writeUploads(C.UPLOAD_COLS, rows), read: (X) => X.readUploads(), cols: C.UPLOAD_COLS, make: uploads, sheet: 'Sohar Uploads', hidden: true },
   tasks: { write: (X, rows) => X.writeTasks(C.TASK_COLS, rows), read: (X) => X.readTasks(), cols: C.TASK_COLS, make: tasks, sheet: 'NextGen Tasks', hidden: false },
   outcomes: { write: (X, rows) => X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, rows), read: (X) => X.readPayerOutcomes(), cols: C.PAYER_OUTCOME_COLS, make: outcomes, sheet: 'Payer Outcomes', hidden: true },
-  mapLog: { write: (X, rows) => X.writePayerMapLog(C.PAYER_MAP_LOG_COLS, rows), read: (X) => X.readPayerMapLog(), cols: C.PAYER_MAP_LOG_COLS, make: mapLog, sheet: 'Payer Map Log', hidden: false },
-  learning: { write: (X, rows) => X.writePayerLearning(C.PAYER_LEARNING_COLS, rows), read: (X) => X.readTable('tblPayerLearning', true), cols: C.PAYER_LEARNING_COLS, make: learning, sheet: 'Payer Learning', hidden: false },
+  mapLog: { write: (X, rows) => X.writePayerMapLog(C.PAYER_MAP_LOG_COLS, rows), read: (X) => X.readPayerMapLog(), cols: C.PAYER_MAP_LOG_COLS, make: mapLog, sheet: 'Payer Map Log', hidden: true },
+  learning: { write: (X, rows) => X.writePayerLearning(C.PAYER_LEARNING_COLS, rows), read: (X) => X.readTable('tblPayerLearning', true), cols: C.PAYER_LEARNING_COLS, make: learning, sheet: 'Payer Learning', hidden: true },
   refs: { write: (X, rows) => X.writeSoharRefs(C.SOHAR_REF_COLS, rows), read: (X) => X.readSoharRefs(), cols: C.SOHAR_REF_COLS, make: refs, sheet: 'Sohar Refs', hidden: true },
   requests: { write: (X, rows) => X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, rows), read: (X) => X.readReverifyRequests(), cols: C.REVERIFY_REQUEST_COLS, make: requests, sheet: 'Re-verify Requests', hidden: true },
   credRules: { write: (X, rows) => X.writePayerCredRules(PR.HEADERS, rows), read: (X) => X.readPayerCredRules(), cols: PR.HEADERS, make: credRules, sheet: 'Payer Credential Rules', hidden: false },
@@ -433,7 +433,7 @@ const CASES = {
   clinicPayerNotes: { write: (X, rows) => X.writeClinicPayerNotes(RL.CLINIC_PAYER_NOTE_COLS, rows), read: (X) => X.readClinicPayerNotes(), cols: RL.CLINIC_PAYER_NOTE_COLS, make: clinicPayerNotes, sheet: 'Clinic Payer Notes', hidden: false },
   flow: { write: (X, rows) => X.writeFlowResults(REC.FLOW_SHEET_COLS, rows), read: (X) => X.readFlowResults(), cols: REC.FLOW_SHEET_COLS, make: flowRows, sheet: 'Flow Results', hidden: true },
   precheck: { write: (X, rows) => X.writePreCheck(REC.PRECHECK_COLS, rows), read: (X) => X.readPreCheck(), cols: REC.PRECHECK_COLS, make: precheckRows, sheet: 'Pre-Check', hidden: true },
-  audits: { write: (X, rows) => X.writeAccountAudits(AU.AUDIT_COLS, rows), read: (X) => X.readAccountAudits(), cols: AU.AUDIT_COLS, make: auditRows, sheet: 'Account Audits', hidden: true },
+  audits: { write: (X, rows) => X.writeAccountAudits(AU.AUDIT_SHEET_COLS, rows), read: (X) => X.readAccountAudits(), cols: AU.AUDIT_SHEET_COLS, make: auditRows, sheet: 'Account Audits', hidden: true },
   auditLines: { write: (X, rows) => X.writeAccountAuditLines(AU.AUDIT_LINE_COLS, rows), read: (X) => X.readAccountAuditLines(), cols: AU.AUDIT_LINE_COLS, make: auditRows, sheet: 'Account Audit Lines', hidden: true },
   clinicApplied: { write: (X, rows) => X.writeClinicWorkApplied(RL.CLINIC_APPLIED_COLS, rows), read: (X) => X.readClinicWorkApplied(), cols: RL.CLINIC_APPLIED_COLS, make: clinicApplied, sheet: 'Clinic Work Applied', hidden: true },
 };
@@ -765,7 +765,7 @@ test('v0.12 hidden tables: Guarantor Requests and Payer Tests round-trip hidden;
   assert.equal(m.sheetVisibility('Payer Tests'), 'Hidden');
   assert.equal((await X.readPayerTests())[0].MRN, '007', 'leading zeros kept');
   await X.writePayerMapping(C.MAPPING_DISCOVERY_COLS, [{ firstName: 'A', lastName: 'B', dateOfBirth: '01/01/1990', state: 'CA', zipCode: '01234', payerId: '', id: '007-M', memberId: '0099' }]);
-  assert.equal(m.sheetVisibility('Payer Mapping'), 'Visible');
+  assert.equal(m.sheetVisibility('Payer Mapping'), 'Hidden');
   assert.equal((await X.readPayerMapping())[0].zipCode, '01234');
   await X.writePayerMetrics(C.PAYER_METRIC_COLS, []);
   await X.writePayerMetricHistory(C.PAYER_METRIC_HISTORY_COLS, [{ Date: '2026-10-20', 'NextGen Payer': 'P', 'Unmapped appts': '3' }]);
@@ -925,6 +925,8 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
     activate: () => X.activate('Clinic Work Inbox'),
     createClinicInbox: () => X.createClinicInbox(RL.INBOX_COLS),
     lockNameSheets: () => X.lockNameSheets(),
+    tidyTabs: () => X.tidyTabs(),
+    dropAccountAuditLines: () => X.dropAccountAuditLines(),
   };
   // Every other write* export: a plain (cols, rows) table save.
   for (const k of Object.keys(X)) if (/^write/.test(k) && !calls[k]) calls[k] = () => X[k](['Key', 'Record'], two(['Key', 'Record']));

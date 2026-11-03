@@ -61,25 +61,26 @@
   // Sheets + tables the add-in rebuilds with writeAddinTable. hidden: kept off the tab bar. hidden 'very': off the Unhide
   // list too (v0.19: the saved Sohar and IR files carry patient names and DOBs; not access control, a script can read them).
   const OWNED = {
+    // v0.26: the back-room tables are hidden too (tidyTabs); staff work in Patients, Review, Sohar Results and NextGen Tasks.
     tblSoharResults: { sheet: 'Sohar Results' }, tblNextGenTasks: { sheet: 'NextGen Tasks' }, tblExport: { sheet: 'Export' },
-    tblIrCrossRef: { sheet: 'IR Cross-Ref' }, tblBenefits: { sheet: 'Benefits' }, tblDiscoveryVerify: { sheet: 'Discovery Verify' },
-    tblVerifyFailed: { sheet: 'Discovery from Verify' }, tblPayerEvidence: { sheet: 'Payer Evidence' },
+    tblIrCrossRef: { sheet: 'IR Cross-Ref', hidden: true }, tblBenefits: { sheet: 'Benefits', hidden: true }, tblDiscoveryVerify: { sheet: 'Discovery Verify', hidden: true },
+    tblVerifyFailed: { sheet: 'Discovery from Verify', hidden: true }, tblPayerEvidence: { sheet: 'Payer Evidence', hidden: true },
     tblSoharUploads: { sheet: 'Sohar Uploads', hidden: 'very' }, tblIrUploads: { sheet: 'IR Uploads', hidden: 'very' },
     // Payer learning (v0.10): the outcomes ledger is hidden (it has Per Nbr); the log and the rollup have no patient identifiers.
-    tblPayerOutcomes: { sheet: 'Payer Outcomes', hidden: true }, tblPayerMapLog: { sheet: 'Payer Map Log' }, tblPayerLearning: { sheet: 'Payer Learning' },
+    tblPayerOutcomes: { sheet: 'Payer Outcomes', hidden: true }, tblPayerMapLog: { sheet: 'Payer Map Log', hidden: true }, tblPayerLearning: { sheet: 'Payer Learning', hidden: true },
     // Sohar ref -> Per Nbr memory (append-only, kept by "Clear saved Sohar results") and "Re-verify anyway" requests.
     tblSoharRefs: { sheet: 'Sohar Refs', hidden: true }, tblReverifyRequests: { sheet: 'Re-verify Requests', hidden: true },
     // Fee estimates (v0.11, a test, Off by default). Created only when Config "Fee estimates" is On; every one is safe to
     // delete. The schedule and its info hold rates, so they are hidden; the mapping tables are visible and editable.
     tblFeeSchedule: { sheet: 'Fee Schedule', hidden: true }, tblFeeMeta: { sheet: 'Fee Schedule Info', hidden: true },
-    tblFeeLocations: { sheet: 'Fee Locations' }, tblProviderHome: { sheet: 'Provider Home Clinic' },
-    tblFeePayerMap: { sheet: 'Fee Payer Map' }, tblFeePayerMapLog: { sheet: 'Fee Payer Map Log' },
-    tblEstimateCodes: { sheet: 'Estimate Codes' }, tblEstimateDefaults: { sheet: 'Estimate Defaults' },
+    tblFeeLocations: { sheet: 'Fee Locations', hidden: true }, tblProviderHome: { sheet: 'Provider Home Clinic', hidden: true },
+    tblFeePayerMap: { sheet: 'Fee Payer Map' }, tblFeePayerMapLog: { sheet: 'Fee Payer Map Log', hidden: true },
+    tblEstimateCodes: { sheet: 'Estimate Codes', hidden: true }, tblEstimateDefaults: { sheet: 'Estimate Defaults', hidden: true },
     // v0.12. Guarantor resubmission requests and payer test rows carry MRNs: hidden. The payer mapping discovery rows are
     // visible (the file's rows, like Discovery Verify). Metrics, their history and the guarantor themes have no identifiers.
     tblGuarantorRequests: { sheet: 'Guarantor Requests', hidden: true }, tblPayerTests: { sheet: 'Payer Tests', hidden: true },
-    tblPayerMapping: { sheet: 'Payer Mapping' }, tblPayerMetrics: { sheet: 'Payer Metrics' }, tblPayerMetricHistory: { sheet: 'Payer Metrics History' },
-    tblGuarantorThemes: { sheet: 'Guarantor Themes' },
+    tblPayerMapping: { sheet: 'Payer Mapping', hidden: true }, tblPayerMetrics: { sheet: 'Payer Metrics', hidden: true }, tblPayerMetricHistory: { sheet: 'Payer Metrics History', hidden: true },
+    tblGuarantorThemes: { sheet: 'Guarantor Themes', hidden: true },
     // Inside a clinic file: the clinic's own "Re-verify anyway" ticks, brought back to the admin workbook.
     tblClinicRequests: { sheet: 'Clinic Requests' },
     // v0.14: notes and payer notes from returned Clinic Eligibility files. Visible: a person reads them and acts.
@@ -435,6 +436,38 @@
     });
   }
 
+  /**
+   * v0.26 (Brendan, 11/3: cut the extra tabs): the sheets staff don't work in go hidden (Unhide still lists them):
+   * the Sohar import rows (saved from the pane), the payer learning logs and metrics, the fee lookups compiled into
+   * payer-knowledge.js and fees.js, and the account audit lines that now share the Account Audits sheet. Visible stays:
+   * Start, Dashboard, Config, Payer Map, Patients, Review, Sohar Results, NextGen Tasks, Fee Payer Map, Payer Credential
+   * Rules, the clinic notes and the Clinic Work Inbox. Hides only, never writes cells. Returns a warning, or ''.
+   */
+  const TIDY_SHEETS = [SHEETS.verification, SHEETS.discovery, SHEETS.sohar, 'Benefits', 'Discovery Verify', 'Discovery from Verify', 'Payer Evidence',
+    'Payer Map Log', 'Payer Learning', 'Fee Locations', 'Provider Home Clinic', 'Fee Payer Map Log', 'Estimate Codes', 'Estimate Defaults',
+    'Payer Mapping', 'Payer Metrics', 'Payer Metrics History', 'Guarantor Themes', 'IR Cross-Ref', 'Account Audit Lines'];
+  async function tidyTabs() {
+    return run(async (ctx) => {
+      const wb = ctx.workbook;
+      const list = TIDY_SHEETS.map((n) => { const s = wb.worksheets.getItemOrNullObject(n); s.load('isNullObject,id,visibility'); return s; });
+      const active = wb.worksheets.getActiveWorksheet(); active.load('id');
+      const prot = Office.context.requirements.isSetSupported('ExcelApi', '1.7') ? wb.protection : null;
+      if (prot) prot.load('protected');
+      await ctx.sync();
+      const hide = list.filter((s) => !s.isNullObject && s.visibility === Excel.SheetVisibility.visible);
+      if (!hide.length) return '';
+      if (prot && prot.protected) return 'The workbook structure is protected, so the back-room tabs could not be hidden. Unprotect it (Review > Protect Workbook) and reopen the pane.';
+      if (hide.some((s) => s.id === active.id)) {
+        const home = wb.worksheets.getItemOrNullObject(SHEETS.patients); home.load('isNullObject,visibility');
+        await ctx.sync();
+        if (!home.isNullObject && home.visibility === Excel.SheetVisibility.visible) home.activate();
+      }
+      for (const s of hide) s.visibility = Excel.SheetVisibility.hidden;
+      await ctx.sync();
+      return '';
+    });
+  }
+
   // ---------- file upload ----------
   const canInsertWorkbook = () => Office.context.requirements.isSetSupported('ExcelApi', '1.13');
 
@@ -613,6 +646,20 @@
   const readAccountAuditLines = () => readOwned('tblAccountAuditLines');
   const writeAccountAudits = (cols, rows) => writeAddinTable('Account Audits', 'tblAccountAudits', cols, rows, false); // hidden: OWNED
   const writeAccountAuditLines = (cols, rows) => writeAddinTable('Account Audit Lines', 'tblAccountAuditLines', cols, rows, false); // hidden: OWNED
+  /**
+   * v0.26: the lines moved onto the Account Audits sheet (audit.AUDIT_SHEET_COLS). Once they are saved there, the old
+   * Account Audit Lines sheet goes. Only that sheet, only when hidden (a sheet someone made visible is left alone).
+   */
+  async function dropAccountAuditLines() {
+    return run(async (ctx) => {
+      const ws = ctx.workbook.worksheets.getItemOrNullObject('Account Audit Lines'); ws.load('isNullObject,visibility');
+      await ctx.sync();
+      if (ws.isNullObject || ws.visibility === Excel.SheetVisibility.visible) return false;
+      dropHidden(ws);
+      await ctx.sync();
+      return true;
+    });
+  }
   const writePayerMetrics = (cols, rows) => writeAddinTable('Payer Metrics', 'tblPayerMetrics', cols, rows, false);
   const readPayerMetricHistory = () => readOwned('tblPayerMetricHistory');
   const writePayerMetricHistory = (cols, rows) => writeAddinTable('Payer Metrics History', 'tblPayerMetricHistory', cols, rows, false);
@@ -935,9 +982,9 @@
     readPayerEvidence, writePayerEvidence, tableExists, readClinicFile, ensureConfigRows,
     readPayerOutcomes, writePayerOutcomes, readPayerMapLog, writePayerMapLog, appendPayerMapLog, writePayerLearning,
     readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests, FEE_TABLES, readFee, writeFee,
-    readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, readFlowResults, writeFlowResults, readPreCheck, writePreCheck, readAccountAudits, readAccountAuditLines, writeAccountAudits, writeAccountAuditLines, writePayerMetrics,
+    readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, readFlowResults, writeFlowResults, readPreCheck, writePreCheck, readAccountAudits, readAccountAuditLines, writeAccountAudits, writeAccountAuditLines, dropAccountAuditLines, writePayerMetrics,
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
-    INBOX, readClinicInbox, createClinicInbox, writeImportRows, importXlsx, lockNameSheets, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
+    INBOX, readClinicInbox, createClinicInbox, writeImportRows, importXlsx, lockNameSheets, tidyTabs, TIDY_SHEETS, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

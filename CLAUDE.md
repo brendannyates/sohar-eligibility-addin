@@ -45,6 +45,19 @@ Hard rules:
   is the plan-level default, as before. Staff classify codes in the patient view (saved with their name, `rememberCodeRule`). `estimateMath`,
   `calcEstimate` / `calcPatient` / `calcSeries` and the projection all follow them; with no rule, results are unchanged
   and the projection keeps its copay rule (an estimate equal to the copay counts toward the OOP max only).
+- v0.26 (Brendan, 11/3: cut the noise). NextGen tasks (`core.buildTasks(results, {flags, guarantor, patients})`) are
+  only for what is new or must change before the visit: coverage a discovery found, a policy newly ineligible against
+  its earlier result (or ending before the visit), deductible / OOP max newly met against earlier results for the
+  policy in the same plan year, the Medi-Cal / SFHP / credential / Kaiser auth flags (`TASK_FLAGS`), and a NextGen
+  guarantor who is a different person from Sohar's subscriber. Never a task that restates benefits or stays open
+  forever (unmatched results, rejected member IDs, no coverage found, payer mapping): those stay on the Worklist and
+  Review. Interventions (TMS 90868, MT 90867, MTR 90869, esketamine G2083) are priced by code; `fees.upgradeInterventionSeeds`
+  moves untouched old "none" rows. The back-room tabs go hidden (`excel.tidyTabs` / `TIDY_SHEETS`, OWNED `hidden`);
+  account audit summaries and lines share the hidden Account Audits sheet (`audit.AUDIT_SHEET_COLS`). Learned,
+  exact and edited rows are compiled into `payer-knowledge.js` by the build script, which is additive (workbook wins on
+  the same key; `--fresh` rebuilds); the pane merges built-in Fee Locations, Fee Payer Map, Estimate Codes and Estimate
+  Defaults under the sheets and saves only what is not built in (`sheetOnly`). Payer matches are assigned from one
+  dropdown in step 1.
 - Never add a network call. `connect-src 'none'` in `index.html` is deliberate; the only remote script is Office.js.
 - `VERIFICATION_COLS`, `DISCOVERY_COLS` and `record.FLOW_IMPORT_COLS` (the "MHS Eligibility - Discovery vs NextGen" Flow's CSV
   template, v0.21) match the Sohar CSV templates exactly, in order. Do not rename or reorder. The Flow file has no

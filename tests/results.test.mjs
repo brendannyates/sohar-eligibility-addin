@@ -189,32 +189,84 @@ test('adminMessage: action list and benefits list, LASFIR not full names', () =>
   assert.equal(C.lasfir("O'Neil", 'Al'), 'ONEAL');
 });
 
-test('buildTasks lists what to add or update in NextGen, soonest visit first', () => {
+test('buildTasks: only what is new or must change before the visit, soonest visit first (v0.26)', () => {
   const tasks = C.buildTasks(merged().results);
   for (const t of tasks) assert.deepEqual(Object.keys(t), C.TASK_COLS);
   const of = (per) => tasks.filter((t) => t['Per Nbr'] === per).map((t) => t.Task);
-  assert.deepEqual(of('100'), ['Update benefits in NextGen']);
-  assert.match(tasks.find((t) => t['Per Nbr'] === '100').Details, /Copay 40; Coinsurance 20%; Deductible 1500 \(0 left, Met\); OOP max 5000 \(800 left, Approaching\); Level IND; Plan SYNTH GOLD PPO/);
+  assert.deepEqual(of('100'), ['Deductible newly met'], 'no task restating benefits NextGen already has');
+  assert.match(tasks.find((t) => t['Per Nbr'] === '100').Details, /Deductible met: 1500 for Blue Shield of California/);
   assert.deepEqual(of('101'), ['Add insurance in NextGen'], 'discovery found coverage, NextGen has none');
   assert.match(tasks.find((t) => t['Per Nbr'] === '101').Details, /Choose Cigna\. Member ID: open the Sohar link\./);
-  assert.deepEqual(of('102'), ['Update insurance in NextGen'], 'ineligible');
+  assert.deepEqual(of('102'), ['Policy newly ineligible']);
   assert.deepEqual(of('103'), ['Add insurance in NextGen']);
-  assert.deepEqual(of('105'), ['Update insurance in NextGen', 'Update benefits in NextGen'], 'coverage ends before visit, plus benefits');
-  const refs = tasks.filter((t) => !t['Per Nbr']).map((t) => t.Task).sort();
-  assert.deepEqual(refs, ['Find patient for Sohar result', 'Find patient for Sohar result']);
+  assert.deepEqual(of('104'), ['OOP max newly met']);
+  assert.deepEqual(of('105'), ['Update insurance in NextGen'], 'coverage ends before the visit');
+  assert.equal(tasks.filter((t) => !t['Per Nbr']).length, 0, 'no task for a result that matched no one on the report');
   assert.equal(tasks[0]['Due By'], '10/20/2026');
-  assert.equal(tasks[0]['Per Nbr'], '100', 'same day sorts by time: 12:00 PM before later visits');
+  assert.equal(tasks[0]['Per Nbr'], '100');
+});
+
+test('buildTasks: met and ineligible count only against the earlier results for that policy', () => {
+  const base = merged().results;
+  const v100 = base.find((r) => r['Per Nbr'] === '100' && r['Sent As'] === 'Verification');
+  const v102 = base.find((r) => r['Per Nbr'] === '102' && r['Sent As'] === 'Verification');
+  const at = (r, date, o) => ({ ...r, 'Sohar Date': date, 'Sohar Ref': `${r['Sohar Ref']}-${date}`, ...o });
+  // Met on the earlier result too: not new.
+  const again = [at(v100, '2026-09-01T00:00:00Z'), at(v100, '2026-10-14T01:00:00Z')];
+  assert.equal(C.buildTasks(again).filter((t) => t.Task === 'Deductible newly met').length, 0);
+  // Not met before, met now: new, once per policy and plan year.
+  const newly = [at(v100, '2026-09-01T00:00:00Z', { 'Deductible Status': 'Not met', 'Deductible Remaining': '700' }), at(v100, '2026-10-14T01:00:00Z')];
+  const t = C.buildTasks(newly).filter((x) => x.Task === 'Deductible newly met');
+  assert.equal(t.length, 1);
+  assert.equal(t[0]['Task Key'], '900|Deductible newly met|blue shield of california|2026');
+  assert.match(t[0].Details, /was not met on 2026-09-01/);
+  // Met last plan year, not this one yet, then met: new for this year.
+  const nextYear = [at(v100, '2025-12-01T00:00:00Z'), at(v100, '2026-01-20T00:00:00Z', { 'Deductible Status': 'Not met' }), at(v100, '2026-10-14T01:00:00Z')];
+  assert.equal(C.buildTasks(nextYear).filter((x) => x.Task === 'Deductible newly met').length, 1);
+  // Ineligible on the last check too: not new. Eligible before: new.
+  assert.equal(C.buildTasks([at(v102, '2026-09-01T00:00:00Z'), at(v102, '2026-10-14T01:00:00Z')]).filter((x) => x.Task === 'Policy newly ineligible').length, 0);
+  const lapsed = C.buildTasks([at(v102, '2026-09-01T00:00:00Z', { 'Sohar Status': 'complete.eligible' }), at(v102, '2026-10-14T01:00:00Z')]).filter((x) => x.Task === 'Policy newly ineligible');
+  assert.equal(lapsed.length, 1);
+  assert.match(lapsed[0].Details, /eligible on 2026-09-01/);
+  // A rejected member ID or a discovery with no coverage is not a task (it stays on the Worklist).
+  assert.equal(C.buildTasks([{ ...v102, 'Sohar Status': 'error.member.id' }]).length, 0);
+});
+
+test('buildTasks: Medi-Cal, SFHP, credential and auth flags and a different-person guarantor are tasks; other flags are not', () => {
+  const res = merged().results;
+  const appt = { date: '10/22/2026', time: '9:00 AM', loc: 'Walnut Creek' };
+  const flags = new Map([
+    ['900', [{ code: 'MEDICAL', detail: 'Medi-Cal plan' }, { code: 'MEDICAL_NEW', detail: 'New Medi-Cal' }, { code: 'REVERIFY', detail: 'Re-verify' }, { code: 'QMB', detail: 'QMB' }]],
+    ['PER-102', [{ code: 'NP_TMS', detail: 'NP cannot render TMS for this payer', appt }, { code: 'SFHP_PROVIDER', detail: 'SFHP: confirm provider', appt }]],
+  ]);
+  const guarantor = new Map([['PER-103', { severity: 'high', text: 'NextGen guarantor HADMIR and Sohar subscriber SMIJAN are different people.' }], ['PER-104', { severity: 'medium', text: 'check insured' }]]);
+  const tasks = C.buildTasks(res, { flags, guarantor });
+  const of = (k) => tasks.filter((t) => t['Task Key'].split('|')[0] === k).map((t) => t.Task);
+  assert.deepEqual(of('900'), ['Deductible newly met', 'Medi-Cal'], 'one Medi-Cal task; re-verify and QMB are not tasks');
+  assert.deepEqual(of('PER-102').sort(), ['Credential for payer', 'Policy newly ineligible', 'SFHP provider']);
+  const cred = tasks.find((t) => t.Task === 'Credential for payer');
+  assert.equal(cred['Task Key'], 'PER-102|Credential for payer|10/22/2026|NP_TMS', 'per visit');
+  assert.equal(cred['Due By'], '10/22/2026');
+  assert.deepEqual(of('PER-103'), ['Add insurance in NextGen', 'Check guarantor in NextGen']);
+  assert.deepEqual(of('PER-104'), ['OOP max newly met'], 'a medium guarantor check is not a task');
+  // A flagged patient with no Sohar result still gets the task, from the report.
+  const lone = C.buildTasks([], { flags: new Map([['901', [{ code: 'ESK_CRED', detail: 'not credentialed', appt }]]]), patients: [{ MRN: '901', 'Per Nbr': '9', 'Last Name': 'Smith', 'First Name': 'Jane' }] });
+  assert.equal(lone.length, 1);
+  assert.equal(lone[0].LASFIR, 'SMIJAN');
+  assert.equal(lone[0].MRN, '901');
 });
 
 test('keepDone carries Done marks across rebuilds by Task Key', () => {
   const tasks = C.buildTasks(merged().results);
-  assert.ok(tasks.some((t) => t['Task Key'] === '900|Update benefits in NextGen'), 'Task Key is the MRN + task');
-  // A row saved before v0.12 (Per Nbr Task Key) keeps its Done mark through its MRN column.
-  const prev = [{ 'Task Key': '100|Update benefits in NextGen', 'Per Nbr': '100', MRN: '900', Task: 'Update benefits in NextGen', Done: 'Yes' }, { 'Task Key': 'gone|x', Done: 'Yes' }];
+  const key = '900|Deductible newly met|blue shield of california|2026';
+  assert.ok(tasks.some((t) => t['Task Key'] === key), 'Task Key is the MRN + task + policy + year');
+  const prev = [{ 'Task Key': key, 'Per Nbr': '100', MRN: '900', Task: 'Deductible newly met', Done: 'Yes' }, { 'Task Key': 'gone|x', Done: 'Yes' }];
   const kept = C.keepDone(tasks, prev);
-  assert.equal(kept.find((t) => t['Task Key'] === '900|Update benefits in NextGen').Done, 'Yes');
-  assert.equal(C.keepDone(tasks, [{ 'Task Key': '900|Update benefits in NextGen', Done: 'Yes' }]).filter((t) => t.Done).length, 1);
+  assert.equal(kept.find((t) => t['Task Key'] === key).Done, 'Yes');
   assert.equal(kept.filter((t) => t.Done).length, 1);
+  // A row saved before v0.12 (Per Nbr Task Key) keeps its Done mark through its MRN column.
+  const old = C.keepDone(tasks, [{ 'Task Key': 'PER-101|Add insurance in NextGen', 'Per Nbr': '101', MRN: '', Task: 'Add insurance in NextGen', Done: 'Yes' }]);
+  assert.equal(old.find((t) => t['Per Nbr'] === '101').Done, 'Yes');
 });
 
 test('chunkMessage and messageAssembler round-trip a large payload in pieces', () => {
@@ -229,9 +281,9 @@ test('chunkMessage and messageAssembler round-trip a large payload in pieces', (
 });
 
 test('taskMessage lists open tasks only, LASFIR not names', () => {
-  const tasks = C.keepDone(C.buildTasks(merged().results), [{ 'Task Key': '900|Update benefits in NextGen', Done: 'Yes' }]);
+  const tasks = C.keepDone(C.buildTasks(merged().results), [{ 'Task Key': '900|Deductible newly met|blue shield of california|2026', Done: 'Yes' }]);
   const msg = C.taskMessage(tasks);
-  assert.match(msg, /OKACHI · Per 101 · Add insurance in NextGen: Choose Cigna\./);
+  assert.match(msg, /OKACHI · Per 101 · Add insurance in NextGen: New coverage found: Choose Cigna./);
   assert.doesNotMatch(msg, /RIVANA|Okafor|Chidi/, 'done task and full names left out');
 });
 
@@ -295,7 +347,7 @@ test('a later verification upload is added to saved results and closes the disco
 
   assert.ok(C.benefitsExport(res.results).some((r) => r['Per Nbr'] === '101' && r.Plan === 'SYNTH OPEN ACCESS'));
   const tasks = C.buildTasks(res.results).filter((t) => t['Per Nbr'] === '101');
-  assert.deepEqual(tasks.map((t) => t.Task).sort(), ['Add insurance in NextGen', 'Update benefits in NextGen']);
+  assert.deepEqual(tasks.map((t) => t.Task).sort(), ['Add insurance in NextGen'], 'not met: no benefits task');
   assert.match(tasks.find((t) => t.Task === 'Add insurance in NextGen').Details, /verified: complete\.eligible; benefits are on the verification row/);
 });
 

@@ -1691,66 +1691,115 @@
   }
 
   // ---------- NextGen task list ----------
-  const TASK_TYPES = ['Add insurance in NextGen', 'Update insurance in NextGen', 'Fix member ID in NextGen', 'Fix name in NextGen',
-    'Update benefits in NextGen', 'Add payer to Payer Map', 'Confirm payer mapping', 'Confirm self-pay or get card', 'Find patient for Sohar result', 'Resend to Sohar', 'Send for verification'];
+  // v0.26 (Brendan, 11/3): a task only for something new, or that has to change before the visit. Nothing restates
+  // benefits NextGen already holds, and nothing stays open forever:
+  // - coverage a discovery found that NextGen doesn't have (add) or has differently (update), latest discovery only;
+  // - a policy newly ineligible against the patient's earlier result for it, or ending before the next visit;
+  // - the deductible or OOP max newly met against the earlier results for that policy in the same year;
+  // - the Medi-Cal, SFHP and payer credential / auth flags (opts.flags, rules.allFlags);
+  // - a NextGen guarantor who is a different person from Sohar's subscriber (opts.guarantor, record.guarantorCheck).
+  // Unmatched results, rejected member IDs, no coverage found and "send for verification" stay on the Worklist and
+  // Review, not here. Only patients on the report get tasks.
+  const TASK_TYPES = ['Add insurance in NextGen', 'Update insurance in NextGen', 'Policy newly ineligible', 'Deductible newly met', 'OOP max newly met',
+    'Medi-Cal', 'SFHP provider', 'Credential for payer', 'Kaiser/VA auth', 'Check guarantor in NextGen'];
+  // Flag code -> task (rules.js PILLS). Medi-Cal is one task per patient; the others are per visit.
+  const TASK_FLAGS = { MEDICAL: 'Medi-Cal', MEDICAL_NEW: 'Medi-Cal', SFHP_PROVIDER: 'SFHP provider', NP_TMS: 'Credential for payer',
+    ESK_CRED: 'Credential for payer', BESSE_NO: 'Credential for payer', KAISER_MM_NOAUTH: 'Kaiser/VA auth' };
 
-  /**
-   * One task per thing an admin has to do in NextGen (or the Payer Map) before the visit.
-   * Every eligible verification with benefits gets an "Update benefits" task with the values to enter,
-   * because the appointment report does not show what NextGen currently holds.
-   */
   const taskKey = (key, ref, task, searched) => `${str(key) || 'ref:' + str(ref)}|${str(task)}${searched === 'Guarantor' ? '|G' : ''}`;
-  function buildTasks(results) {
-    const tasks = [];
-    const add = (r, task, details) => {
-      // Task Key: patient key (MRN) + task; a guarantor search's task is its own (|G).
-      const key = taskKey(keyOf(r), r['Sohar Ref'], task, r['Searched As']);
+  /**
+   * opts: {flags: Map patient key -> rules flags, guarantor: Map patient key -> guarantorCheck result,
+   * patients: report patients (for a flag on a patient with no Sohar result)}. Without opts, only Sohar-result tasks.
+   */
+  function buildTasks(results, opts) {
+    const o = opts || {};
+    const tasks = [], seenKeys = new Set();
+    const add = (r, task, details, extra) => {
+      // Task Key: patient key (MRN) + task (+ the policy, year or visit the task is about); a guarantor search's is its own (|G).
+      const key = taskKey(keyOf(r), r['Sohar Ref'], task, r['Searched As']) + (extra ? `|${extra}` : '');
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
       tasks.push({
         'Done': '', 'Due By': r['Next Appt'], 'Next Appt': r['Next Appt'], 'Next Time': r['Next Time'], 'Next Location': r['Next Location'],
-        'Per Nbr': r['Per Nbr'], 'MRN': r.MRN, 'LASFIR': tagOf(r), 'Result Type': r['Sent As'],
-        'Task': task, 'Details': details, 'Choose in NextGen': r['Choose in NextGen'] || '', 'Sohar Link': r['Sohar Link'], 'Sohar Ref': r['Sohar Ref'], 'Task Key': key, 'Clinic Note': '',
+        'Per Nbr': r['Per Nbr'], 'MRN': r.MRN, 'LASFIR': tagOf(r), 'Result Type': r['Sent As'] || '',
+        'Task': task, 'Details': details, 'Choose in NextGen': r['Choose in NextGen'] || '', 'Sohar Link': r['Sohar Link'] || '', 'Sohar Ref': r['Sohar Ref'] || '', 'Task Key': key, 'Clinic Note': '',
       });
     };
-    const benefitText = (r) => [
-      r.Copay !== '' ? `Copay ${r.Copay}` : '', r.Coinsurance ? `Coinsurance ${r.Coinsurance}` : '',
-      r.Deductible !== '' ? `Deductible ${r.Deductible} (${r['Deductible Remaining'] || 0} left, ${r['Deductible Status'] || '?'})` : '',
-      r['OOP Max'] !== '' ? `OOP max ${r['OOP Max']} (${r['OOP Remaining'] || 0} left, ${r['OOP Status'] || '?'})` : '',
-      r['Coverage Level'] ? `Level ${r['Coverage Level']}` : '', r.Plan ? `Plan ${r.Plan}` : '',
-      r['Coverage Start'] || r['Coverage End'] ? `Coverage ${r['Coverage Start'] || '?'} to ${r['Coverage End'] || 'open'}` : '',
-    ].filter(Boolean).join('; ');
-    for (const r of results || []) {
-      const status = String(r['Sohar Status'] || '').toLowerCase();
-      const memberHint = r['Sohar Member ID'] ? `Member ID ${r['Sohar Member ID']}.` : 'Member ID: open the Sohar link.';
-      if (/^Superseded/.test(r.Action || '')) continue; // the other insurance came back eligible
-      if (r.Match === 'No identifiers') continue; // one Review row for all of them (noIdentifierReviewRows), not a task each
-      if (r.Match === 'No match') { add(r, 'Find patient for Sohar result', `Sohar ${r['Sent As'].toLowerCase()} result did not match the Import report. ${r.Action}`); continue; }
-      if (status === 'not in sohar file') { add(r, 'Resend to Sohar', 'Upcoming patient missing from the Sohar results.'); continue; }
+    const memberHint = (r) => (r['Sohar Member ID'] ? `Member ID ${r['Sohar Member ID']}.` : 'Member ID: open the Sohar link.');
+    const policy = (r) => idKey(r['Sohar Member ID']) || str(r['Sohar Payer']).toLowerCase();
+    const when = (r) => { const t = Date.parse(str(r['Sohar Date'])); return isNaN(t) ? 0 : t; };
+    const yearOf = (r) => (when(r) ? new Date(when(r)).getUTCFullYear() : '');
+    const st = (r) => str(r['Sohar Status']).toLowerCase();
+    // Sohar results for patients on the report, oldest first, grouped by patient and policy.
+    const mine = (results || []).filter((r) => keyOf(r) && !/^Superseded/.test(r.Action || '') && r.Match !== 'No match' && r.Match !== 'No identifiers'
+      && st(r) !== 'not in sohar file').sort((a, b) => when(a) - when(b));
+    const groups = new Map();
+    for (const r of mine) {
+      const g = `${keyOf(r)}|${r['Sent As']}|${r['Sent As'] === 'Discovery' ? '' : policy(r)}`;
+      if (!groups.has(g)) groups.set(g, []);
+      groups.get(g).push(r);
+    }
+    const latestOf = new Map(); // patient key -> their newest result, the row a flag or guarantor task borrows its visit from
+    for (const r of mine) latestOf.set(keyOf(r), r);
+    for (const rs of groups.values()) {
+      const r = rs[rs.length - 1], before = rs.slice(0, -1);
       if (r['Sent As'] === 'Discovery') {
-        if (status !== 'coverage found') { if (status === 'no coverage found') add(r, 'Confirm self-pay or get card', 'Sohar found no coverage.'); continue; }
+        if (st(r) !== 'coverage found') continue;
         const choose = r['Choose in NextGen'] || '';
-        if (/^Not in Payer Map/.test(choose)) add(r, 'Add payer to Payer Map', `${r['Sohar Payer']} (${r['Sohar payerId']}) has no NextGen insurance in the Payer Map.`);
-        else if (r.chooseGuess || /Payer Map only guesses/.test(r.Action || '')) add(r, 'Confirm payer mapping', `${r['Sohar Payer']} (${r['Sohar payerId']}) is only a guess on the Payer Map for ${choose.replace(/^One of: /, 'one of: ')}. Confirm it in the pane (Admin, step 1) or on the Payer Map sheet.`);
         const pick = choose && !/^Not in Payer Map/.test(choose) ? `Choose ${choose.replace(/^One of: /, 'one of: ')}.` : `Sohar payer: ${r['Sohar Payer']}.`;
         const verified = /^Verified/.test(r['Discovery Follow-up'] || '');
-        const next = verified ? `Sohar ${r['Discovery Follow-up'].toLowerCase()}; benefits are on the verification row.` : 'Then send for verification to get benefits (step 5: discovery verification import).';
-        if (!r['NextGen Payer'] || /^self pay$/i.test(r['NextGen Payer'])) add(r, 'Add insurance in NextGen', `${pick} ${memberHint} ${next}`);
-        else if (r['Coverage Differs'] === 'Yes') add(r, 'Update insurance in NextGen', `NextGen has ${r['NextGen Payer']}; Sohar found ${r['Sohar Payer']}. Confirm with the patient. ${pick} ${memberHint}${verified ? ` ${next}` : ''}`);
-        else if (!verified) add(r, 'Send for verification', `Discovery matches NextGen (${r['NextGen Payer']}). It is on the discovery verification import.`);
+        const next = verified ? `Sohar ${r['Discovery Follow-up'].toLowerCase()}; benefits are on the verification row.` : 'Then send it for verification (step 5: discovery verification import).';
+        if (!r['NextGen Payer'] || isSelfPay(r['NextGen Payer'])) add(r, 'Add insurance in NextGen', `New coverage found: ${pick} ${memberHint(r)} ${next}`);
+        else if (r['Coverage Differs'] === 'Yes') add(r, 'Update insurance in NextGen', `NextGen has ${r['NextGen Payer']}; Sohar found ${r['Sohar Payer']}. Confirm with the patient. ${pick} ${memberHint(r)}${verified ? ` ${next}` : ''}`);
         continue;
       }
-      // Verification
-      if (status.startsWith('complete.ineligible')) add(r, 'Update insurance in NextGen', `Sohar: ${r['Sohar Status']} for ${r['Sohar Payer'] || r['NextGen Payer']}. Confirm current coverage with the patient; ${r['Discovery Follow-up'] === 'Sent to discovery' ? 'they are on the discovery import (from verification).' : 'consider discovery.'}`);
-      else if (status === 'error.member.id') add(r, 'Fix member ID in NextGen', `Sohar rejected member ID ${r['NextGen Member ID'] || '(blank)'} for ${r['NextGen Payer']}. Check the card, then re-verify.`);
-      else if (status === 'error.member.name') add(r, 'Fix name in NextGen', 'Sohar rejected the name. Match it to the insurance card, then re-verify.');
-      else if (status === 'complete.eligible') {
-        if (/^Coverage ends|make this the chart insurance/.test(r.Action)) add(r, 'Update insurance in NextGen', r.Action);
-        const ben = benefitText(r);
-        if (ben) add(r, 'Update benefits in NextGen', ben);
+      const done = before.filter((x) => /^complete\./.test(st(x)));
+      const prior = done[done.length - 1] || null;
+      if (st(r).startsWith('complete.ineligible')) {
+        if (prior && st(prior).startsWith('complete.ineligible')) continue; // already ineligible last time: not new
+        add(r, 'Policy newly ineligible', `Sohar: ${r['Sohar Status']} for ${r['Sohar Payer'] || r['NextGen Payer']}${prior ? ` (eligible on ${str(prior['Sohar Date']).slice(0, 10)})` : ''}. Confirm current coverage with the patient; ${r['Discovery Follow-up'] === 'Sent to discovery' ? 'they are on the discovery import (from verification).' : 'consider discovery.'}`, `${policy(r)}|${r['Sohar Ref']}`);
+        continue;
       }
+      if (st(r) !== 'complete.eligible') continue;
+      if (/^Coverage ends|make this the chart insurance/.test(r.Action || '')) add(r, 'Update insurance in NextGen', r.Action);
+      // Newly met: met now, and not met on an earlier eligible result for this policy in the same year.
+      const sameYear = done.filter((x) => st(x) === 'complete.eligible' && yearOf(x) === yearOf(r));
+      const was = (col) => sameYear.some((x) => x[col] === 'Met');
+      if (r['Deductible Status'] === 'Met' && !was('Deductible Status')) {
+        add(r, 'Deductible newly met', `Deductible met: ${r.Deductible} for ${r['Sohar Payer'] || r['NextGen Payer']}${sameYear.length ? `, ${r['Deductible Remaining'] || 0} left (was not met on ${str(sameYear[sameYear.length - 1]['Sohar Date']).slice(0, 10)})` : ''}. Update the patient's balance and estimates in NextGen.`, `${policy(r)}|${yearOf(r)}`);
+      }
+      if (r['OOP Status'] === 'Met' && !was('OOP Status')) {
+        add(r, 'OOP max newly met', `OOP max met: ${r['OOP Max']} for ${r['Sohar Payer'] || r['NextGen Payer']}${sameYear.length ? ` (was not met on ${str(sameYear[sameYear.length - 1]['Sohar Date']).slice(0, 10)})` : ''}. The patient should owe nothing more this plan year; update NextGen.`, `${policy(r)}|${yearOf(r)}`);
+      }
+    }
+    // Flags and the guarantor check, for patients on the report.
+    const pts = new Map((o.patients || []).map((p) => [keyOf(p), p]));
+    const baseOf = (k, appt) => {
+      const r = latestOf.get(k);
+      const p = pts.get(k);
+      const b = r ? { ...r } : p ? { 'Per Nbr': p['Per Nbr'], MRN: p.MRN, 'Last Name': p['Last Name'], 'First Name': p['First Name'], LASFIR: p.LASFIR } : null;
+      if (!b) return null;
+      if (!r) b['Sent As'] = '';
+      if (appt && appt.date) Object.assign(b, { 'Next Appt': appt.date, 'Next Time': appt.time || b['Next Time'] || '', 'Next Location': appt.loc || b['Next Location'] || '' });
+      return { ...b, 'Sohar Ref': r ? b['Sohar Ref'] : '', 'Sohar Link': r ? b['Sohar Link'] : '', 'Choose in NextGen': '', 'Searched As': 'Patient' };
+    };
+    for (const [k, flags] of o.flags || []) {
+      for (const f of flags || []) {
+        const task = TASK_FLAGS[f.code];
+        if (!task) continue;
+        const b = baseOf(k, task === 'Medi-Cal' ? null : f.appt);
+        if (!b) continue;
+        add(b, task, f.detail, task === 'Medi-Cal' ? '' : `${(f.appt && f.appt.date) || ''}|${f.code}`);
+      }
+    }
+    for (const [k, g] of o.guarantor || []) {
+      if (!g || g.severity !== 'high') continue;
+      const b = baseOf(k);
+      if (b) add(b, 'Check guarantor in NextGen', g.text);
     }
     const t = (x) => (x['Due By'] ? parseDate(x['Due By']).getTime() : Infinity);
     const mins = (x) => { const m = String(x['Next Time'] || '').match(/(\d+):(\d+)\s*(AM|PM)/i); return m ? ((+m[1] % 12) + (/pm/i.test(m[3]) ? 12 : 0)) * 60 + +m[2] : 9999; };
-    tasks.sort((a, b) => t(a) - t(b) || mins(a) - mins(b) || String(a['Next Location']).localeCompare(String(b['Next Location'])) || String(a['Last Name']).localeCompare(String(b['Last Name'])) || TASK_TYPES.indexOf(a.Task) - TASK_TYPES.indexOf(b.Task));
+    tasks.sort((a, b) => t(a) - t(b) || mins(a) - mins(b) || String(a['Next Location']).localeCompare(String(b['Next Location'])) || String(a.LASFIR).localeCompare(String(b.LASFIR)) || TASK_TYPES.indexOf(a.Task) - TASK_TYPES.indexOf(b.Task));
     return tasks;
   }
 
@@ -3148,7 +3197,7 @@
   return {
     VERIFICATION_COLS, DISCOVERY_COLS, VERIFICATION_SHEET_COLS, DISCOVERY_SHEET_COLS, MAPPING_SHEET_COLS, tagOf, cellOf, fillNames, namesMissing, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, UPLOAD_COLS, BENEFITS_EXPORT_COLS,
     localDate, fileName, FILE_LABELS, BENEFIT_SHEET_COLS, BENEFIT_PCT_COLS, benefitsView, benefitsSummary,
-    resultKey, accumulateResults, stampSentPayerIds, combineResults, keepMemberIds, TRACKER_EXPORT_COLS, serviceLine, trackerExport, TASK_COLS, TASK_TYPES, IR_COLS, HEADER_SYNONYMS,
+    resultKey, accumulateResults, stampSentPayerIds, combineResults, keepMemberIds, TRACKER_EXPORT_COLS, serviceLine, trackerExport, TASK_COLS, TASK_TYPES, TASK_FLAGS, IR_COLS, HEADER_SYNONYMS,
     irCategory, parseIrPortal, irCrossReference, irMessage,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, timeMins, soharTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,

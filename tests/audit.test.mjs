@@ -268,6 +268,25 @@ test('auditRecord: one summary row and its lines, with no names or card numbers 
   assert.ok(rec.lines.every((l) => AU.AUDIT_LINE_COLS.every((c) => c in l)));
   assert.ok(rec.lines.some((l) => l.Part === 'Payment' && l.Status === 'Not posted' && l.Paid === 71.51));
 });
+test('v0.26: summary and lines share one hidden sheet and come back the same; old two-sheet saves still read', () => {
+  const a = demoAudit();
+  const saved = AU.mergeAudits(AU.mergeAudits({ summary: [], lines: [] }, AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'w1' })),
+    AU.auditRecord(a, { lasfir: 'OTHPER', mrn: '700002', key: '700002' }, { when: 'w2' }));
+  const rows = AU.auditSheetRows(saved);
+  assert.ok(rows.every((r) => Object.keys(r).join() === AU.AUDIT_SHEET_COLS.join()), 'every row has the sheet columns');
+  assert.equal(rows.filter((r) => r.Part === 'Summary').length, 2);
+  assert.equal(rows.length, 2 + saved.lines.length);
+  assert.deepEqual(AU.AUDIT_SHEET_COLS.filter((c) => NAME_COLS.includes(c)), []);
+  const back = AU.auditsFromSheet(rows, []);
+  assert.deepEqual(back.summary.map((r) => r.Key).sort(), ['700001', '700002']);
+  assert.equal(back.lines.length, saved.lines.length);
+  assert.deepEqual(back, { summary: [...back.summary], lines: back.lines.map((l) => ({ ...l })) });
+  // Before v0.26: summary rows (no Part) on Account Audits, lines on Account Audit Lines.
+  const old = AU.auditsFromSheet(saved.summary, saved.lines);
+  assert.equal(old.summary.length, 2);
+  assert.equal(old.lines.length, saved.lines.length);
+  assert.deepEqual(AU.auditsFromSheet(saved.summary, [{ Key: 'GONE', Part: 'Visit' }]).lines, [], 'lines for an audit no longer saved are dropped');
+});
 test('saving again replaces only that patient\'s audit', () => {
   const a = demoAudit();
   const r1 = AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'first' });
@@ -314,4 +333,28 @@ test('balance lines: the charges behind each balance, with PR-1 / PR-2 / PR-3 an
   const row = AU.chargeRow({ dos: TODAY, code: '99214', billed: 300, insPaid: 120, ded: 50, coins: 20, copay: 0, patPaid: 0, balance: 70, processed: true,
     lines: [{ carc: 'PR1', resp: 50 }, { carc: 'PR204', amount: -40 }, { carc: 'CO45', amount: -60 }] });
   assert.deepEqual(row.pr, [{ code: 'PR1', label: 'Deductible', amount: 50 }, { code: 'PR2', label: 'Coinsurance', amount: 20 }, { code: 'PR204', label: 'Not covered by the current plan', amount: 40 }]);
+});
+
+// v0.26: the save path on a workbook (excel mock): an old two-sheet save moves onto the one hidden Account Audits sheet.
+test('saving an audit on a workbook: one hidden Account Audits sheet; the old lines sheet is read, then removed', async () => {
+  const { createMock } = await import('./helpers/excel-mock.mjs');
+  const m = createMock(), X = m.SoharExcel;
+  const a = demoAudit();
+  const old = AU.auditRecord(a, { lasfir: 'OTHPER', mrn: '700002', key: '700002' }, { when: 'before' });
+  // Before v0.26: the summary on Account Audits, the lines on Account Audit Lines.
+  await X.writeAccountAudits(AU.AUDIT_COLS, [old.summary]);
+  await X.writeAccountAuditLines(AU.AUDIT_LINE_COLS, old.lines);
+  let saved = AU.auditsFromSheet(await X.readAccountAudits(), await X.readAccountAuditLines());
+  assert.equal(saved.lines.length, old.lines.length, 'the old lines are read');
+  // Save a new audit the way app.js saveAudit does.
+  saved = AU.mergeAudits(saved, AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'now' }));
+  await X.writeAccountAudits(AU.AUDIT_SHEET_COLS, AU.auditSheetRows(saved));
+  assert.equal(await X.dropAccountAuditLines(), true);
+  assert.ok(!m.sheetNames().includes('Account Audit Lines'), 'the old lines sheet is gone');
+  assert.equal(m.sheetVisibility('Account Audits'), 'Hidden');
+  const back = AU.auditsFromSheet(await X.readAccountAudits(), await X.readAccountAuditLines());
+  assert.deepEqual(back.summary.map((r) => r.Key).sort(), ['700001', '700002'], 'both audits on the one sheet');
+  assert.equal(back.lines.length, saved.lines.length);
+  assert.ok(back.lines.some((l) => l.Key === '700002' && l.Part === 'Payment'), 'the moved lines came along');
+  assert.equal(await X.dropAccountAuditLines(), false, 'nothing to remove the second time');
 });
