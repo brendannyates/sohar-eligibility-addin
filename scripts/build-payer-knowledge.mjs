@@ -1,5 +1,7 @@
 // Rebuilds the data block in payer-knowledge.js from the master Sohar workbook.
-//   node scripts/build-payer-knowledge.mjs "<path to Sohar_Eligibility_Template.xlsx>" [--review "<review.csv>"]
+//   node scripts/build-payer-knowledge.mjs "<path to Sohar_Eligibility_Template.xlsx>" [--review "<review.csv>"] [--approved "<reviewed.csv>"] [--fresh]
+// v0.26: additive. What is built in already stays unless the workbook has a row with the same key (the workbook wins);
+// --fresh rebuilds from the workbook alone.
 // Reads Payer Map, Payer Learning, Sohar Payers, Fee Locations, Fee Payer Map, Estimate Codes and Estimate Defaults; keeps what clears the bar in
 // payer-knowledge.js (select). The workbook stays where it is: never copy it into this repo. --review writes the fuzzy
 // High Fee Payer Map matches for a person to check (keep that file outside the repo too).
@@ -15,7 +17,7 @@ const K = require(path.join(ROOT, 'payer-knowledge.js'));
 
 const args = process.argv.slice(2);
 const opt = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : '');
-const reviewAt = opt('--review'), approvedAt = opt('--approved');
+const reviewAt = opt('--review'), approvedAt = opt('--approved'), fresh = args.includes('--fresh');
 const file = args.find((a, i) => !a.startsWith('--') && !['--review', '--approved'].includes(args[i - 1]));
 if (!file) { console.error('Usage: node scripts/build-payer-knowledge.mjs <workbook.xlsx> [--review out.csv] [--approved reviewed.csv]'); process.exit(1); }
 if ([file, reviewAt, approvedAt].some((f) => f && path.resolve(f).startsWith(ROOT + path.sep))) {
@@ -56,6 +58,18 @@ if (approvedAt) {
   for (const s of ap.skipped) console.log(`  skipped ${s.payer} on ${s.tab}: "${s.answer}"`);
 }
 
+// Keep what is built in already (keyed like payer-knowledge.js merges), with the workbook's rows first.
+if (!fresh) {
+  const keep = (now, old, key) => { const have = new Set(now.map(key)); return now.concat(old.filter((r) => !have.has(key(r)))); };
+  const lo = (v) => String(v || '').trim().toLowerCase();
+  sel.payerMap = keep(sel.payerMap, K.payerMap().map((r) => [r.nextgenPayerName, r.payerId, r.payerName, r.confidence]), (r) => lo(r[0]));
+  sel.soharPayers = keep(sel.soharPayers, K.soharPayers().map((r) => [r.payerId, r.payerName, r.aliasPayerIds, r.aliasPayerNames, r.payerGroupId]), (r) => lo(r[0]));
+  sel.feeLocations = keep(sel.feeLocations, K.feeLocations().map((r) => [r['NextGen Location'], r['Fee Tab']]), (r) => lo(r[0]));
+  sel.feePayerMap = keep(sel.feePayerMap, K.feePayerMap().map((r) => [r.Payer, r['Fee Tab'], r['Fee Payer']]), (r) => `${lo(r[0])}|${lo(r[1])}`);
+  sel.estimateCodes = keep(sel.estimateCodes, K.estimateCodes().map((r) => [r['Event keyword'], r.Codes]), (r) => lo(r[0]));
+  sel.estimateDefaults = keep(sel.estimateDefaults, K.estimateDefaults().map((r) => [r['Fee Payer'], r.Plan, r.Code, r.Deductible, r.Coinsurance, r.Copay]), (r) => `${lo(r[0])}|${lo(r[1])}|${r[2]}`);
+  feeFlags = keep(feeFlags, K.feeFlags().map((r) => [r.Payer, r['Fee Tab'], r.Flag]), (r) => `${lo(r[0])}|${lo(r[1])}`);
+}
 const rows = (list) => (list.length ? `[\n${list.map((r) => `    ${JSON.stringify(r)},`).join('\n')}\n  ]` : '[]');
 const counts = { payerMap: sel.payerMap.length, soharPayers: sel.soharPayers.length, feeLocations: sel.feeLocations.length, feePayerMap: sel.feePayerMap.length, feeFlags: feeFlags.length,
   estimateCodes: sel.estimateCodes.length, estimateDefaults: sel.estimateDefaults.length };

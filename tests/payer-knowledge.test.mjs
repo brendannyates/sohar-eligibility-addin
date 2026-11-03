@@ -84,7 +84,8 @@ test('excel: without payer knowledge loaded, the sheets read exactly as before',
 
 test('generated block: counts match, no duplicate keys, every mapped payerId is on the Sohar list, nothing person-shaped', () => {
   const map = K.payerMap(), sohar = K.soharPayers();
-  assert.deepEqual(K.META.counts, { payerMap: map.length, soharPayers: sohar.length, feeLocations: K.feeLocations().length, feePayerMap: K.feePayerMap().length, feeFlags: K.feeFlags().length });
+  assert.deepEqual(K.META.counts, { payerMap: map.length, soharPayers: sohar.length, feeLocations: K.feeLocations().length, feePayerMap: K.feePayerMap().length, feeFlags: K.feeFlags().length,
+    estimateCodes: K.estimateCodes().length, estimateDefaults: K.estimateDefaults().length });
   assert.equal(new Set(map.map((r) => r.nextgenPayerName.toLowerCase())).size, map.length);
   assert.equal(new Set(sohar.map((r) => r.payerId)).size, sohar.length);
   const ids = new Set(sohar.map((r) => r.payerId));

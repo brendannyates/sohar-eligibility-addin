@@ -10,7 +10,7 @@
   'use strict';
 
   // BEGIN GENERATED: scripts/build-payer-knowledge.mjs. Do not edit by hand.
-  const META = {"generated":"2026-10-29","counts":{"payerMap":55,"soharPayers":828,"feeLocations":12,"feePayerMap":198,"feeFlags":1}};
+  const META = {"generated":"2026-11-03","counts":{"payerMap":56,"soharPayers":828,"feeLocations":12,"feePayerMap":199,"feeFlags":1,"estimateCodes":0,"estimateDefaults":0}};
   // [NextGen Payer Name, Sohar payerId, Sohar payerName, Confidence]
   const PAYER_MAP = [
     ["AARP UHC Claims Medicare Supplement","36273","AARP","Probable"],
@@ -21,7 +21,7 @@
     ["Anthem Blue Cross Blue Card","47198","Blue Cross of California","Probable"],
     ["Anthem Blue Cross Medicare","47198","Blue Cross of California","Probable"],
     ["BS MHSA","94036","Blue Shield of California","Probable"],
-    ["Beacon Health Options","CHCBH","Carelon Behavioral Health","Probable"],
+    ["Beacon Health Options","CHCBH","Carelon Behavioral Health","Exact"],
     ["Blue Shield 65 Plus","94036","Blue Shield of California","Probable"],
     ["Blue Shield CA","94036","Blue Shield of California","Exact"],
     ["Blue Shield CA Blue Card","94036","Blue Shield of California","Probable"],
@@ -39,6 +39,7 @@
     ["Noridian Northern CA","01111","Medicare of California","Exact"],
     ["Noridian Southern CA","01111","Medicare of California","Exact"],
     ["Optum All Savers","966e07cb-85f6-7da0-31de-241257619e36","All Savers Health Plans","Exact"],
+    ["Optum Generic","87726","UnitedHealthcare","Confirmed"],
     ["Optum Health Behavioral Solutions","87726","UnitedHealthcare","Probable"],
     ["Optum Medicare Advantage","87726","UnitedHealthcare","Probable"],
     ["QMB Noridian Northern CA","01111","Medicare of California","Exact"],
@@ -924,7 +925,6 @@
     ["Aetna","Marin","Aetna"],
     ["Aetna","Oakland","Aetna"],
     ["Aetna","Orange","Aetna"],
-    ["Aetna","SF","Aetna"],
     ["BS MHSA","Burlingame","BS MHSA"],
     ["BS MHSA","Los Angeles","BS MHSA"],
     ["BS MHSA","Marin","BS MHSA"],
@@ -938,13 +938,13 @@
     ["Cigna","Marin","CIGNA"],
     ["Cigna","Oakland","CIGNA"],
     ["Cigna","Orange","CIGNA"],
-    ["Cigna","SF","CIGNA"],
     ["Humana","Austin","Humana"],
     ["Humana","Houston","Humana"],
     ["Humana","Los Angeles","Humana"],
     ["Humana","Marin","Humana"],
     ["Humana","Oakland","Humana"],
     ["Humana","Orange","Humana"],
+    ["Humana Medicare","Marin","Humana Medicare"],
     ["Humana Medicare","Oakland","Humana Medicare"],
     ["Humana Medicare","Orange","Humana Medicare"],
     ["Tricare West","Austin","TriCare West"],
@@ -1115,6 +1115,8 @@
     ["Washington Regence Blue Shield","Burlingame","Blue Shield"],
     ["Washington Regence Blue Shield","Los Angeles","Blue Shield"],
     ["Washington Regence Blue Shield","Orange","Blue Shield"],
+    ["Aetna","SF","Aetna"],
+    ["Cigna","SF","CIGNA"],
   ];
   // [Payer, Fee Tab, Flag]
   const FEE_FLAGS = [
