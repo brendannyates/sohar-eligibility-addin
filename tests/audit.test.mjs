@@ -146,7 +146,11 @@ test('codes billed against the visit\'s event', () => {
   assert.match(AU.codeChecks([v('Telepsych TMS F/U')], [ch('99214')])[0].text, /without modifier 95/);
   assert.deepEqual(AU.codeChecks([v('Telepsych TMS F/U')], [ch('99214', ['95'])]), []);
   assert.deepEqual(AU.codeChecks([v('Esketamine Treatment')], [ch('G2082')]), []);
-  assert.deepEqual(AU.expectedFor('TMS Motor Threshold').lines, [['90869']]);
+  // 90867 is the MT visit, 90869 the MTR (MT redo) (Brendan, 11/2).
+  assert.deepEqual(AU.expectedFor('TMS Motor Threshold').lines, [['90867']]);
+  assert.deepEqual(AU.expectedFor('MT').lines, [['90867']]);
+  for (const ev of ['MTR', 'MT-Redo', 'MT Redo', 'Motor Threshold Redo', 'Motor threshold re-determination']) assert.deepEqual(AU.expectedFor(ev).lines, [['90869']], ev);
+  assert.match(AU.codeChecks([v('MT-Redo')], [ch('90867')])[0].text, /expected 90869, billed 90867 \(different TMS motor threshold level\)/);
 });
 
 // ---------- payments ----------
@@ -294,4 +298,20 @@ test('the export compiles saved audits into Summary, Findings, Visits, Re-quote 
   assert.equal(wb.sheets[0].rows[1][wb.sheets[0].rows[0].indexOf('LASFIR')], 'TESPAT');
   assert.match(AU.exportName('TESPAT', new Date(2026, 10, 2)), /^Account Audit - TESPAT 2026-11-02\.xlsx$/);
   assert.match(AU.exportName('', new Date(2026, 10, 2)), /^Account Audits 2026-11-02\.xlsx$/);
+});
+
+// ---------- v0.24: each balance opens to its charges, dates of service and PR amounts ----------
+test('balance lines: the charges behind each balance, with PR-1 / PR-2 / PR-3 and any other PR code', () => {
+  const a = demoAudit();
+  const L = a.balance.lines;
+  const total = (list) => Math.round(list.reduce((s, r) => s + r.balance, 0) * 100) / 100;
+  assert.equal(total(L.processed), a.balance.processed, 'the processed list adds up to the processed balance');
+  assert.equal(L.pending.length, a.balance.pendingCount);
+  assert.ok(L.processed.every((r) => r.dos != null && r.code), 'every charge has its date of service and code');
+  assert.ok(L.processed.some((r) => r.pr.length), 'the demo has patient share on a processed charge');
+  for (const r of L.processed) for (const p of r.pr) assert.match(p.code, /^PR\d+$/);
+  assert.ok(L.unposted.every((t) => !('last4' in t)), 'no card digits');
+  const row = AU.chargeRow({ dos: TODAY, code: '99214', billed: 300, insPaid: 120, ded: 50, coins: 20, copay: 0, patPaid: 0, balance: 70, processed: true,
+    lines: [{ carc: 'PR1', resp: 50 }, { carc: 'PR204', amount: -40 }, { carc: 'CO45', amount: -60 }] });
+  assert.deepEqual(row.pr, [{ code: 'PR1', label: 'Deductible', amount: 50 }, { code: 'PR2', label: 'Coinsurance', amount: 20 }, { code: 'PR204', label: 'Not covered by the current plan', amount: 40 }]);
 });

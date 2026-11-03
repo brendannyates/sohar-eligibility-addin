@@ -502,11 +502,14 @@
   /**
    * The benefits projection: walk the booked visits (Flow rows, soonest first) and apply each visit's estimate to the
    * deductible and the OOP max, capped at what's left. fin: the patient's Benefits view row. Visits with no estimate,
-   * or a sandbox one, are left out and listed as missing. An estimate counts toward the deductible unless it equals
-   * the copay (a copay goes to the OOP max only). Null when Sohar returned neither amount.
-   * Returns {ded, oop: {total, met, left, applied, at}, rows: [{flow, est, applied, dedLeft, oopLeft, marks}], missing}.
+   * or a sandbox one, are left out and listed as missing. Copays stay in the projection: they count toward the OOP max.
+   * Whether a visit counts toward the deductible: opts.dedApplies(flowRow) when it says (true / false, from the codes'
+   * rules staff classified, v0.23); otherwise an estimate equal to the copay goes to the OOP max only and anything else
+   * counts toward both. Null when Sohar returned neither amount.
+   * Returns {ded, oop: {total, met, left, applied, at}, rows: [{flow, est, applied, dedLeft, oopLeft, marks, toward}], missing}.
    */
-  function projection(fin, flowRows) {
+  function projection(fin, flowRows, opts) {
+    const dedApplies = (opts && opts.dedApplies) || (() => null);
     if (!fin) return null;
     const dT = num(fin.Deductible), dR = num(fin['Deductible Remaining']), oT = num(fin['OOP Max']), oR = num(fin['OOP Remaining']);
     if ((dT == null || dR == null) && (oT == null || oR == null)) return null;
@@ -521,7 +524,9 @@
       const pay = c2(oop ? Math.min(est, ol) : est), marks = [];
       const fCopay = num(f.Copay);
       const isCopay = [fCopay, copay].some((c) => c != null && c > 0 && Math.abs(c - est) < 0.005);
-      if (ded && dl > 0 && !isCopay) {
+      const rule = dedApplies(f);
+      const toward = rule == null ? !isCopay : !!rule;
+      if (ded && dl > 0 && toward) {
         const a = Math.min(pay, dl); dl = c2(dl - a); ded.applied = c2(ded.applied + a);
         if (dl === 0 && !ded.at) { ded.at = f; marks.push('Deductible met at this visit'); }
       }
@@ -530,7 +535,7 @@
         if (ol === 0 && !oop.at) { oop.at = f; marks.push('OOP max met at this visit'); }
         else if (!apprMarked && ol <= oop.total * 0.2) { apprMarked = true; marks.push('OOP max approaching'); }
       }
-      rows.push({ flow: f, est, applied: pay, dedLeft: ded ? dl : null, oopLeft: oop ? ol : null, marks });
+      rows.push({ flow: f, est, applied: pay, dedLeft: ded ? dl : null, oopLeft: oop ? ol : null, marks, toward, ruled: rule != null });
     }
     return { ded, oop, rows, missing };
   }

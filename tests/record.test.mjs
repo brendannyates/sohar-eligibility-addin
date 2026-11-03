@@ -403,3 +403,11 @@ test('actionItems: most urgent first; leadLine names the worst problem', () => {
   assert.equal(REC.leadLine({ lead, fresh: REC.freshness({ report: now, sohar: now }, now), next: '11/06/2026' }).text, 'Discovery found Synth North. Run verification to get benefits before the Nov 6 visit.');
   assert.equal(REC.leadLine({ lead: ver({ 'Work Queue': 'Clear' }) }).tone, 'green');
 });
+
+test('projection: a visit\'s code rules decide whether it counts toward the deductible (v0.23)', () => {
+  const fin = { Deductible: '1000', 'Deductible Remaining': '500', 'OOP Max': '3000', 'OOP Remaining': '2000', Copay: '' };
+  const fl = [fv('11/03/2026', '100', { 'Est Codes': '99214' }), fv('11/10/2026', '100', { 'Est Codes': '90836' })];
+  const p = REC.projection(fin, fl, { dedApplies: (f) => (f['Est Codes'] === '99214' ? false : null) });
+  assert.deepEqual(p.rows.map((r) => [r.toward, r.ruled]), [[false, true], [true, false]]);
+  assert.deepEqual([p.ded.applied, p.oop.applied], [100, 200], 'copays and waived visits still count toward the OOP max');
+});

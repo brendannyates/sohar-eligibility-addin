@@ -56,7 +56,7 @@
       if (m.notice) notice(m.notice.text, m.notice.ok);
       if (!$('detail').hidden && sec === 'audit') renderDetail('[data-au-save]');
     }
-    else if (m.type === 'fee-update') { fees = m.fees || null; renderFeeBar(); renderBenefits(); refreshEstimate(); }
+    else if (m.type === 'fee-update') { fees = m.fees || null; renderFeeBar(); renderBenefits(); if (!$('detail').hidden && detailKey) renderDetail(); }
   }
   function toPane(obj) {
     if (!inOffice) { notice('Demo mode: nothing is sent to Excel.', false); return; }
@@ -304,13 +304,35 @@
     const vs = visits[per] || [], fl = rec ? rec.flow : [];
     const fresh = REC.freshness(lastUpdated || {}, new Date());
     const plans = rec ? REC.plansOf(rec.results, r) : [];
-    const proj = REC.projection(rec && rec.financial, fl);
+    // The fee context (fees.js prepareEstimates) carries the payer's per-code rules; a visit counts toward the
+    // deductible per its codes' rules when staff classified them (v0.23).
+    const fx = fees && fees.contexts ? fees.contexts[per] || null : null;
+    const proj = REC.projection(rec && rec.financial, fl, { dedApplies: (f) => dedAppliesOf(fx, codesOfVisit({ f, event: f.Event })) });
     const items = visitItems(vs, fl);
     const next = items[0] ? items[0].date : r['Next Appt'];
-    return { k, rec, r, per, prof, checks, its, vs, fl, fresh, plans, proj, items, next, marks: REC.milestones(rec ? rec.results : [r], plans),
+    return { k, rec, r, per, prof, checks, its, vs, fl, fx, fresh, plans, proj, items, next, marks: REC.milestones(rec ? rec.results : [r], plans),
       todo: REC.actionItems({ lead: r, fresh, checks, visits: vs, flow: fl, tasks: its.filter(open), proj }),
       lead: REC.leadLine({ lead: r, checks, fresh, proj, next }) };
   }
+  /** A visit's codes: the Flow estimate's codes, else the Estimate Codes row for its event. [{code, units}] */
+  function codesOfVisit(x) {
+    const fromFlow = x.f && x.f['Est Codes'] ? F.parseCodeList(x.f['Est Codes']).codes : [];
+    if (fromFlow.length) return fromFlow;
+    const ce = fees && x.event ? F.codesForEvent(x.event, fees.codeRows || []) : null;
+    return ce && !ce.none ? ce.codes : [];
+  }
+  /**
+   * Whether the visit counts toward the deductible by its codes' saved rules: true when any ruled code counts, false
+   * when every code is ruled and none counts, null (the projection's copay rule decides) otherwise.
+   */
+  function dedAppliesOf(fx, codes) {
+    const rules = (fx && fx.codeRules) || {};
+    const ruled = codes.map((c) => rules[c.code]).filter(Boolean);
+    if (ruled.some(F.countsTowardDeductible)) return true;
+    return ruled.length && ruled.length === codes.length ? false : null;
+  }
+  /** Where a code rule is saved: the payer and Sohar's plan name (v0.24, payer + plan). */
+  const ruleScope = (fx) => [fx.ruleKey, fx.rulePlan].filter(Boolean).join(' · ');
   /** Report visits (with their ticks) and Flow rows joined on date and time, soonest first. */
   function visitItems(vs, fl) {
     const key = (d, t) => { const x = C.parseDate(d); return `${x ? x.getTime() : d}|${minsOf(t)}`; };
@@ -505,12 +527,34 @@
         const f = x.f, amt = f ? num(f['Sohar Est Patient']) : null, opened = u.open === j;
         const owes = amt == null ? 'No estimate' : `${money(amt)}${REC.isSandbox(f) ? ' sandbox' : ''}`;
         const pre = !x.v ? tag('grey', 'Not on report') : preDone(x.v) ? tag('green', 'Pre-check done') : tag('amber', 'Pre-check open');
+        const da = dedAppliesOf(c.fx, codesOfVisit(x));
+        const dedTag = da === true ? tag('grey', 'Counts toward deductible') : da === false ? tag('grey', 'Deductible waived') : '';
         return `<div class="pv-vrow"><button type="button" class="pv-vhead" data-vopen="${j}" aria-expanded="${opened}">
             <span class="pv-when"><b>${esc(sd(x.date))}</b><span class="hint">${esc(x.time || '')}</span></span>
             <span class="pv-what"><span>${esc(x.event || '')}</span><span class="hint">${esc([x.loc, x.prov].filter(Boolean).join(' · '))}</span></span>
-            <span class="pv-owes">${esc(owes)}</span>${pre}</button>
-          ${opened ? `<div class="pv-vbody"><div class="pv-est">${estimateHtml(x)}</div><div class="pv-pre">${x.v ? ticksHtml(x) : '<p class="hint">Not on the NextGen report, so there is no pre-check to tick.</p>'}</div></div>` : ''}</div>`;
+            <span class="pv-owes">${esc(owes)}</span>${dedTag}${pre}</button>
+          ${opened ? `<div class="pv-vbody"><div class="pv-est">${estimateHtml(x)}${codeRulesHtml(c, x)}</div><div class="pv-pre">${x.v ? ticksHtml(x) : '<p class="hint">Not on the NextGen report, so there is no pre-check to tick.</p>'}</div></div>` : ''}</div>`;
       }).join('')}</section>`;
+  }
+  /**
+   * How each of the visit's codes counts for the payer (v0.23): the plan's charge mode, or a class staff pick here.
+   * A pick is saved for the payer on Estimate Defaults with the admin's name; estimates and the projection follow it.
+   */
+  function codeRulesHtml(c, x) {
+    const codes = codesOfVisit(x);
+    if (!codes.length) return '';
+    const head = '<div class="pv-est-h pv-codes-h">How the codes count</div>';
+    const fx = c.fx;
+    if (!fx) return `${head}<p class="hint">${fees ? 'Needs a verification with benefits for this patient.' : 'Turn on fee estimates (Config "Fee estimates") to classify codes.'}</p>`;
+    if (!fx.ruleKey) return `${head}<p class="hint">No payer for this patient, so the codes can't be classified.</p>`;
+    const mode = (F.CALC_MODES.find(([k]) => k === F.calcModeOf(fx.defaults)) || ['', 'the plan default'])[1];
+    return `${head}${codes.map((cd) => {
+      const t = (fx.codeRules || {})[cd.code], id = t ? F.codeClassOf(t) : '';
+      return `<label class="pv-crule"><b>${esc(cd.code)}</b><select data-crule="${esc(cd.code)}" aria-label="How ${esc(cd.code)} counts for ${esc(ruleScope(fx))}">
+        <option value=""${id ? '' : ' selected'}>Plan charge mode: ${esc(mode)}</option>
+        ${F.CODE_CLASSES.map((k) => `<option value="${k.id}"${k.id === id ? ' selected' : ''}>${esc(k.label)}</option>`).join('')}
+        ${id === 'custom' ? `<option value="custom" selected disabled>As typed on Estimate Defaults: ${esc(F.ruleLabel(t))}</option>` : ''}</select></label>`;
+    }).join('')}<p class="hint">Saved for ${esc(ruleScope(fx))} with your name${fx.rulePlan ? '' : ' (every plan of the payer: Sohar returned no plan name)'}. Estimates and the projection follow it.</p>`;
   }
   function estimateHtml(x) {
     const f = x.f;
@@ -550,6 +594,7 @@
         ${p.rows.length ? `<div class="pv-prows">${p.rows.map((x) => `<div class="pv-prow"><b class="pv-pdate">${esc(sd(x.flow['Appt Date']))}</b><span class="pv-pev">${esc(x.flow.Event || '')}</span>
           <b class="pv-pamt">${esc(x.applied == null ? (REC.isSandbox(x.flow) && x.est != null ? 'Sandbox' : 'No estimate') : x.est != null && x.applied < x.est ? `${money(x.applied)} (est. ${money(x.est)})` : money(x.applied))}</b>
           <span class="hint pv-pleft">${x.oopLeft == null ? '' : `OOP left ${x.applied == null ? '—' : x.oopLeft === 0 ? 'Met' : money(x.oopLeft)}`}</span>
+          ${x.ruled && x.applied != null ? `<span class="hint">${x.toward ? 'Counts toward deductible' : 'Deductible waived'}</span>` : ''}
           ${x.marks.map((l) => mark(/approaching/i.test(l) ? 'amber' : 'green', l)).join('')}</div>`).join('')}</div>` : '<p class="hint">No Sohar Flow estimates for the booked visits yet.</p>'}
         <div class="pv-psum">${[line(p.ded, 'Deductible'), line(p.oop, 'OOP max')].filter(Boolean).map((t) => `<div>${esc(t)}</div>`).join('')}
           ${missing.length ? `<div class="tone-amber"><b>Incomplete: ${esc(missing.map(missText).join(', '))} ${missing.length > 1 ? 'have' : 'has'} no estimate and ${missing.length > 1 ? 'are' : 'is'} left out.</b></div>` : c.items.length ? '<div class="hint">Every booked visit has an estimate.</div>' : ''}</div>
@@ -634,7 +679,7 @@
   // ----- Calculator: the West Coast calculator panel (renderEstimatePanel) -----
   function calcSection(c) {
     if (!fees) return '<h3 class="pv-h">Calculator</h3><p class="hint">The calculator needs fee estimates turned on: set Config "Fee estimates" to On, then drop the fee schedule or the West Coast Patient Responsibility Calculator on the Benefits tab.</p>';
-    return `<div class="pv-hrow"><h3 class="pv-h">Calculator</h3><span class="hint">Pre-filled from Sohar. Edits here are for this check only and don't change Sohar results or the Flow estimates.</span></div>
+    return `<div class="pv-hrow"><h3 class="pv-h">Calculator</h3><span class="hint">Pre-filled from Sohar and the payer's saved code rules. Pick a service and a number of visits to price care not yet booked. Edits are for this estimate only, unless you save a code's rule for the payer.</span></div>
       <section class="pv-card dgroup est" id="estPanel" data-per="${esc(c.r['Per Nbr'])}"></section>`;
   }
 
@@ -737,12 +782,25 @@
     const findings = a.anomalies.filter((x) => x.sev !== 'info' || x.confirmed), shown = s.more ? findings : findings.slice(0, 8);
     const findHtml = `<section class="pv-card pv-todo" aria-labelledby="auFindH"><div class="pv-card-h"><h3 id="auFindH">Anomalies · ${a.counts.high} high, ${a.counts.medium} medium, ${a.counts.low} low</h3>${findings.length > 8 ? `<button type="button" class="pv-link" data-au-more="1" aria-expanded="${s.more}">${s.more ? 'Show fewer' : `Show all ${findings.length}`}</button>` : ''}</div>
       ${findings.length ? `<div class="pv-scroll${s.more ? ' open' : ''}"><ul tabindex="0" aria-label="Anomalies">${shown.map((x) => `<li>${tag(x.confirmed ? 'green' : auTone[x.sev], x.confirmed ? 'Confirmed' : x.sev)}${tag('grey', x.source)}<span class="pv-todo-t">${esc(x.text)}</span><span class="pv-due">${esc(x.day != null ? sd(AU.us(x.day)) : '')}</span></li>`).join('')}</ul></div>` : '<p class="hint">No anomalies across the files added.</p>'}</section>`;
-    const balHtml = `<section class="pv-card au-bal"><h3>How the true balance adds up</h3><table class="watch"><tbody>
-        <tr><td>Processed charges, balance in Arietis</td><td class="num">${esc(money(b.processed))}</td></tr>
-        ${b.earlier ? `<tr><td class="hint">of which from earlier plan years</td><td class="num hint">${esc(money(b.earlier))}</td></tr>` : ''}
-        <tr><td>Pending claims: re-quoted patient share less what was paid on them (Arietis shows ${esc(money(b.pendingBilled))})</td><td class="num">${esc(money(b.pendingPatient))}</td></tr>
-        <tr><td>InstaMed payments not posted in Arietis</td><td class="num">${esc(b.unposted ? `-${money(b.unposted)}` : money(0))}</td></tr>
-        <tr class="au-tot"><td><b>True patient balance</b></td><td class="num"><b>${esc(money(b.true))}</b></td></tr></tbody></table>
+    // Each balance opens to the charges behind it (v0.24): date of service, code, billed, plan paid, the PR amounts
+    // (PR-1 deductible, PR-2 coinsurance, PR-3 copay, any other PR code), patient paid and balance.
+    const bl = b.lines || { processed: [], earlier: [], pending: [], unposted: [] };
+    const prText = (r) => (r.pr.length ? r.pr.map((p) => `${p.code.replace(/^PR/, 'PR-')} ${p.label}: ${money(p.amount)}`).join('\n') : 'None posted');
+    const chargeTable = (list, pending) => (!list.length ? '<p class="hint">No charges.</p>' : `<div class="au-scroll"><table class="watch au-lines"><thead><tr>
+        <th>Date of service</th><th>Code</th><th class="num">Billed</th><th class="num">Plan paid</th><th>Patient responsibility (PR)</th><th class="num">Patient paid</th><th class="num">Balance</th>${pending ? '<th class="num">Re-quote due</th>' : ''}</tr></thead>
+      <tbody>${list.map((r) => `<tr><td>${esc(AU.us(r.dos))}</td><td>${esc([r.code, ...r.mods].join(' '))}${r.desc ? `<br><span class="hint">${esc(r.desc.slice(0, 40))}</span>` : ''}</td>
+        <td class="num">${esc(money(r.billed))}</td><td class="num">${esc(money(r.insPaid))}</td><td class="au-pr">${esc(pending && !r.pr.length ? 'Not processed yet' : prText(r))}</td>
+        <td class="num">${esc(money(r.patPaid))}</td><td class="num">${esc(money(r.balance))}</td>${pending ? `<td class="num">${esc(r.quote ? money(r.quote.due) : '—')}</td>` : ''}</tr>`).join('')}</tbody></table></div>`);
+    const prSum = (list) => { const t = {}; for (const r of list) for (const p of r.pr) t[p.code] = (t[p.code] || 0) + p.amount; return Object.entries(t).map(([k, v]) => `${k.replace(/^PR/, 'PR-')} ${money(v)}`).join(' · '); };
+    const bucket = (label, amount, body, n, sub) => `<details class="au-bucket"><summary><span class="au-b-l">${esc(label)}${n ? ` <span class="hint">· ${n} charge${n === 1 ? '' : 's'}</span>` : ''}${sub ? `<br><span class="hint">${esc(sub)}</span>` : ''}</span><span class="num">${esc(amount)}</span></summary>${body}</details>`;
+    const balHtml = `<section class="pv-card au-bal"><h3>How the true balance adds up</h3><p class="hint">Open a line to see the charges behind it.</p>
+        ${bucket('Processed charges, balance in Arietis', money(b.processed), chargeTable(bl.processed), bl.processed.length, prSum(bl.processed))}
+        ${b.earlier ? bucket('of which from earlier plan years', money(b.earlier), chargeTable(bl.earlier), bl.earlier.length) : ''}
+        ${bucket(`Pending claims: re-quoted patient share less what was paid on them (Arietis shows ${money(b.pendingBilled)})`, money(b.pendingPatient), chargeTable(bl.pending, true), bl.pending.length)}
+        ${bucket('InstaMed payments not posted in Arietis', b.unposted ? `-${money(b.unposted)}` : money(0), bl.unposted.length
+          ? `<div class="au-scroll"><table class="watch au-lines"><thead><tr><th>Date</th><th>Type</th><th class="num">Amount</th></tr></thead><tbody>${bl.unposted.map((t) => `<tr><td>${esc(AU.us(t.day))}</td><td>${esc(t.type)}</td><td class="num">${esc(money(t.amount))}</td></tr>`).join('')}</tbody></table></div>`
+          : '<p class="hint">Every InstaMed payment is posted.</p>')}
+        <div class="au-tot"><b>True patient balance</b><b class="num">${esc(money(b.true))}</b></div>
       <p class="hint">Patient payments posted in Arietis: ${esc(money(b.arietisPatientPaid))}${b.instamedCollected != null ? ` · InstaMed collected in its report: ${esc(money(b.instamedCollected))}` : ''}. A re-quote is not a guarantee.</p></section>`;
     // benefits: learned from claims vs Sohar, editable
     const so = a.sohar;
@@ -935,6 +993,18 @@
     renderDetail(`input[data-pc="${c.dataset.pc}"][data-pc-item="${CSS.escape(it.id)}"]`); // badges and action items follow
     renderPrep(); renderWorklist(); // the list pills follow
   });
+  // How a code counts for the payer (Visits section): saved by the pane on Estimate Defaults; the new fee data comes back
+  // as a fee-update and the view redraws.
+  $('detail').addEventListener('change', (e) => {
+    const s = e.target.closest('select[data-crule]');
+    if (!s || !detailKey) return;
+    const r = detailRow(), fx = r && fees && fees.contexts ? fees.contexts[String(r['Per Nbr'] || '')] : null;
+    if (!fx || !fx.ruleKey) return;
+    const by = byOrAsk();
+    if (!by) { renderDetail(); return; }
+    notice(`Saving how ${s.dataset.crule} counts for ${ruleScope(fx)}…`, true);
+    toPane({ type: 'fee-code-rule', ruleKey: fx.ruleKey, plan: fx.rulePlan || '', code: s.dataset.crule, cls: s.value, by });
+  });
   function addNote() {
     const r = detailRow(), input = $('pnText');
     const k = r && keyOf(r), text = input ? input.value.replace(/\s+/g, ' ').trim() : '';
@@ -1006,7 +1076,7 @@
       box.innerHTML = `<h3>Patient responsibility calculator</h3><p class="hint">${fees.status && fees.status.loaded ? 'No estimate: no verification with benefits for this patient.' : 'Drop the fee schedule or the West Coast Patient Responsibility Calculator on the Benefits tab first.'}</p>`;
       return;
     }
-    if (!estOver || estOver.per !== per) estOver = { per, row: row || estOver?.row || {}, inputs: F.calcInputs(ctx, row), codes: (ctx.codes || []).map((c) => ({ ...c, coins: '' })) };
+    if (!estOver || estOver.per !== per) estOver = { per, row: row || estOver?.row || {}, inputs: F.calcInputs(ctx, row), codes: (ctx.codes || []).map((c) => ({ ...c, coins: '' })), service: '', visits: 1, start: 'now' };
     const b = estOver.inputs;
     const opt = (list, v) => list.map(([k, l]) => `<option value="${esc(k)}"${k === v ? ' selected' : ''}>${esc(l)}</option>`).join('');
     const numIn = (k, label) => `<label>${label}<input type="number" min="0" step="any" data-cin="${k}" value="${esc(b[k])}"></label>`;
@@ -1023,8 +1093,9 @@
       <div class="filters calcgrid${b.planType === 'self_pay' ? ' off' : ''}">${numIn('deductible', 'Annual deductible ($)')}${numIn('deductibleMet', 'Deductible met so far ($)')}${numIn('coins', 'Coinsurance, patient pays (%)')}
         ${numIn('copay', 'Copay per visit ($)')}${numIn('oopMax', 'OOP max ($, 0 = none)')}${numIn('oopMet', 'OOP met so far ($)')}</div>
       <p class="hint">Pre-filled from Sohar${b.missing.length ? `; not returned: ${esc(b.missing.join(', '))} (counted as $0)` : ''}. ${ctx.feePayer ? `A change to "How does this plan charge" is remembered for ${esc(ctx.feePayer)} (Estimate Defaults sheet); other changes are for this estimate only.` : 'No fee payer column is mapped for this patient, so changes are for this estimate only and are not remembered.'}</p>
+      ${serviceHtml(ctx)}
       <div class="estcodes">${estOver.codes.map((c, i) => `<span class="estcode"><input data-ecode="${i}" value="${esc(c.code)}" aria-label="Code ${i + 1}" maxlength="8"> x <input data-eunits="${i}" type="number" min="1" step="1" value="${esc(c.units)}" aria-label="Units for code ${i + 1}">
-        <input data-ecoins="${i}" type="number" min="0" max="100" step="any" value="${esc(c.coins)}" placeholder="coins %" aria-label="Coinsurance % for code ${i + 1} (blank: the plan's)"> <button class="link" data-edel="${i}" aria-label="Remove code ${i + 1}">Remove</button></span>`).join('')}
+        <input data-ecoins="${i}" type="number" min="0" max="100" step="any" value="${esc(c.coins)}" placeholder="coins %" aria-label="Coinsurance % for code ${i + 1} (blank: the plan's)"> ${ruleSelect(ctx, c, i)} <button class="link" data-edel="${i}" aria-label="Remove code ${i + 1}">Remove</button></span>`).join('')}
         <button class="small" data-eadd="1">Add code</button> <button class="link" data-ereset="1">Reset</button></div>
       <div id="estResults"></div>`;
     renderEstimateResults();
@@ -1034,13 +1105,95 @@
     if (!out || !estOver) return;
     const ctx = fees && fees.contexts ? fees.contexts[estOver.per] : null;
     if (!ctx) { out.innerHTML = ''; return; }
-    const b = estOver.inputs;
-    const e = F.calcPatient(ctx, fees.tables, b, estOver.codes);
+    const b = startInputs(estOver.inputs);
+    const codes = calcCodes(estOver.codes);
+    if (estOver.visits > 1) { out.innerHTML = seriesHtml(F.calcSeries(ctx, fees.tables, b, codes, estOver.visits), b); return; }
+    const e = F.calcPatient(ctx, fees.tables, b, codes);
     const col = (lbl, est) => `<div class="estcol"><h4>${lbl}: ${esc(est && est.patient != null ? F.usd(est.patient) : '—')}</h4>${est ? `<ul class="estlines">${F.calcText(est, b).map((t) => `<li>${esc(t)}</li>`).join('')}</ul>` : ''}</div>`;
     out.innerHTML = `${e.flags.length ? `<ul class="pc-items">${e.flags.map((f) => `<li class="sev-medium">${esc(f)}</li>`).join('')}</ul>` : ''}
       ${e.basis ? `<p class="hint">${esc(e.basis)}</p>` : ''}
       ${e.md || e.np ? `<div class="estcols">${e.same ? col(b.planType === 'self_pay' ? 'Self pay' : 'MD and NP', e.md) : `${col('MD', e.md)}${col('NP', e.np)}`}</div>` : ''}`;
   }
+  // ----- pricing services not yet booked (v0.23) -----
+  // A service from Estimate Codes (or typed codes), repeated over a number of future visits, from today's benefits or
+  // from where the booked visits leave them (the projection). Each code counts by its saved rule unless one is picked.
+  /** Estimate Codes rows that have codes (interventions are "none"): [{i, label, codes}]. */
+  const pricedServices = () => ((fees && fees.codeRows) || []).map((r, i) => ({ i, r, p: F.parseCodeList(r.Codes) }))
+    .filter((x) => !x.p.none && x.p.codes.length).map((x) => ({ i: x.i, label: `${x.r['Event keyword']} (${x.p.codes.map((c) => `${c.code}${c.units > 1 ? ` x${c.units}` : ''}`).join(' + ')})`, codes: x.p.codes }));
+  function serviceHtml(ctx) {
+    const opts = pricedServices();
+    return `<div class="filters calcgrid">
+        <label>Service<select data-esvc="1"><option value=""${estOver.service === '' ? ' selected' : ''}>${esc(ctx.event ? `Booked: ${ctx.event}` : 'Codes below')}</option>
+          ${opts.map((o) => `<option value="${o.i}"${String(o.i) === String(estOver.service) ? ' selected' : ''}>${esc(o.label)}</option>`).join('')}</select></label>
+        <label>Visits<input type="number" min="1" max="52" step="1" data-evisits="1" value="${esc(estOver.visits)}"></label>
+        <label>Start from<select data-estart="1"><option value="now"${estOver.start === 'now' ? ' selected' : ''}>Today's benefits</option>
+          <option value="booked"${estOver.start === 'booked' ? ' selected' : ''}>After the booked visits (projection)</option></select></label>
+      </div>`;
+  }
+  /** The rule picker on a code row: the saved rule (or the plan's charge mode), or a class for this estimate. */
+  function ruleSelect(ctx, c, i) {
+    const saved = (ctx.codeRules || {})[String(c.code || '').toUpperCase()];
+    const cur = c.cls == null ? 'saved' : c.cls;
+    const savedLabel = saved ? `Saved: ${F.ruleLabel(saved)}` : 'Plan charge mode';
+    const save = ctx.ruleKey && c.code && ((cur !== 'saved' && cur !== 'mode') || (cur === 'mode' && saved))
+      ? ` <button class="link" data-erulesave="${i}">${cur === 'mode' ? `Clear the saved rule for ${esc(ruleScope(ctx))}` : `Save for ${esc(ruleScope(ctx))}`}</button>` : '';
+    return `<select data-erule="${i}" aria-label="How code ${i + 1} counts"><option value="saved"${cur === 'saved' ? ' selected' : ''}>${esc(savedLabel)}</option>
+      ${saved ? `<option value="mode"${cur === 'mode' ? ' selected' : ''}>Plan charge mode</option>` : ''}
+      ${F.CODE_CLASSES.map((k) => `<option value="${k.id}"${cur === k.id ? ' selected' : ''}>${esc(k.label)}</option>`).join('')}</select>${save}`;
+  }
+  /** The panel's codes for fees.js: rule undefined = the saved rule, '' = the plan's charge mode, else the class's toggles. */
+  const calcCodes = (codes) => codes.map((c) => ({ ...c, rule: c.cls == null ? undefined : c.cls === 'mode' ? '' : (F.CODE_CLASSES.find((k) => k.id === c.cls) || {}).toggles }));
+  /** The inputs, moved past the booked visits when "After the booked visits" is picked. */
+  function startInputs(b) {
+    if (estOver.start !== 'booked') return b;
+    const c = detailKey ? patientCtx(detailKey) : null, p = c && c.proj;
+    if (!p) return b;
+    const add = (v, a) => (v === '' || v == null ? v : Math.round((Number(v) + (a || 0)) * 100) / 100);
+    return { ...b, deductibleMet: add(b.deductibleMet, p.ded && p.ded.applied), oopMet: add(b.oopMet, p.oop && p.oop.applied) };
+  }
+  function seriesHtml(sr, b) {
+    if (!sr.md && !sr.np) return `${sr.flags.length ? `<ul class="pc-items">${sr.flags.map((f) => `<li class="sev-medium">${esc(f)}</li>`).join('')}</ul>` : ''}`;
+    const lv = (label, x) => {
+      if (!x || x.none) return `<div class="estcol"><h4>${esc(label)}: —</h4><p class="hint">${esc((x && x.none) || 'No estimate')}</p></div>`;
+      return `<div class="estcol"><h4>${esc(label)}: ${esc(F.usd(x.total))} over ${x.visits.length} visit${x.visits.length === 1 ? '' : 's'}</h4>
+        <ul class="estlines">${x.visits.map((v) => `<li>Visit ${v.n}: ${esc(F.usd(v.patient))}${v.towardDeductible ? ` (${esc(F.usd(v.towardDeductible))} toward the deductible)` : ''}</li>`).join('')}</ul>
+        <p class="hint">${esc([!(Number(b.deductible) > 0) ? 'No deductible' : x.dedAlready ? 'Deductible already met' : x.dedAt ? `Deductible met at visit ${x.dedAt}` : 'Deductible not met by these visits',
+          !(Number(b.oopMax) > 0) ? 'No OOP max' : x.oopAlready ? 'OOP max already met' : x.oopAt ? `OOP max met at visit ${x.oopAt}` : 'OOP max not met by these visits'].join(' · '))}.</p></div>`;
+    };
+    return `${sr.flags.length ? `<ul class="pc-items">${sr.flags.map((f) => `<li class="sev-medium">${esc(f)}</li>`).join('')}</ul>` : ''}
+      ${sr.basis ? `<p class="hint">${esc(sr.basis)}${estOver.start === 'booked' ? ' · starting after the booked visits' : ''}</p>` : ''}
+      <div class="estcols">${sr.same ? lv(b.planType === 'self_pay' ? 'Self pay' : 'MD and NP', sr.md) : `${lv('MD', sr.md)}${lv('NP', sr.np)}`}</div>`;
+  }
+  $('detail').addEventListener('change', (e) => {
+    const t = e.target;
+    if (!estOver || !t.closest || !t.closest('#estPanel')) return;
+    const ctx = fees && fees.contexts ? fees.contexts[estOver.per] : null;
+    if (!ctx) return;
+    if (t.dataset.esvc) {
+      estOver.service = t.value;
+      const svc = pricedServices().find((o) => String(o.i) === t.value);
+      estOver.codes = (svc ? svc.codes : ctx.codes || []).map((c) => ({ ...c, coins: '' }));
+      renderEstimatePanel(estOver.per, estOver.row);
+    } else if (t.dataset.evisits) { estOver.visits = Math.max(1, Math.min(52, Math.floor(Number(t.value) || 1))); renderEstimateResults(); }
+    else if (t.dataset.estart) { estOver.start = t.value; renderEstimateResults(); }
+    else if (t.dataset.erule != null) {
+      const c = estOver.codes[+t.dataset.erule];
+      if (c) c.cls = t.value === 'saved' ? undefined : t.value;
+      renderEstimatePanel(estOver.per, estOver.row);
+    }
+  });
+  $('detail').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-erulesave]');
+    if (!b || !estOver) return;
+    const ctx = fees && fees.contexts ? fees.contexts[estOver.per] : null, c = estOver.codes[+b.dataset.erulesave];
+    if (!ctx || !c || !ctx.ruleKey) return;
+    const by = byOrAsk();
+    if (!by) return;
+    const cls = c.cls === 'mode' ? '' : c.cls;
+    c.cls = undefined; // after the save, the saved rule is this one
+    notice(`Saving how ${c.code} counts for ${ruleScope(ctx)}…`, true);
+    toPane({ type: 'fee-code-rule', ruleKey: ctx.ruleKey, plan: ctx.rulePlan || '', code: String(c.code).toUpperCase(), cls, by });
+  });
   function refreshEstimate() {
     const p = $('estPanel');
     if (!p || $('detail').hidden) return;
@@ -1081,7 +1234,7 @@
     if (k === 'mode') {
       // Only the charge mode is remembered, as the matching Estimate Defaults toggles, so the Benefits table agrees.
       const ctx = fees && fees.contexts ? fees.contexts[estOver.per] : null;
-      if (ctx && ctx.feePayer) toPane({ type: 'fee-defaults', feePayer: ctx.feePayer, toggles: F.CALC_MODE_TOGGLES[s.value] });
+      if (ctx && ctx.feePayer) toPane({ type: 'fee-defaults', feePayer: ctx.feePayer, toggles: F.CALC_MODE_TOGGLES[s.value], by: adminName });
     }
     renderEstimateResults();
   });
@@ -1399,8 +1552,12 @@
     let demoFees = null;
     if (F && /[?&]fees=1\b/.test(location.search)) {
       const s = F.demoSchedule();
-      const prep = F.prepareEstimates({ results: res, scheduleRows: s.rows, tabSummary: s.tabs, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: '' });
-      demoFees = { on: true, status: F.feeStatus(F.feeMetaRows('Demo fee schedule (made-up rates).xlsx', new Date().toISOString(), s), s.rows.length, new Date()), contexts: prep.contexts, tables: prep.tables, toggles: F.TOGGLES };
+      // UMR is mapped on Marin (as another patient's visit would have done) and 99214 is classified copay only for it.
+      const payerMap = [{ Payer: 'UMR', 'Fee Tab': 'Marin', 'Fee Payer': 'UMR', Confidence: 'High', Source: 'manual', 'Auto Match': '' }];
+      const defaults = F.rememberCodeRule([], 'UMR', '99214', F.CODE_CLASSES.find((k) => k.id === 'copay_waived').toggles, '10/19/2026 4:15 PM', 'Jordan Lee', 'SYNTH GOLD PPO');
+      const prep = F.prepareEstimates({ results: res, scheduleRows: s.rows, tabSummary: s.tabs, appts: [], teleKeywords: ['Tele'], cfgDefaults: F.TOGGLE_DEFAULTS, when: '', payerMap, defaults });
+      demoFees = { on: true, status: F.feeStatus(F.feeMetaRows('Demo fee schedule (made-up rates).xlsx', new Date().toISOString(), s), s.rows.length, new Date()), contexts: prep.contexts, tables: prep.tables, toggles: F.TOGGLES,
+        codeRows: prep.codeRows.map((r) => ({ 'Event keyword': r['Event keyword'], Codes: r.Codes, Note: r.Note })) };
     }
     // Clinic lists and payer learning, as the pane would send them (synthetic).
     const crow = (r, o) => Object.assign(Object.fromEntries(R.CLINIC_COLS.map((c) => [c, r[c] == null ? '' : r[c]])), { Location: r['Next Location'], 'Primary Payer': r['NextGen Payer'] }, o || {});
@@ -1428,7 +1585,8 @@
       lastUpdated: { report: new Date(Date.now() - 2 * 36e5).toISOString(), sohar: new Date(Date.now() - 3 * 864e5).toISOString(), flow: new Date().toISOString() } });
     // #patient opens the first demo patient's record (for checking the layout), #patient/<section> a section of it;
     // other hashes pick a tab.
-    const ph = location.hash.match(/^#patient(?:\/(\w+))?$/);
+    // #patient/visits/2 also opens the third visit row.
+    const ph = location.hash.match(/^#patient(?:\/(\w+))?(?:\/(\d+))?$/);
     if (ph) {
       const dk = `${keyOf(res[0])}|${res[0]['Sohar Ref']}`;
       // #patient/audit: the account audit with made-up InstaMed, Arietis and NextGen files (audit.demoRows) already in.
@@ -1442,7 +1600,18 @@
         put('appointments', 'Appointments (demo).xls', AU.parseAppointments(d.appointments));
       }
       showDetail(dk, document.querySelector(`#prepList tr[data-key="${CSS.escape(dk)}"]`));
+      if (ph[2]) uiOf(keyOf(res[0])).open = +ph[2];
       if (ph[1] && SECTIONS.some(([k]) => k === ph[1])) { sec = ph[1]; renderDetail(); }
+      // ?fees=1&svc=med management&visits=4&start=booked#patient/calc prices a service in the calculator.
+      const qs = new URLSearchParams(location.search);
+      // ?open=1#patient/audit opens every balance line.
+      if (qs.get('open') === '1') document.querySelectorAll('#detail .au-bucket').forEach((x) => { x.open = true; });
+      if (sec === 'calc' && estOver && qs.get('svc')) {
+        const svc = pricedServices().find((o) => fees.codeRows[o.i]['Event keyword'] === qs.get('svc'));
+        if (svc) { estOver.service = String(svc.i); estOver.codes = svc.codes.map((c) => ({ ...c, coins: '' })); }
+        estOver.visits = Math.max(1, Math.min(52, +qs.get('visits') || 1)); estOver.start = qs.get('start') === 'booked' ? 'booked' : 'now';
+        renderEstimatePanel(estOver.per, estOver.row);
+      }
     }
     else if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
   }

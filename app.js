@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.23.3';
+  const VERSION = '0.24.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -1823,10 +1823,25 @@
       codeRows: f.prep ? f.prep.codeRows : [] }; // codeRows (v0.23): the account audit's expected codes per event
   }
   /** "Remember these toggles for this fee payer" from the full-screen estimate panel. */
-  async function saveFeeDefaults(feePayer, toggles) {
+  async function saveFeeDefaults(feePayer, toggles, by) {
     if (!feesOn() || !feePayer) return;
     const f = await loadFeeData();
-    const rows = F.rememberDefaults(f.defaults, feePayer, toggles || {}, fmtStamp(new Date()));
+    const rows = F.rememberDefaults(f.defaults, feePayer, toggles || {}, fmtStamp(new Date()), by);
+    await X.writeFee('defaults', F.ESTIMATE_DEFAULT_COLS, rows);
+    f.defaults = rows;
+    await refreshFees();
+    await afterFeeChange();
+  }
+  /**
+   * How one code counts for a fee payer (v0.23), classified in the patient view: a CODE_CLASSES id, or '' to clear the
+   * rule. Saved on Estimate Defaults (a row with the Code) with the admin's name; every estimate then follows it.
+   */
+  async function saveCodeRule(ruleKey, code, cls, by, plan) {
+    if (!feesOn() || !ruleKey || !code) return;
+    const c = F.CODE_CLASSES.find((k) => k.id === cls);
+    if (cls && !c) throw new Error(`Unknown code class: ${cls}`);
+    const f = await loadFeeData();
+    const rows = F.rememberCodeRule(f.defaults, ruleKey, code, c ? c.toggles : null, fmtStamp(new Date()), by, plan);
     await X.writeFee('defaults', F.ESTIMATE_DEFAULT_COLS, rows);
     f.defaults = rows;
     await refreshFees();
@@ -2209,7 +2224,11 @@
       await resubmitGuarantors();
       await sendToDialog({ ...(await payload('upload')), notice: { ok: true, text: 'Guarantors added to the discovery file. Save it again on this tab.' } });
     } else if (m.type === 'fee-defaults' && feesOn()) {
-      await saveFeeDefaults(m.feePayer, m.toggles);
+      await saveFeeDefaults(m.feePayer, m.toggles, m.by);
+    } else if (m.type === 'fee-code-rule' && feesOn()) {
+      const scope = [m.ruleKey, m.plan].filter(Boolean).join(' · ');
+      try { await saveCodeRule(m.ruleKey, m.code, m.cls, m.by, m.plan); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Code rule not saved: ${e.message}` }); throw e; }
+      await sendToDialog({ type: 'notice', ok: true, text: m.cls ? `${m.code} saved for ${scope}: ${F.CODE_CLASSES.find((k) => k.id === m.cls).label}.` : `${m.code} for ${scope} follows the plan's charge mode again.` });
     }
   }
   function base64Bytes(b64) {

@@ -447,7 +447,7 @@ test('estimatePatient: MD and NP, copay default only when Sohar returned one, OO
 
 test('defaults remembered per fee payer win over Config; manual mapping edits feed the estimate', () => {
   const defaults = F.rememberDefaults([], 'Blue Shield', { deductible: 'Waived', coinsurance: 'Before deductible', copay: 'Added' }, 'now');
-  assert.deepEqual(defaults, [{ 'Fee Payer': 'Blue Shield', Deductible: 'Waived', Coinsurance: 'Before deductible', Copay: 'Added', Updated: 'now' }]);
+  assert.deepEqual(defaults, [{ 'Fee Payer': 'Blue Shield', Plan: '', Code: '', Deductible: 'Waived', Coinsurance: 'Before deductible', Copay: 'Added', Updated: 'now', By: '' }]);
   const p = prep({ defaults });
   assert.deepEqual(p.contexts[1].defaults, { deductible: 'Waived', coinsurance: 'Before deductible', copay: 'Added' }, 'remembered: copay stays Added');
   const locations = F.feeLocationRows([], ['Faraway'], [], ['Tele']).map((r) => ({ ...r, 'Fee Tab': 'Ridge' }));
@@ -619,9 +619,9 @@ test('fix: a code with no rate makes the total partial; the pane card does not c
 
 test('fix: changing one toggle remembers only that toggle; a $0-copay patient never saves Copay None for the fee payer', () => {
   const d1 = F.rememberDefaults([], 'Blue Shield', { deductible: 'Waived' }, 't1');
-  assert.deepEqual(d1, [{ 'Fee Payer': 'Blue Shield', Deductible: 'Waived', Coinsurance: '', Copay: '', Updated: 't1' }]);
+  assert.deepEqual(d1, [{ 'Fee Payer': 'Blue Shield', Plan: '', Code: '', Deductible: 'Waived', Coinsurance: '', Copay: '', Updated: 't1', By: '' }]);
   const d2 = F.rememberDefaults(d1, 'Blue Shield', { coinsurance: 'None' }, 't2');
-  assert.deepEqual(d2[0], { 'Fee Payer': 'Blue Shield', Deductible: 'Waived', Coinsurance: 'None', Copay: '', Updated: 't2' }, 'merged into the row');
+  assert.deepEqual(d2[0], { 'Fee Payer': 'Blue Shield', Plan: '', Code: '', Deductible: 'Waived', Coinsurance: 'None', Copay: '', Updated: 't2', By: '' }, 'merged into the row');
   const res = RESULTS.concat([mk({ 'Per Nbr': '8', 'Next Appt': '11/09/2026', 'Next Event': 'TMS Treatment', 'Next Location': 'Harbor Point', 'Sohar Payer': 'Blue Shield of California',
     Copay: '71.11', Coinsurance: '20%', 'Deductible Remaining': '0', 'OOP Remaining': '3091.11' })]);
   const p = prep({ results: res, defaults: d1 });
@@ -866,4 +866,86 @@ test('v0.18 fee flags: a reviewed "No, <flag>" payer on a tab is flagged on that
   assert.ok(p.contexts[1].flags.includes(`Flag for possible OON review: ${base.payer} on ${base.tab}`));
   assert.ok(!p.contexts[2].flags.some((f) => /possible OON/.test(f)), 'other patients untouched');
   assert.deepEqual(prep({ feeFlags: [{ Payer: base.payer, 'Fee Tab': 'Another Tab', Flag: 'y' }] }).contexts[1].flags, base.flags, 'other tab: no flag');
+});
+
+// ---------- v0.23: per-code rules, pricing services not yet booked ----------
+const CLS = Object.fromEntries(F.CODE_CLASSES.map((k) => [k.id, k.toggles]));
+test('code rules: saved per fee payer and code on Estimate Defaults, apart from the plan-level row', () => {
+  let rows = F.rememberDefaults([], 'Blue Shield', { deductible: 'Waived' }, 't1', 'Dana P.');
+  rows = F.rememberCodeRule(rows, 'Blue Shield', '99214', CLS.copay_waived, 't2', 'Dana P.');
+  rows = F.rememberCodeRule(rows, 'All payers', '90836', CLS.ded_coins, 't3', 'Luis R.');
+  assert.deepEqual(rows.map((r) => [r['Fee Payer'], r.Code, r.Deductible, r.By]), [['All payers', '90836', 'Applies', 'Luis R.'], ['Blue Shield', '', 'Waived', 'Dana P.'], ['Blue Shield', '99214', 'Waived', 'Dana P.']]);
+  assert.equal(F.defaultsFor(rows, 'Blue Shield', F.TOGGLE_DEFAULTS).deductible, 'Waived', 'the plan-level row, not a code row');
+  assert.deepEqual(F.codeRulesFor(rows, 'Blue Shield'), { 90836: CLS.ded_coins, 99214: CLS.copay_waived }, '"All payers" rows apply to every fee payer');
+  assert.deepEqual(F.codeRulesFor(rows, 'Acme Health'), { 90836: CLS.ded_coins });
+  assert.equal(F.codeClassOf(CLS.covered), 'covered');
+  assert.equal(F.codeClassOf({ deductible: 'Waived', coinsurance: 'Before deductible', copay: 'Added' }), 'custom');
+  assert.equal(F.rememberCodeRule(rows, 'Blue Shield', '99214', null, 't4').some((r) => r.Code === '99214'), false, 'null clears the rule');
+  // A rule typed on the sheet with a blank toggle takes the fee payer's plan default for it.
+  assert.deepEqual(F.codeRulesFor([{ 'Fee Payer': 'Blue Shield', Code: '90837', Deductible: 'Waived' }], 'Blue Shield', { ...F.TOGGLE_DEFAULTS, copay: 'None' }), { 90837: { deductible: 'Waived', coinsurance: 'After deductible', copay: 'None' } });
+});
+
+test('estimateMath and calcEstimate follow each code\'s rule; with no rules they are unchanged', () => {
+  const ben = { deductibleRemaining: '500', coinsurance: '20%', copay: '30', oopRemaining: '5000' };
+  const plain = F.estimateMath([{ code: '99214', units: 1, allowed: 100 }, { code: '90836', units: 1, allowed: 80 }], ben, F.TOGGLE_DEFAULTS);
+  assert.deepEqual([plain.deductible, plain.coinsurance, plain.copay, plain.patient], [180, 0, 30, 180], 'capped at the allowed amount, as before');
+  const ruled = F.estimateMath([{ code: '99214', units: 1, allowed: 100, toggles: CLS.copay_waived }, { code: '90836', units: 1, allowed: 80, toggles: CLS.ded_coins }], ben, F.TOGGLE_DEFAULTS);
+  assert.deepEqual([ruled.deductible, ruled.coinsurance, ruled.copay, ruled.patient, ruled.deductibleAfter], [80, 0, 30, 110, 420]);
+  assert.ok(F.estimateText(ruled).some((t) => /99214 x1 .* · Copay only, deductible waived/.test(t)));
+  const b = { planType: 'commercial', mode: 'ded_coins', deductible: 1000, deductibleMet: 500, coins: 0.2, copay: 30, oopMax: 5000, oopMet: 0 };
+  assert.equal(F.calcEstimate([{ allowed: 100 }, { allowed: 80 }], b).patient, 180, 'the mode: no copay');
+  const e = F.calcEstimate([{ allowed: 100, rule: CLS.copay_waived }, { allowed: 80, rule: CLS.ded_coins }], b);
+  assert.deepEqual([e.totalDed, e.totalCoins, e.copay, e.patient, e.towardDeductible], [80, 0, 30, 110, 80]);
+  const before = F.calcEstimate([{ allowed: 200, rule: CLS.coins_before }], { ...b, deductibleMet: 0 });
+  assert.deepEqual([before.totalDed, before.totalCoins, before.towardDeductible], [0, 40, 40], 'coinsurance before the deductible lowers it');
+  assert.equal(F.calcEstimate([{ allowed: 200, rule: CLS.covered }], b).patient, 0);
+});
+
+const calcCtx = (o) => ({ tab: 'Bayview', ok: true, feePayer: 'Acme Health', rateKey: 'Bayview|Acme Health', payer: 'Acme Health', ruleKey: 'Acme Health', flags: [], defaults: { ...F.TOGGLE_DEFAULTS },
+  benefits: { inn: {}, oon: {} }, codes: [], codeRules: {}, ...o });
+const calcTables = { rates: { 'Bayview|Acme Health': { 99214: { MD: 200, NP: 150 } } }, gross: { Bayview: {} }, cash: { Bayview: {} }, desc: { Bayview: {} } };
+test('calcSeries prices a service over future visits, carrying the deductible and OOP max forward', () => {
+  const inp = { planType: 'commercial', network: 'in', mode: 'ded_coins', deductible: 300, deductibleMet: 0, coins: 20, copay: 0, oopMax: 600, oopMet: 0 };
+  const s = F.calcSeries(calcCtx(), calcTables, inp, [{ code: '99214', units: 1 }], 4);
+  assert.deepEqual(s.md.visits.map((v) => v.patient), [200, 120, 40, 40]);
+  assert.deepEqual([s.md.total, s.md.dedAt, s.md.oopAt], [400, 2, 0]);
+  assert.deepEqual([s.np.visits.map((v) => v.patient), s.np.dedAt], [[150, 150, 30, 30], 2]);
+  const capped = F.calcSeries(calcCtx(), calcTables, { ...inp, oopMet: 400 }, [{ code: '99214', units: 1 }], 3);
+  assert.deepEqual([capped.md.visits.map((v) => v.patient), capped.md.oopAt], [[200, 0, 0], 1], 'stops at the OOP max');
+  // The saved rule for the code applies unless the row picks another; '' is the plan's charge mode.
+  const ruled = calcCtx({ codeRules: { 99214: CLS.copay_waived } });
+  assert.equal(F.calcPatient(ruled, calcTables, { ...inp, copay: 25 }, [{ code: '99214', units: 1 }]).md.patient, 25);
+  assert.equal(F.calcPatient(ruled, calcTables, { ...inp, copay: 25 }, [{ code: '99214', units: 1, rule: '' }]).md.patient, 200);
+  // An intervention's booked visit is not estimated, but another service can be priced.
+  const tms = F.calcPatient(calcCtx({ noEstimate: 'TMS (intervention): no estimate' }), calcTables, inp, [{ code: '99214', units: 1 }]);
+  assert.equal(tms.md.patient, 200);
+  assert.match(tms.flags[0], /^Booked visit: TMS \(intervention\): no estimate\. Enter codes to price another service\.$/);
+});
+
+test('prepareEstimates: an intervention patient gets the payer column when already mapped, and the payer\'s code rules', () => {
+  const payerMap = [{ Payer: 'Blue Shield of California', 'Fee Tab': 'Bayview', 'Fee Payer': 'Blue Shield', Confidence: 'High', Source: 'manual', 'Auto Match': '' }];
+  const defaults = F.rememberCodeRule([], 'Blue Shield', '99214', CLS.copay_waived, 't', 'Dana P.');
+  const p = prep({ codes: undefined, payerMap, defaults });
+  const c = p.contexts[1];
+  assert.ok(c.noEstimate, 'the TMS visit is still not estimated');
+  assert.deepEqual([c.feePayer, c.ok, c.ruleKey], ['Blue Shield', true, 'Blue Shield']);
+  assert.deepEqual(c.codeRules, { 99214: CLS.copay_waived });
+  assert.equal(p.counts.labeled, 5, 'still counted as labeled, not ready');
+  assert.deepEqual(F.estimatePatient(c, p.tables).flags, ['No estimate: TMS (intervention): no estimate; verify deductible, OOP max and insurance status']);
+});
+
+test('code rules are scoped to payer + plan: a plan rule wins over a payer-wide one, which wins over "All payers" (v0.24)', () => {
+  let rows = F.rememberCodeRule([], 'All payers', '99214', CLS.ded_coins, 't1', 'Mei T.');
+  rows = F.rememberCodeRule(rows, 'Blue Shield', '99214', CLS.all, 't2', 'Mei T.');
+  rows = F.rememberCodeRule(rows, 'Blue Shield', '99214', CLS.copay_waived, 't3', 'Mei T.', 'Synth Gold PPO');
+  assert.deepEqual(F.codeRulesFor(rows, 'Blue Shield', null, 'SYNTH GOLD PPO')['99214'], CLS.copay_waived, 'plan names match whatever their case');
+  assert.deepEqual(F.codeRulesFor(rows, 'Blue Shield', null, 'Synth Silver HMO')['99214'], CLS.all, 'another plan of the payer');
+  assert.deepEqual(F.codeRulesFor(rows, 'Acme Health', null, 'Synth Gold PPO')['99214'], CLS.ded_coins, 'another payer');
+  assert.equal(F.defaultsFor(rows, 'Blue Shield', F.TOGGLE_DEFAULTS).remembered, false, 'code rows are not plan-level defaults');
+  const cleared = F.rememberCodeRule(rows, 'Blue Shield', '99214', null, 't4', 'Mei T.', 'Synth Gold PPO');
+  assert.deepEqual(cleared.map((r) => [r['Fee Payer'], r.Plan]), [['All payers', ''], ['Blue Shield', '']], 'clearing the plan rule keeps the payer-wide one');
+  const payerMap = [{ Payer: 'Blue Shield of California', 'Fee Tab': 'Bayview', 'Fee Payer': 'Blue Shield', Confidence: 'High', Source: 'manual', 'Auto Match': '' }];
+  const res = RESULTS.map((r) => (r['Per Nbr'] === '1' ? { ...r, Plan: 'Synth Gold PPO' } : r));
+  const c = prep({ results: res, payerMap, defaults: rows }).contexts[1];
+  assert.deepEqual([c.ruleKey, c.rulePlan, c.codeRules['99214']], ['Blue Shield', 'Synth Gold PPO', CLS.copay_waived]);
 });

@@ -669,7 +669,9 @@
   // Codes "none": the event is labeled and never estimated. Interventions (TMS, motor threshold, esketamine) are checked
   // for eligibility, deductible and OOP max, not cost.
   const VERIFY_NOTE = 'verify deductible, OOP max and insurance status';
-  const TMS_NOTE = `TMS (intervention): no estimate; ${VERIFY_NOTE}`, MT_NOTE = `TMS motor threshold (intervention): no estimate; ${VERIFY_NOTE}`;
+  // MT (90867) is the motor threshold visit and MTR (90869) the MT redo (Brendan, 11/2).
+  const TMS_NOTE = `TMS (intervention): no estimate; ${VERIFY_NOTE}`, MT_NOTE = `TMS motor threshold, MT (intervention): no estimate; ${VERIFY_NOTE}`;
+  const MTR_NOTE = `TMS motor threshold redo, MTR (intervention): no estimate; ${VERIFY_NOTE}`;
   const ESK_NOTE = `Esketamine (intervention): no estimate; ${VERIFY_NOTE}`;
   const IVK_NOTE = 'IV ketamine infusion: provider visit, plus the self-pay medication (Config IVK medication rows)';
   const VISIT_30 = '30-minute visit';
@@ -677,7 +679,8 @@
   // found in the event wins; on a tie the earlier row wins.
   const ESTIMATE_CODE_SEEDS = seedRows([
     ['TMS', 'none', TMS_NOTE], ['TMS treatment', 'none', TMS_NOTE], ['TMS theta', 'none', TMS_NOTE], ['TMS mapping', 'none', TMS_NOTE],
-    ['TMS initial', 'none', TMS_NOTE], ['MT', 'none', MT_NOTE], ['motor threshold', 'none', MT_NOTE],
+    ['TMS initial', 'none', TMS_NOTE], ['MT', 'none', MT_NOTE], ['motor threshold', 'none', MT_NOTE], ['MTR', 'none', MTR_NOTE], ['MT redo', 'none', MTR_NOTE],
+    ['motor threshold redo', 'none', MTR_NOTE],
     ['esketamine', 'none', ESK_NOTE], ['esketamine follow up', 'none', ESK_NOTE], ['ESK', 'none', ESK_NOTE], ['Spravato', 'none', ESK_NOTE],
     // New patient intakes and consults.
     ['intake', '90792 x1', 'New patient intake'], ['new patient', '90792 x1', 'New patient intake'], ['new', '90792 x1', 'New patient'],
@@ -756,14 +759,18 @@
   }
 
   // ---------- defaults remembered per fee payer ----------
-  const ESTIMATE_DEFAULT_COLS = ['Fee Payer', 'Deductible', 'Coinsurance', 'Copay', 'Updated'];
+  // v0.24: a row with a Code is a per-code rule (how that code counts: deductible applies or is waived, coinsurance,
+  // copay) for the fee payer and the Plan (Sohar's plan name; blank = every plan of the payer). A row with no Code is
+  // the fee payer's plan-level default, as before. By: the admin.
+  const ESTIMATE_DEFAULT_COLS = ['Fee Payer', 'Plan', 'Code', 'Deductible', 'Coinsurance', 'Copay', 'Updated', 'By'];
+  const planRow = (x) => !str(x.Code) && !str(x.Plan);
   /**
    * Toggle defaults for a fee payer: each toggle staff chose for it (a filled cell on Estimate Defaults), else Config.
    * copayRemembered says whether staff chose the copay; if not, the copay is only added when Sohar returned one > $0.
    */
   function defaultsFor(rows, feePayer, cfgDefaults) {
     const d = { ...TOGGLE_DEFAULTS, ...(cfgDefaults || {}) };
-    const r = keyOf(feePayer) ? (rows || []).find((x) => keyOf(x['Fee Payer']) === keyOf(feePayer)) : null;
+    const r = keyOf(feePayer) ? (rows || []).find((x) => planRow(x) && keyOf(x['Fee Payer']) === keyOf(feePayer)) : null;
     if (!r) return { ...d, remembered: false, copayRemembered: false };
     return { deductible: pickToggle('deductible', r.Deductible, d.deductible), coinsurance: pickToggle('coinsurance', r.Coinsurance, d.coinsurance), copay: pickToggle('copay', r.Copay, d.copay),
       remembered: true, copayRemembered: !!str(r.Copay) };
@@ -773,13 +780,64 @@
    * other toggles keep what the row already had, and stay blank (Config default) when nothing was chosen. So a copay
    * of None shown for one $0-copay patient is never saved for the whole fee payer unless staff picked it.
    */
-  function rememberDefaults(rows, feePayer, changes, when) {
-    const old = (rows || []).find((x) => keyOf(x['Fee Payer']) === keyOf(feePayer)) || {};
+  function rememberDefaults(rows, feePayer, changes, when, by) {
+    const old = (rows || []).find((x) => planRow(x) && keyOf(x['Fee Payer']) === keyOf(feePayer)) || {};
     const ch = changes || {};
     const val = (kind, col) => (str(ch[kind]) ? pickToggle(kind, ch[kind], TOGGLE_DEFAULTS[kind]) : str(old[col]) ? pickToggle(kind, old[col], TOGGLE_DEFAULTS[kind]) : '');
-    const row = { 'Fee Payer': str(feePayer), Deductible: val('deductible', 'Deductible'), Coinsurance: val('coinsurance', 'Coinsurance'), Copay: val('copay', 'Copay'), Updated: str(when) };
-    const rest = (rows || []).filter((x) => keyOf(x['Fee Payer']) && keyOf(x['Fee Payer']) !== keyOf(feePayer));
-    return rest.concat([row]).sort((a, b) => str(a['Fee Payer']).localeCompare(str(b['Fee Payer'])));
+    const row = { 'Fee Payer': str(feePayer), Plan: '', Code: '', Deductible: val('deductible', 'Deductible'), Coinsurance: val('coinsurance', 'Coinsurance'), Copay: val('copay', 'Copay'), Updated: str(when), By: str(by) };
+    const rest = (rows || []).filter((x) => keyOf(x['Fee Payer']) && !(planRow(x) && keyOf(x['Fee Payer']) === keyOf(feePayer)));
+    return sortDefaults(rest.concat([row]));
+  }
+  const sortDefaults = (rows) => rows.sort((a, b) => str(a['Fee Payer']).localeCompare(str(b['Fee Payer'])) || str(a.Plan).localeCompare(str(b.Plan)) || str(a.Code).localeCompare(str(b.Code)));
+  /**
+   * How a code counts, as staff classify it in the patient view. Each class is the three toggles for that code's line.
+   * "After deductible" with the deductible waived means coinsurance on the whole allowed amount.
+   */
+  const CODE_CLASSES = [
+    { id: 'ded_coins', label: 'Counts toward the deductible, then coinsurance', toggles: { deductible: 'Applies', coinsurance: 'After deductible', copay: 'None' } },
+    { id: 'all', label: 'Copay plus deductible and coinsurance', toggles: { deductible: 'Applies', coinsurance: 'After deductible', copay: 'Added' } },
+    { id: 'copay_waived', label: 'Copay only, deductible waived', toggles: { deductible: 'Waived', coinsurance: 'None', copay: 'Added' } },
+    { id: 'coins_waived', label: 'Coinsurance only, deductible waived', toggles: { deductible: 'Waived', coinsurance: 'After deductible', copay: 'None' } },
+    { id: 'coins_before', label: 'Coinsurance before the deductible (counts toward it)', toggles: { deductible: 'Applies', coinsurance: 'Before deductible', copay: 'None' } },
+    { id: 'covered', label: 'Covered in full ($0)', toggles: { deductible: 'Waived', coinsurance: 'None', copay: 'None' } },
+  ];
+  /** The class id for a code's toggles, or 'custom' when typed on the sheet as another combination. */
+  function codeClassOf(t) {
+    if (!t) return '';
+    const c = CODE_CLASSES.find((k) => Object.entries(k.toggles).every(([kind, v]) => t[kind] === v));
+    return c ? c.id : 'custom';
+  }
+  /** A code rule in words: its class label, or the three toggles when it is another combination. */
+  const ruleLabel = (t) => { const c = CODE_CLASSES.find((k) => k.id === codeClassOf(t)); return c ? c.label : `deductible ${t.deductible.toLowerCase()}, coinsurance ${t.coinsurance.toLowerCase()}, copay ${t.copay.toLowerCase()}`; };
+  /** True when a code with these toggles counts toward the deductible (it applies, or coinsurance before it lowers it). */
+  const countsTowardDeductible = (t) => !!t && t.deductible === 'Applies';
+  /**
+   * Per-code rules for a fee payer and plan: {CODE: {deductible, coinsurance, copay}}. Most specific wins: "All payers"
+   * rows, then the payer's rows with no Plan, then the payer's rows for this plan. A blank toggle on a code row takes
+   * the fee payer's plan-level default.
+   */
+  function codeRulesFor(rows, feePayer, planDefaults, plan) {
+    const d = { ...TOGGLE_DEFAULTS, ...(planDefaults || {}) };
+    const out = {};
+    const take = (x) => {
+      const code = str(x.Code).toUpperCase();
+      out[code] = { deductible: pickToggle('deductible', x.Deductible, d.deductible), coinsurance: pickToggle('coinsurance', x.Coinsurance, d.coinsurance), copay: pickToggle('copay', x.Copay, d.copay) };
+    };
+    const codeRows = (rows || []).filter((x) => !planRow(x));
+    for (const x of codeRows) if (/^(all|all payers|\*)$/i.test(str(x['Fee Payer']))) take(x);
+    const mine = keyOf(feePayer) ? codeRows.filter((x) => keyOf(x['Fee Payer']) === keyOf(feePayer)) : [];
+    for (const x of mine) if (!str(x.Plan)) take(x);
+    if (keyOf(plan)) for (const x of mine) if (keyOf(x.Plan) === keyOf(plan)) take(x);
+    return out;
+  }
+  /** Save (toggles) or clear (null) one code's rule for a fee payer and plan (blank plan = every plan of the payer). */
+  function rememberCodeRule(rows, feePayer, code, toggles, when, by, plan) {
+    const c = str(code).toUpperCase();
+    const same = (x) => str(x.Code).toUpperCase() === c && keyOf(x['Fee Payer']) === keyOf(feePayer) && keyOf(x.Plan) === keyOf(plan);
+    const rest = (rows || []).filter((x) => keyOf(x['Fee Payer']) && !same(x));
+    if (!toggles) return sortDefaults(rest);
+    const t = (kind) => pickToggle(kind, toggles[kind], TOGGLE_DEFAULTS[kind]);
+    return sortDefaults(rest.concat([{ 'Fee Payer': str(feePayer), Plan: str(plan), Code: c, Deductible: t('deductible'), Coinsurance: t('coinsurance'), Copay: t('copay'), Updated: str(when), By: str(by) }]));
   }
 
   // ---------- estimate math ----------
@@ -803,26 +861,33 @@
     const t = { ...TOGGLE_DEFAULTS, ...(toggles || {}) };
     const b = ben || {};
     const missing = [];
-    const ls = (lines || []).map((l) => ({ code: l.code, units: Number(l.units) > 0 ? Number(l.units) : 1, allowed: l.allowed == null ? null : Number(l.allowed), desc: l.desc || '' }))
+    // v0.23: a line may carry its own toggles (the code's rule on Estimate Defaults); the visit's toggles otherwise.
+    // Lines go in order, each taking what is left of the deductible; the copay is added once when any line adds it.
+    const ls = (lines || []).map((l) => ({ code: l.code, units: Number(l.units) > 0 ? Number(l.units) : 1, allowed: l.allowed == null ? null : Number(l.allowed), desc: l.desc || '',
+      toggles: { ...t, ...(l.toggles || {}) }, rule: !!l.toggles }))
       .map((l) => ({ ...l, total: l.allowed == null ? null : cents(l.allowed * l.units) }));
     for (const l of ls) if (l.allowed == null) missing.push(`No rate for ${l.code}`);
     const known = ls.filter((l) => l.total != null);
     const allowed = cents(known.reduce((a, l) => a + l.total, 0));
     const ded = num(b.deductibleRemaining), coins = coinsRate(b.coinsurance), copay = num(b.copay), oop = num(b.oopRemaining);
-    const before = t.coinsurance === 'Before deductible';
-    let dedPart = 0, coinsPart = 0, copayPart = 0;
-    if (t.deductible === 'Applies' && !before) {
-      if (ded == null) missing.push('Deductible remaining');
-      else dedPart = cents(Math.min(allowed, Math.max(0, ded)));
+    const tl = known.length ? known.map((l) => l.toggles) : [t];
+    const before = tl.some((x) => x.coinsurance === 'Before deductible');
+    if (tl.some((x) => x.deductible === 'Applies' && x.coinsurance !== 'Before deductible') && ded == null) missing.push('Deductible remaining');
+    if (tl.some((x) => x.coinsurance !== 'None') && coins == null) missing.push('Coinsurance');
+    const addCopay = tl.some((x) => x.copay === 'Added');
+    if (addCopay && copay == null) missing.push('Copay');
+    let dedLeft = ded == null ? 0 : Math.max(0, ded), dedPart = 0, coinsPart = 0, copayPart = 0, towardRaw = 0;
+    for (const l of known) {
+      const lt = l.toggles, lb = lt.coinsurance === 'Before deductible';
+      const d = lt.deductible === 'Applies' && !lb ? Math.min(l.total, dedLeft) : 0;
+      dedLeft -= d;
+      const c = lt.coinsurance !== 'None' && coins != null ? coins * (lb ? l.total : l.total - d) : 0;
+      if (lb && lt.deductible === 'Applies') dedLeft = Math.max(0, dedLeft - c);
+      l.deductible = cents(d); l.coinsurance = cents(c);
+      dedPart += d; coinsPart += c; if (lt.deductible === 'Applies') towardRaw += lb ? c : d;
     }
-    if (t.coinsurance !== 'None') {
-      if (coins == null) missing.push('Coinsurance');
-      else coinsPart = cents(coins * (before ? allowed : allowed - dedPart));
-    }
-    if (t.copay === 'Added') {
-      if (copay == null) missing.push('Copay');
-      else copayPart = cents(Math.max(0, copay));
-    }
+    dedPart = cents(dedPart); coinsPart = cents(coinsPart);
+    if (addCopay && copay != null) copayPart = cents(Math.max(0, copay));
     const subtotal = cents(dedPart + coinsPart + copayPart);
     let patient = subtotal, cap = '';
     if (patient > allowed) { patient = allowed; cap = 'allowed'; }
@@ -831,7 +896,7 @@
     const oopMet = oop != null && oop <= 0;
     if (oopMet) { patient = 0; cap = 'oop'; } // OOP max already met: $0 whatever the other benefits are
     patient = Math.max(0, cents(patient));
-    const toward = t.deductible === 'Applies' ? Math.min(before ? coinsPart : dedPart, patient) : 0;
+    const toward = ls.some((l) => l.toggles.deductible === 'Applies') || (!known.length && t.deductible === 'Applies') ? Math.min(cents(towardRaw), patient) : 0;
     // No deductible, coinsurance or copay from Sohar at all (and the OOP max not met): a $0 "estimate" would mislead,
     // so only the allowed amount.
     const noBenefits = ded == null && coins == null && copay == null && !oopMet;
@@ -854,7 +919,7 @@
   /** Plain-English lines for one estimate, for the pane and the full-screen panel. */
   function estimateText(e) {
     if (!e) return [];
-    const out = e.lines.map((l) => (l.allowed == null ? `${l.code} x${l.units}: no rate on the fee schedule` : `${l.code} x${l.units} at ${usd(l.allowed)} = ${usd(l.total)}${l.desc ? ` (${l.desc.slice(0, 60)})` : ''}`));
+    const out = e.lines.map((l) => (l.allowed == null ? `${l.code} x${l.units}: no rate on the fee schedule` : `${l.code} x${l.units} at ${usd(l.allowed)} = ${usd(l.total)}${l.desc ? ` (${l.desc.slice(0, 60)})` : ''}${l.rule ? ` · ${ruleLabel(l.toggles)}` : ''}`));
     const med = e.medication;
     if (e.selfPay) {
       out.push(`Self pay: the patient pays the Cash rate, ${usd(e.allowed)}`);
@@ -870,6 +935,18 @@
       return out;
     }
     const t = e.toggles;
+    if (e.lines.some((l) => l.rule)) {
+      // Per-code rules: each code line above says how it counts, so the parts are totals.
+      out.push(`Deductible: ${usd(e.deductible)}`, `Coinsurance: ${usd(e.coinsurance)}`, `Copay: ${usd(e.copay)}`);
+      if (e.cap === 'oop') out.push(`Capped at the OOP max remaining: ${usd(e.oopRemaining)}`);
+      if (e.cap === 'allowed') out.push(`Capped at the allowed amount: ${usd(e.allowed)}`);
+      if (med) out.push(`Visit: ${usd(e.visitPatient)}`, med.text);
+      out.push(`Patient pays: ${usd(e.patient)} · Plan pays: ${usd(e.plan)}`);
+      if (e.partial) out.push(`Partial: no rate for ${e.noRate.join(', ')}, so the total leaves ${e.noRate.length === 1 ? 'it' : 'them'} out.`);
+      if (e.deductibleAfter != null) out.push(`Deductible remaining after this visit: ${usd(e.deductibleAfter)}`);
+      if (e.missing.length) out.push(`Missing: ${e.missing.join('; ')}. Estimated with what is known.`);
+      return out;
+    }
     if (t.coinsurance === 'Before deductible') out.push('Deductible: skipped (coinsurance before deductible)');
     else if (t.deductible === 'Waived') out.push('Deductible: waived');
     else out.push(`Deductible: ${usd(e.deductible)}${e.deductibleRemaining == null ? ' (remaining unknown)' : ` of ${usd(e.deductibleRemaining)} remaining`}`);
@@ -1032,8 +1109,27 @@
           }
         }
       }
+      // An intervention's visit is never estimated, but staff can still price other services for the patient in the
+      // calculator: use the payer's column when the Fee Payer Map already has it. No flag and no new map row (v0.16).
+      if (ctx.tab && ctx.payer && !ctx.selfPay && ctx.noEstimate) {
+        const row = lookupFeePayer(payerRows, ctx.payer, ctx.tab, ctx.soharPayerId);
+        const t = index.get(ctx.tab);
+        const col = row && str(row.Confidence) !== 'Low' ? resolvePayerColumn(t, row['Fee Payer']) : '';
+        if (col) {
+          ctx.feePayer = col; ctx.confidence = str(row.Confidence); ctx.rateKey = `${ctx.tab}|${col}`;
+          if (!tables.rates[ctx.rateKey]) {
+            const p = t.payers.get(col), codes = new Set([...p.MD.keys(), ...p.NP.keys()]);
+            tables.rates[ctx.rateKey] = Object.fromEntries([...codes].map((c) => [c, { MD: p.MD.get(c) ?? null, NP: p.NP.get(c) ?? null }]));
+          }
+        }
+      }
       if (ctx.tab) addTab(ctx.tab);
       const d = defaultsFor(inp.defaults, ctx.feePayer, inp.cfgDefaults);
+      // Per-code rules (v0.23), keyed on the fee payer column, else the payer's name (out of network has no column).
+      // Scoped to the payer and Sohar's plan name (v0.24, Brendan: payer + plan).
+      ctx.ruleKey = ctx.feePayer || ctx.payer;
+      ctx.rulePlan = str(ctx.cand && ctx.cand.plan);
+      ctx.codeRules = codeRulesFor(inp.defaults, ctx.ruleKey, d, ctx.rulePlan);
       const ben = ctx.oon ? ctx.benefits.oon : ctx.benefits.inn;
       // Copay is Added by default only when Sohar returned one above $0, unless staff chose Added for this fee payer.
       if (!d.copayRemembered && d.copay === 'Added' && !((num(ben.copay) || 0) > 0)) d.copay = 'None';
@@ -1075,7 +1171,8 @@
         : { lines, allowed: 0, patient: null, plan: null, selfPay: true, missing: [], partial: false, noRate, toggles, none: `No Cash rate for ${noRate.join(', ')} on ${ctx.tab}` };
       return { md: e, np: e, flags, basis: `${ctx.tab} · Self pay (Cash)` };
     }
-    const lines = (level) => codes.map(({ code, units }) => ({ code, units, desc: desc[code] || '',
+    const rules = ctx.codeRules || {};
+    const lines = (level) => codes.map(({ code, units }) => ({ code, units, desc: desc[code] || '', toggles: rules[str(code).toUpperCase()],
       allowed: ctx.oon ? (gross[code] ?? null) : (rates[code] ? rates[code][level] : null) }));
     const ben = ctx.oon ? ctx.benefits.oon : ctx.benefits.inn;
     const md = estimateMath(lines('MD'), ben, toggles), np = estimateMath(lines('NP'), ben, toggles);
@@ -1213,21 +1310,32 @@
     const useDed = !selfPay && (mode === 'ded_coins' || mode === 'all') && !b.secDed;
     const useCoins = !selfPay && (mode === 'ded_coins' || mode === 'all') && !b.secCoins;
     const useCopay = !selfPay && (mode === 'copay_only' || mode === 'all') && !b.secCoins;
-    let dedLeft = useDed ? Math.max(0, n0(b.deductible) - n0(b.deductibleMet)) : 0;
+    // v0.23: a service may carry its code's rule (s.rule: {deductible, coinsurance, copay}, Estimate Defaults). Then that
+    // line follows the rule, not the mode: deductible applies or is waived, coinsurance after / before / none, and the
+    // copay is added once for the visit when any line adds it. A secondary (Medigap) still covers what it covers.
+    const anyRule = services.some((s) => s.rule);
+    let dedLeft = !selfPay && !b.secDed && (useDed || anyRule) ? Math.max(0, n0(b.deductible) - n0(b.deductibleMet)) : 0;
     const lines = [];
-    let totalAllowed = 0, totalDed = 0, totalCoins = 0;
+    let totalAllowed = 0, totalDed = 0, totalCoins = 0, toward = 0;
     for (const s of services) {
       const allowed = s.allowed;
       totalAllowed += allowed;
       if (selfPay) { lines.push({ allowed, ded: 0, coins: 0, patient: allowed }); continue; }
-      const ded = Math.min(allowed, dedLeft);
+      const r = s.rule;
+      const lineDed = r ? r.deductible === 'Applies' && !b.secDed : useDed;
+      const lineCoins = r ? r.coinsurance !== 'None' && !b.secCoins : useCoins;
+      const lineBefore = !!r && r.coinsurance === 'Before deductible';
+      const ded = lineDed && !lineBefore ? Math.min(allowed, dedLeft) : 0;
       dedLeft -= ded;
-      const rate = useCoins ? (s.svcCoins !== null && s.svcCoins !== undefined ? s.svcCoins : n0(b.coins)) : 0;
-      const coins = (allowed - ded) * rate;
+      const rate = lineCoins ? (s.svcCoins !== null && s.svcCoins !== undefined ? s.svcCoins : n0(b.coins)) : 0;
+      const coins = (lineBefore ? allowed : allowed - ded) * rate;
+      if (lineBefore && lineDed) { const c = Math.min(coins, dedLeft); dedLeft -= c; toward += c; }
+      toward += ded;
       totalDed += ded; totalCoins += coins;
-      lines.push({ allowed, ded: cents(ded), coins: cents(coins), patient: cents(ded + coins) });
+      lines.push({ allowed, ded: cents(ded), coins: cents(coins), patient: cents(ded + coins), rule: r || null });
     }
-    const copay = useCopay ? n0(b.copay) : 0;
+    const copayOn = anyRule ? !selfPay && !b.secCoins && services.some((s) => (s.rule ? s.rule.copay === 'Added' : useCopay)) : useCopay;
+    const copay = copayOn ? n0(b.copay) : 0;
     let patient = selfPay ? totalAllowed : totalDed + totalCoins + copay;
     let allowedCapAdj = 0;
     if (patient > totalAllowed) { allowedCapAdj = totalAllowed - patient; patient = totalAllowed; }
@@ -1239,7 +1347,8 @@
       if (patient > remaining) { oopAdj = remaining - patient; patient = remaining; }
     }
     return { lines, totalAllowed: cents(totalAllowed), totalDed: cents(totalDed), totalCoins: cents(totalCoins), copay: cents(copay), allowedCapAdj: cents(allowedCapAdj),
-      oopAdj: cents(oopAdj), oopReached, patient: cents(patient), insurance: cents(totalAllowed - patient) };
+      oopAdj: cents(oopAdj), oopReached, patient: cents(patient), insurance: cents(totalAllowed - patient),
+      towardDeductible: cents(Math.min(toward, patient)) };
   }
   /**
    * Calculator inputs pre-filled for one patient: the estimate context (prepareEstimates) and the patient's Sohar result
@@ -1274,19 +1383,23 @@
    */
   function calcPatient(ctx, tables, inputs, codes) {
     const flags = (ctx.flags || []).slice();
-    if (ctx.noEstimate) return { md: null, np: null, flags: [`No estimate: ${ctx.noEstimate}`], basis: '' };
+    // An intervention's booked visit is never estimated (v0.16), but other services can be priced here (v0.23).
+    if (ctx.noEstimate) flags.unshift(`Booked visit: ${ctx.noEstimate}. Enter codes to price another service.`);
     const selfPay = inputs.planType === 'self_pay';
     if (!ctx.tab) return { md: null, np: null, flags, basis: '' };
-    if (!selfPay && !ctx.ok) return { md: null, np: null, flags, basis: '' };
+    if (!selfPay && !ctx.ok) return { md: null, np: null, flags: ctx.noEstimate && !ctx.feePayer && !ctx.oon ? [...flags, `Map ${ctx.payer || 'the payer'} to a fee column on ${ctx.tab} (Fee Payer Map) to price other services`] : flags, basis: '' };
     const list = (codes || []).filter((c) => str(c.code));
     if (!list.length) return { md: null, np: null, flags: flags.length ? flags : ['Enter codes to estimate'], basis: '' };
+    // How each code counts: the rule picked on the code row, else the fee payer's saved rule for the code, else the mode.
+    const rules = ctx.codeRules || {};
+    const ruleOf = (c) => (c.rule === '' ? null : c.rule || rules[str(c.code).toUpperCase()] || null);
     const rates = tables.rates[ctx.rateKey] || {}, gross = tables.gross[ctx.tab] || {}, cash = (tables.cash || {})[ctx.tab] || {}, desc = tables.desc[ctx.tab] || {};
     const oon = inputs.network === 'out';
     const rateOf = (code, level) => (selfPay ? cash[code] : oon ? gross[code] : rates[code] ? rates[code][level] : null) ?? null;
     const b = { ...inputs, coins: (num(inputs.coins) || 0) / 100 };
     const level = (lv) => {
       const ls = list.map((c) => { const units = Math.max(1, Number(c.units) || 1), rate = rateOf(str(c.code).toUpperCase(), lv), oc = num(c.coins);
-        return { code: str(c.code).toUpperCase(), units, desc: desc[str(c.code).toUpperCase()] || '', rate, allowed: rate == null ? null : cents(rate * units), svcCoins: oc == null ? null : Math.min(100, Math.max(0, oc)) / 100 }; });
+        return { code: str(c.code).toUpperCase(), units, desc: desc[str(c.code).toUpperCase()] || '', rate, allowed: rate == null ? null : cents(rate * units), svcCoins: oc == null ? null : Math.min(100, Math.max(0, oc)) / 100, rule: ruleOf(c) }; });
       const known = ls.filter((l) => l.allowed != null);
       if (!known.length) return { none: `No ${selfPay ? 'Cash' : oon ? 'Gross Charge' : lv} rate for ${ls.map((l) => l.code).join(', ')} on ${ctx.tab}`, lines: ls, patient: null };
       const e = calcEstimate(known, b);
@@ -1298,10 +1411,39 @@
     const basis = selfPay ? `${ctx.tab} · Self pay (Cash)` : oon ? `Out of network: Gross Charge on ${ctx.tab}` : `${ctx.tab}${ctx.locality ? ` (${ctx.locality})` : ''} · ${ctx.feePayer}`;
     return { md, np: np || md, flags, basis, same: !np };
   }
+  /**
+   * The same service repeated over `count` future visits (1-52): each visit's estimate, with what it paid toward the
+   * deductible and the OOP max carried into the next. {md, np, same, flags, basis}; each level {visits: [{n, patient,
+   * insurance, towardDeductible}], total, dedAt, oopAt} (the visit that meets each, 0 = not met), or {none}.
+   */
+  function calcSeries(ctx, tables, inputs, codes, count) {
+    const n = Math.max(1, Math.min(52, Math.floor(Number(count) || 1)));
+    const n0 = (v) => Math.max(0, Number(v) || 0);
+    const first = calcPatient(ctx, tables, inputs, codes);
+    const run = (pick) => {
+      let b = { ...inputs };
+      const visits = [];
+      let total = 0, dedAt = 0, oopAt = 0;
+      const dedOpen = n0(b.deductible) > n0(b.deductibleMet), oopOpen = n0(b.oopMax) > n0(b.oopMet);
+      for (let i = 1; i <= n; i++) {
+        const x = pick(i === 1 ? first : calcPatient(ctx, tables, b, codes));
+        if (!x || x.none || x.patient == null) return { none: (x && x.none) || 'No estimate', visits, total: null, dedAt: 0, oopAt: 0 };
+        visits.push({ n: i, patient: x.patient, insurance: x.insurance, towardDeductible: x.towardDeductible || 0 });
+        total += x.patient;
+        b = { ...b, deductibleMet: cents(n0(b.deductibleMet) + (x.towardDeductible || 0)), oopMet: cents(n0(b.oopMet) + x.patient) };
+        if (dedOpen && !dedAt && n0(b.deductibleMet) >= n0(b.deductible)) dedAt = i;
+        if (oopOpen && !oopAt && n0(b.oopMax) > 0 && n0(b.oopMet) >= n0(b.oopMax)) oopAt = i;
+      }
+      return { visits, total: cents(total), dedAt, oopAt, dedAlready: !dedOpen && n0(b.deductible) > 0, oopAlready: !oopOpen && n0(b.oopMax) > 0 };
+    };
+    if (!first.md && !first.np) return { md: null, np: null, same: true, flags: first.flags, basis: first.basis };
+    const md = run((e) => e.md), np = first.same ? md : run((e) => e.np);
+    return { md, np, same: !!first.same, flags: first.flags, basis: first.basis };
+  }
   /** Plain-English lines for one calculator estimate (one level). */
   function calcText(e, b) {
     if (!e || e.none) return e && e.none ? [e.none] : [];
-    const out = e.lines.map((l) => (l.allowed == null ? `${l.code} x${l.units}: no rate on the fee schedule` : `${l.code} x${l.units} at ${usd(l.rate)} = ${usd(l.allowed)}${l.svcCoins != null ? ` (coinsurance ${Math.round(l.svcCoins * 1000) / 10}% for this code)` : ''}${l.desc ? ` · ${l.desc.slice(0, 60)}` : ''}`));
+    const out = e.lines.map((l) => (l.allowed == null ? `${l.code} x${l.units}: no rate on the fee schedule` : `${l.code} x${l.units} at ${usd(l.rate)} = ${usd(l.allowed)}${l.svcCoins != null ? ` (coinsurance ${Math.round(l.svcCoins * 1000) / 10}% for this code)` : ''}${l.rule ? ` · ${ruleLabel(l.rule)}` : ''}${l.desc ? ` · ${l.desc.slice(0, 60)}` : ''}`));
     out.push(`Allowed: ${usd(e.totalAllowed)}`);
     if (b.planType === 'self_pay') { out.push(`Self pay: patient pays ${usd(e.patient)}`); return out; }
     out.push(`Deductible: ${usd(e.totalDed)}`, `Coinsurance: ${usd(e.totalCoins)}`, `Copay: ${usd(e.copay)}`);
@@ -1363,10 +1505,10 @@
     feeTokens, matchFeePayer, matchFeePayerSohar, payerState, tabRegions, productOf, FEE_PAYER_MAP_COLS, feePayerMapRows, lookupFeePayer, FEE_PAYER_LOG_COLS, feePayerLog,
     ESTIMATE_CODE_COLS, ESTIMATE_CODE_SEEDS, ESTIMATE_CODE_SEEDS_V1, parseCodeList, codesForEvent,
     isIvkInfusion, ivkInfusion, ivkMedication,
-    ESTIMATE_DEFAULT_COLS, defaultsFor, rememberDefaults,
+    ESTIMATE_DEFAULT_COLS, defaultsFor, rememberDefaults, CODE_CLASSES, codeClassOf, ruleLabel, countsTowardDeductible, codeRulesFor, rememberCodeRule,
     coinsRate, estimateMath, partialNote, benefitsMissing, estimateText, prepareEstimates, estimatePatient, usd,
     metaMatches, parseWarnings,
-    isCalculatorHtml, parseCalculatorHtml, mergeSchedules, CALC_PLANS, CALC_MODES, CALC_MODE_TOGGLES, calcPlanType, calcModeOf, calcEstimate, calcInputs, calcPatient, calcText,
+    isCalculatorHtml, parseCalculatorHtml, mergeSchedules, CALC_PLANS, CALC_MODES, CALC_MODE_TOGGLES, calcPlanType, calcModeOf, calcEstimate, calcInputs, calcPatient, calcSeries, calcText,
     DEMO_WORKBOOK, demoSchedule,
   };
 });
