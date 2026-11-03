@@ -288,7 +288,7 @@ test('refs: never learned from a name match; a ref for someone not in the report
   const r = gone.results.find((x) => x['Sohar Ref'] === 'q-x');
   assert.equal(r.Match, 'No match');
   assert.match(r.Action, /remembered for Per Nbr 999/);
-  assert.ok(C.buildTasks(gone.results).some((t) => t.Task === 'Find patient for Sohar result' && t['Sohar Ref'] === 'q-x'));
+  assert.ok(!C.buildTasks(gone.results).some((t) => t['Sohar Ref'] === 'q-x'), 'v0.26: no task for someone not on the report');
 });
 
 test('refs: discovery re-export with a blank id keeps its key', () => {
@@ -338,7 +338,7 @@ test('No identifiers: one Review row, no NextGen task per row; ordinary No match
   assert.equal(res.counts.noIdentifiers, 3);
   assert.equal(res.counts.unmatched, 2);
   const tasks = C.buildTasks(res.results);
-  assert.deepEqual(tasks.filter((t) => t.Task === 'Find patient for Sohar result').map((t) => t['Sohar Ref']).sort(), ['q-c', 'r-b']);
+  assert.ok(!tasks.some((t) => ['q-c', 'r-b'].includes(t['Sohar Ref'])), 'v0.26: unmatched results stay on the Worklist, not tasks');
   const rv = C.noIdentifierReviewRows(res.results);
   assert.equal(rv.length, 1);
   assert.deepEqual(Object.keys(rv[0]), C.REVIEW_COLS);

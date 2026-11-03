@@ -231,20 +231,15 @@ test('merge fixes: Coverage Differs uses the guess; guessed payers name the Next
   assert.equal(d('70')['Choose in NextGen'], 'Kaiser Medicare Northern CA');
   assert.match(d('70').Action, /^Coverage found matches NextGen\. Verify\. The Payer Map only guesses this NextGen insurance; confirm the payer mapping\./);
   assert.equal(d('72')['Choose in NextGen'], 'Not in Payer Map: Western Health Advantage (WH1)', 'no Payer Map row of any kind names it');
+  // v0.26: mapping a payer is done in the pane (step 1), not a NextGen task.
   const tasks = C.buildTasks(res.results);
-  const t70 = tasks.filter((t) => t['Per Nbr'] === '70').map((t) => t.Task);
-  assert.ok(t70.includes('Confirm payer mapping'));
-  assert.ok(!t70.includes('Add payer to Payer Map'));
-  assert.ok(tasks.some((t) => t['Per Nbr'] === '72' && t.Task === 'Add payer to Payer Map'));
-  // The Action text alone (a re-read of the Sohar Results sheet has no non-column properties) still gives the task.
-  const plain = res.results.map(({ chooseGuess, x, resultKey, ...r }) => r);
-  assert.ok(C.buildTasks(plain).some((t) => t['Per Nbr'] === '70' && t.Task === 'Confirm payer mapping'));
-  assert.ok(C.TASK_TYPES.includes('Confirm payer mapping'));
+  assert.ok(!tasks.some((t) => /payer mapping|Payer Map/.test(t.Task)));
+  assert.ok(!C.TASK_TYPES.includes('Confirm payer mapping'));
   // Review rows are guesses too: discovery finding Aetna (60054) names "Synthetic Review Plan".
   const r2 = ledgerMerge(null, [disc({ requestId: 'r-5', id: '73', resolved: '2026-10-15', responsePayerId: '60054', responsePayerName: 'Aetna' })]).res;
   const a73 = r2.results.find((r) => r['Per Nbr'] === '73' && r['Sohar payerId'] === '60054');
   assert.equal(a73['Choose in NextGen'], 'Synthetic Review Plan');
-  assert.ok(C.buildTasks(r2.results).some((t) => t['Per Nbr'] === '73' && t.Task === 'Confirm payer mapping'));
+
 });
 
 // ---------- the rollup ----------

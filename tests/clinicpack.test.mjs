@@ -46,7 +46,7 @@ const FILES = () => [
   { name: 'verification output.csv', rows: [VER_HDR, ...[
     { requestId: 'v-501', id: '900001', url: URL('v-501'), created: '2026-10-21', resolved: '2026-10-21T17:00:00Z', memberId: 'C501', payerName: 'Cigna', status: 'complete.eligible',
       firstName: 'Testa', lastName: 'Quillfeather', planName: 'SYNTH OPEN ACCESS', innCopay: '30', innTotalDeductible: '1000', innRemainingDeductible: '100', innOutOfPocket: '4000', innOutOfPocketRemaining: '2500' },
-    { requestId: 'v-502', id: '900002', url: URL('v-502'), created: '2026-10-21', resolved: '2026-10-21T18:00:00Z', memberId: 'BS502', payerName: 'Blue Shield of California', status: 'error.member.id' },
+    { requestId: 'v-502', id: '900002', url: URL('v-502'), created: '2026-10-21', resolved: '2026-10-21T18:00:00Z', memberId: 'BS502', payerName: 'Blue Shield of California', status: 'complete.ineligible' },
     { requestId: 'v-504', id: '900004', url: URL('v-504'), created: '2026-10-21', resolved: '2026-10-21T18:00:00Z', memberId: 'C504', payerName: 'Cigna', status: 'complete.eligible', innCopay: '20' },
     { requestId: 'v-999', id: '999999', created: '2026-10-21', resolved: '2026-10-21T18:00:00Z', memberId: 'Z999', payerName: 'Cigna', status: 'complete.eligible', firstName: 'Persona', lastName: 'Nomatchly' },
   ].map(ver)] },
@@ -69,8 +69,9 @@ function admin() {
   const built = C.buildPatients(IMPORT(), CFG);
   const merged = C.mergeSoharResults(IMPORT(), FILES(), CFG);
   const patients = C.applyReverifySkips(built.patients, merged.results, { ...C.REVERIFY_DEFAULTS, today: TODAY }).patients.filter((p) => p['In Scope'] === 'Yes');
-  const fresh = C.buildTasks(merged.results);
-  const fix = fresh.find((t) => t.MRN === '900002' && t.Task === 'Fix member ID in NextGen');
+  const fcfg = { today: TODAY, sfhpProviders: [], reverifyDays: 7, reverifyNewMonth: false, payerRules: RULES, locationState: LOCSTATE };
+  const fresh = C.buildTasks(merged.results, { flags: R.allFlags(patients, merged.results, fcfg), patients });
+  const fix = fresh.find((t) => t.MRN === '900002' && t.Task === 'Policy newly ineligible');
   const tasks = C.keepDone(fresh, [{ 'Task Key': fix['Task Key'], Done: 'x' }]);
   const src = {
     patients, results: merged.results, review: built.review, tasks,
@@ -174,7 +175,7 @@ test('clinicDerive: rows, flags, review, benefits and tasks equal the admin deri
   for (const now of [TODAY, new Date(2026, 9, 27, 12, 0)]) {
     const a = adminView(src, now);
     const d = R.clinicDerive(se, [], now);
-    if (now === TODAY) assert.ok(a.rows.length === 4 && a.tasks.length === 5 && a.benefits.length === 2 && a.review.length >= 5, 'the comparison is not vacuous');    assert.deepEqual(d.rows.map((r) => r.key), a.rows.map((r) => r.key), 'same patients, same order');
+    if (now === TODAY) assert.ok(a.rows.length === 4 && a.tasks.length === 4 && a.benefits.length === 2 && a.review.length >= 5, 'the comparison is not vacuous');    assert.deepEqual(d.rows.map((r) => r.key), a.rows.map((r) => r.key), 'same patients, same order');
     assert.deepEqual(norm(d.rows), norm(a.rows));
     assert.deepEqual(d.rows.map((r) => r.LASFIR), a.rows.map((r) => C.lasfir(r['Last Name'], r['First Name'])));
     assert.ok(d.rows.every((r) => r['Last Name'] === '' && r['First Name'] === '' && r.DOB === ''));
@@ -193,10 +194,10 @@ test('clinicDerive: rows, flags, review, benefits and tasks equal the admin deri
   assert.equal(r1['Deductible Status'], 'Approaching');
   assert.ok(d.review.some((r) => r.Source === 'Build' && r.MRN === '900005' && r.LASFIR === 'ONE' && /^Name /.test(r.Issue)), 'build review rows for clinic MRNs');
   const t = (mrn, task) => d.tasks.find((x) => x.MRN === mrn && x.Task === task);
-  assert.equal(t('900002', 'Fix member ID in NextGen').Done, 'x', 'Done from SE Done');
-  assert.equal(t('900002', 'Fix member ID in NextGen').doneBy, 'admin');
-  assert.equal(t('900001', 'Update benefits in NextGen').clinic, true);
-  assert.equal(t('900005', 'Resend to Sohar').clinic, false);
+  assert.equal(t('900002', 'Policy newly ineligible').Done, 'x', 'Done from SE Done');
+  assert.equal(t('900002', 'Policy newly ineligible').doneBy, 'admin');
+  assert.equal(t('900002', 'Policy newly ineligible').clinic, true);
+  assert.equal(t('900001', 'Credential for payer').clinic, false);
   assert.ok(d.tasks.every((x) => /^[A-Z]{3,6}$/.test(x.LASFIR)));
   assert.deepEqual(d.payers.map((p) => [p.payer, p.patients, !!p.learning]), [['Cigna', 3, true], ['Blue Shield CA', 1, true]]);
   assert.equal(d.counts.patients, 4);
@@ -209,7 +210,7 @@ test('clinicDerive: rows, flags, review, benefits and tasks equal the admin deri
 test('clinicDerive: Clinic Work overrides Re-verify anyway, task Done and notes; workRows upserts by Kind + Key', async () => {
   const { src, fixKey } = admin();
   const se = R.clinicUnpack((await roundTrip(R.clinicPack(LOC, src))).tables);
-  const benefitsKey = R.clinicDerive(se, [], TODAY).tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  const benefitsKey = R.clinicDerive(se, [], TODAY).tasks.find((x) => x.MRN === '900001' && x.Task === 'Credential for payer')['Task Key'];
   const t1 = new Date(Date.UTC(2026, 9, 22, 17)), t2 = new Date(Date.UTC(2026, 9, 22, 18));
   let work = R.workRows([], { Kind: 'Re-verify anyway', Key: '900001', MRN: '900001', LASFIR: 'QUITES', Value: 'On', By: 'Front desk' }, t1);
   assert.deepEqual(work, [{ Kind: 'Re-verify anyway', Key: '900001', MRN: '900001', LASFIR: 'QUITES', Value: 'On', Note: '', By: 'Front desk', When: t1.toISOString() }]);
@@ -245,7 +246,7 @@ test('clinicDerive: Clinic Work overrides Re-verify anyway, task Done and notes;
 test('clinicDerive: each task carries its Clinic Work done note; a note saved unticked leaves Done as the file has it', async () => {
   const { src, fixKey } = admin();
   const se = R.clinicUnpack((await roundTrip(R.clinicPack(LOC, src))).tables);
-  const ben = R.clinicDerive(se, [], TODAY).tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  const ben = R.clinicDerive(se, [], TODAY).tasks.find((x) => x.MRN === '900001' && x.Task === 'Credential for payer')['Task Key'];
   assert.ok(R.clinicDerive(se, [], TODAY).tasks.every((t) => t.clinicNote === ''));
   const at = new Date(Date.UTC(2026, 9, 22, 17));
   let work = R.workRows([], [
@@ -265,7 +266,7 @@ test('clinicDerive: each task carries its Clinic Work done note; a note saved un
 
 test('clinicPack: SE Done carries the admin\'s Clinic Note back to the clinic (scrubbed); clinicDerive shows it as sentNote', async () => {
   const { src, fixKey } = admin();
-  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Credential for payer')['Task Key'];
   const notes = { [fixKey]: 'asked for a photo of the card (Front desk, San Rafael, 10/21)',
     [ben]: 'called Testa Quillfeather, new card scanned (Front desk, San Rafael, 10/21)' };
   const tasks = src.tasks.map((t) => (notes[t['Task Key']] ? { ...t, 'Clinic Note': notes[t['Task Key']] } : t))
@@ -305,7 +306,7 @@ test('clinicPack: SE Done carries the admin\'s Clinic Note back to the clinic (s
 
 test('clinicPack: a Clinic Note typed by hand loses a first or last name alone and the patient\'s or guarantor\'s DOB', async () => {
   const { src } = admin();
-  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Credential for payer')['Task Key'];
   const kid = src.tasks.find((x) => x.MRN === '900003')['Task Key'];
   const notes = {
     [ben]: 'Spoke w/ Testa, DOB 4/5/1981 confirmed; QUILLFEATHER ok; born 04-05-81, Apr 5, 1981, 5 April 1981, 1981-04-05; visit 4/6/1981 stays',
@@ -331,7 +332,7 @@ test('app.js cttWorkbook: SE Done takes Done and Clinic Note from the NextGen Ta
   const app = readFileSync(new globalThis.URL('../app.js', import.meta.url), 'utf8'); // URL here is the Sohar link helper
   const cut = (from, to) => { const i = app.indexOf(from), j = app.indexOf(to, i); assert.ok(i >= 0 && j > i, `app.js has ${from}`); return app.slice(i, j); };
   const body = cut('  async function cttWorkbook(', '  async function saveCttFile(') + cut('  async function currentTasks(', '  async function copyAdminMessage(');
-  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  const ben = src.tasks.find((x) => x.MRN === '900001' && x.Task === 'Credential for payer')['Task Key'];
   // The upload's copy has no notes; since then a bring-back wrote one and the admin typed one on the sheet.
   const sheet = src.tasks.map((t) => (t['Task Key'] === ben ? { ...t, 'Clinic Note': 'called patient (Front desk, San Rafael, 10/22)' }
     : t['Task Key'] === fixKey ? { ...t, Done: 'x', 'Clinic Note': 'billing has the new card' } : t));
@@ -432,7 +433,7 @@ test('mergeClinicWork: the same file sent again changes nothing; only newer rows
 test('clinicDerive: a clinic Done brought back earlier comes in SE Done as the clinic\'s, so the clinic can still undo it', async () => {
   const { src } = admin();
   const fresh = R.clinicDerive(R.clinicUnpack((await roundTrip(R.clinicPack(LOC, src))).tables), [], TODAY);
-  const key = fresh.tasks.find((x) => x.MRN === '900001' && x.Task === 'Update benefits in NextGen')['Task Key'];
+  const key = fresh.tasks.find((x) => x.MRN === '900001' && x.Task === 'Credential for payer')['Task Key'];
   const tasks = src.tasks.map((t) => (t['Task Key'] === key ? { ...t, Done: 'Yes (clinic San Rafael)' } : t));
   const se = R.clinicUnpack((await roundTrip(R.clinicPack(LOC, { ...src, tasks }))).tables);
   const t = (work) => R.clinicDerive(se, work, TODAY).tasks.find((x) => x['Task Key'] === key);

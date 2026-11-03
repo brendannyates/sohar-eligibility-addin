@@ -304,7 +304,7 @@ test('mergeSoharResults keeps both verification rows and marks the better one', 
   const tr = C.trackerExport(res.results, '');
   assert.equal(tr.rows.find((r) => r['Per Nbr'] === '52')['Sohar Ref'], 'q-2', 'tracker export uses the eligible insurance');
   const tasks = C.buildTasks(res.results).filter((t) => t['Per Nbr'] === '52').map((t) => t.Task).sort();
-  assert.deepEqual(tasks, ['Update benefits in NextGen', 'Update insurance in NextGen'], 'no task for the superseded row');
+  assert.deepEqual(tasks, ['Update insurance in NextGen'], 'no task for the superseded row (and none restating benefits)');
   for (const r of res.results) assert.deepEqual(Object.keys(r).filter((k) => !['x', 'resultKey', 'chooseGuess', 'oon', 'key'].includes(k)).sort(), [...RESULTS_MEMORY].sort());
 });
 

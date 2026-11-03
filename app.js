@@ -1528,7 +1528,7 @@
     // Pills and Secondary Payer ride along for full screen (Secondary Payer is not written to the Results sheet).
     res.results = res.results.map((r) => ({ ...r, Pills: pillsFor(C.keyOf(r)), 'Secondary Payer': secBy.get(String(r['Per Nbr'])) || '' }));
     await X.writeResults(C.RESULTS_COLS.concat('Pills'), res.results);
-    const tasks = C.keepDone(C.buildTasks(res.results), await X.readTasks());
+    const tasks = C.keepDone(C.buildTasks(res.results, await taskOpts(res.results)), await X.readTasks());
     step(`Writing ${tasks.length} rows to the NextGen Tasks sheet…`);
     await X.writeTasks(C.TASK_COLS, tasks);
     if (res.perToKey) state.perToKey = res.perToKey;
@@ -2058,6 +2058,22 @@
     }
     state.profileCache = { results: state.results, rows: state.rows, out };
     return out;
+  }
+  /**
+   * What buildTasks needs beyond the results (v0.26): the flags, the report's patients, and each patient's worst
+   * guarantor vs subscriber check (patient key -> check), so Medi-Cal, SFHP, credential and guarantor problems are tasks.
+   */
+  async function taskOpts(results) {
+    const guarantor = new Map();
+    const rank = { high: 3, medium: 2, low: 1 };
+    try {
+      const prof = await patientProfiles();
+      for (const r of results) {
+        const k = C.keyOf(r), cs = (prof[String(r['Per Nbr'] || '')] || {}).checks || [];
+        for (const c of cs) if (k && (rank[c.severity] || 0) > (rank[(guarantor.get(k) || {}).severity] || 0)) guarantor.set(k, c);
+      }
+    } catch (e) { console.error('guarantor checks for tasks', e); }
+    return { flags: state.flags || new Map(), guarantor, patients: inScopePatients() };
   }
   /** Today as MM/DD/YYYY in local time (an evening in the US is still today, not tomorrow's UTC date). */
   const localToday = () => { const d = new Date(); return `${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')}/${d.getFullYear()}`; };
