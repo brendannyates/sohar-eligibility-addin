@@ -1120,6 +1120,10 @@
   const FEE_FLAGS = [
     ["Anthem Medicaid of Ohio","SF","Flag for possible OON review"],
   ];
+  // [Event keyword, Codes]
+  const ESTIMATE_CODES = [];
+  // [Fee Payer, Plan, Code, Deductible, Coinsurance, Copay]
+  const ESTIMATE_DEFAULTS = [];
   // END GENERATED
 
   const str = (v) => (v == null ? '' : String(v).trim());
@@ -1143,7 +1147,10 @@
 
   /**
    * Sheet rows (objects keyed by the workbook headers) -> the built-in data block plus a review list.
-   * tables: {payerMap, payerLearning, soharPayers, feeLocations, feePayerMap}. Notes and free text are never copied.
+   * tables: {payerMap, payerLearning, soharPayers, feeLocations, feePayerMap, estimateCodes, estimateDefaults}. Notes,
+   * free text and who saved a row are never copied.
+   * v0.26 (Brendan, 11/3: once something is learned, exact or modified, write it into the code): Estimate Codes rows a
+   * person edited (not the seeds) and every saved per-code / plan-level Estimate Defaults choice are built in too.
    * Fee Payer Map: High rows whose payer name is the fee column; the other High rows go to review (fuzzy matches).
    */
   function select(tables) {
@@ -1183,7 +1190,23 @@
       if (keyOf(r.Payer) === keyOf(r['Fee Payer'])) feePayerMap.push([str(r.Payer), str(r['Fee Tab']), str(r['Fee Payer'])]);
       else review.push({ Payer: str(r.Payer), 'Fee Tab': str(r['Fee Tab']), 'Fee Payer': str(r['Fee Payer']), 'Auto Match': str(r['Auto Match']), Note: str(r.Note) });
     }
-    return { payerMap, soharPayers, feeLocations, feePayerMap, review };
+    const kws = new Set();
+    const estimateCodes = [];
+    for (const r of t.estimateCodes || []) {
+      const k = low(r['Event keyword']);
+      if (!k || kws.has(k) || !str(r.Codes) || low(r.Source) === 'default, review') continue;
+      kws.add(k);
+      estimateCodes.push([str(r['Event keyword']), str(r.Codes)]);
+    }
+    const dk = new Set();
+    const estimateDefaults = [];
+    for (const r of t.estimateDefaults || []) {
+      const k = `${low(r['Fee Payer'])}|${low(r.Plan)}|${str(r.Code)}`;
+      if (!str(r['Fee Payer']) || dk.has(k)) continue;
+      dk.add(k);
+      estimateDefaults.push([str(r['Fee Payer']), str(r.Plan), str(r.Code), str(r.Deductible), str(r.Coinsurance), str(r.Copay)]);
+    }
+    return { payerMap, soharPayers, feeLocations, feePayerMap, estimateCodes, estimateDefaults, review };
   }
 
   /**
@@ -1231,9 +1254,23 @@
   const mergeFeeLocations = (sheet) => merge(sheet, feeLocations(), (r) => low(r['NextGen Location']));
   // A Sohar payerId-only Fee Payer Map row (blank Payer) has no built-in twin, so it is always kept.
   const mergeFeePayerMap = (sheet) => merge(sheet, feePayerMap(), (r) => (str(r.Payer) ? `${low(r.Payer)}|${low(r['Fee Tab'])}` : `#${str(r['Sohar payerId'])}|${low(r['Fee Tab'])}`));
+  /** Estimate Codes / Estimate Defaults rows keyed by the sheet headers (v0.26), Source "built in". */
+  const estimateCodes = () => ESTIMATE_CODES.map(([kw, codes]) => ({ 'Event keyword': kw, Codes: codes, Source: 'built in', Note: NOTE }));
+  const estimateDefaults = () => ESTIMATE_DEFAULTS.map(([fp, plan, code, ded, coins, copay]) =>
+    ({ 'Fee Payer': fp, Plan: plan, Code: code, Deductible: ded, Coinsurance: coins, Copay: copay, Updated: '', By: NOTE }));
+  /**
+   * Estimate Codes: the sheet's rows, then built-in rows for keywords it doesn't have. An empty sheet means "the seeds":
+   * the built-in rows go over the seeds (pass fees.ESTIMATE_CODE_SEEDS).
+   */
+  const kwOf = (r) => low(r['Event keyword']);
+  const mergeEstimateCodes = (sheet, seeds) => ((sheet || []).some(kwOf) ? merge(sheet, estimateCodes(), kwOf) : merge(estimateCodes(), seeds || [], kwOf));
+  const mergeEstimateDefaults = (sheet) => merge(sheet, estimateDefaults(), (r) => `${low(r['Fee Payer'])}|${low(r.Plan)}|${str(r.Code)}`);
+  /** Rows to save on a sheet: without the built-in ones (they live in the code). */
+  const sheetOnly = (rows) => (rows || []).filter((r) => r.Source !== 'built in' && r.By !== NOTE && !r.builtIn);
   /** Fee flags from the review (e.g. "Flag for possible OON review"): {Payer, 'Fee Tab', Flag}, for fees.prepareEstimates. */
   const feeFlags = () => FEE_FLAGS.map(([payer, tab, flag]) => ({ Payer: payer, 'Fee Tab': tab, Flag: flag }));
 
   return { META, BAR: { keep: [...KEEP], needEvidence: [...NEED_EVIDENCE], minAgreed: MIN_AGREED }, qualifies, select, approved,
-    payerMap, soharPayers, feeLocations, feePayerMap, feeFlags, mergePayerMap, mergeSoharPayers, mergeFeeLocations, mergeFeePayerMap };
+    payerMap, soharPayers, feeLocations, feePayerMap, feeFlags, estimateCodes, estimateDefaults, mergePayerMap, mergeSoharPayers, mergeFeeLocations,
+    mergeFeePayerMap, mergeEstimateCodes, mergeEstimateDefaults, sheetOnly };
 });

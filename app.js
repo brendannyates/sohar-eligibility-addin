@@ -1737,13 +1737,17 @@
     const prep = F.prepareEstimates({
       soharPayers: state.soharPayers || [], locationState: (state.cfg && state.cfg.locationState) || {}, feeRules: state.cfg.fees,
       // Info saved for a different upload (half-failed save) must not lend its Locations to these rows.
-      results: rs, scheduleRows: f.schedule, tabSummary: F.metaMatches(f.meta, f.schedule.length) ? F.readMeta(f.meta).tabSummary : [], locations: f.locations, homes: f.homes,
-      payerMap: f.payerMap, payerLog: f.payerLog, codes: f.codes, defaults: f.defaults, appts: importAppts(),
+      // v0.26: what was learned or reviewed is built in (payer-knowledge.js); the sheets hold only what came after.
+      results: rs, scheduleRows: f.schedule, tabSummary: F.metaMatches(f.meta, f.schedule.length) ? F.readMeta(f.meta).tabSummary : [],
+      locations: PK ? PK.mergeFeeLocations(f.locations) : f.locations, homes: f.homes,
+      payerMap: PK ? PK.mergeFeePayerMap(f.payerMap) : f.payerMap, payerLog: f.payerLog,
+      codes: PK ? PK.mergeEstimateCodes(f.codes, F.ESTIMATE_CODE_SEEDS) : f.codes, defaults: PK ? PK.mergeEstimateDefaults(f.defaults) : f.defaults, appts: importAppts(),
       feeFlags: PK ? PK.feeFlags() : [],
       teleKeywords: (state.cfg && state.cfg.teleKeywords) || ['Tele'], cfgDefaults: state.cfg.fees.defaults, when: fmtStamp(new Date()),
       pers: C.benefitsView(rs).rows.map((r) => r['Per Nbr']),
     });
-    const save = async (kind, cols, rows, label) => {
+    const save = async (kind, cols, all, label) => {
+      const rows = PK ? PK.sheetOnly(all) : all; // built-in rows stay in the code, off the sheet
       if (sameRows(cols, rows, f[kind])) return;
       try { await X.writeFee(kind, cols, rows); f[kind] = rows; } catch (e) { console.error(e); f.warn.push(`${label} not saved: ${e.message}`); }
     };

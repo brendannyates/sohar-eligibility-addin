@@ -1,6 +1,6 @@
 // Rebuilds the data block in payer-knowledge.js from the master Sohar workbook.
 //   node scripts/build-payer-knowledge.mjs "<path to Sohar_Eligibility_Template.xlsx>" [--review "<review.csv>"]
-// Reads Payer Map, Payer Learning, Sohar Payers, Fee Locations and Fee Payer Map; keeps what clears the bar in
+// Reads Payer Map, Payer Learning, Sohar Payers, Fee Locations, Fee Payer Map, Estimate Codes and Estimate Defaults; keeps what clears the bar in
 // payer-knowledge.js (select). The workbook stays where it is: never copy it into this repo. --review writes the fuzzy
 // High Fee Payer Map matches for a person to check (keep that file outside the repo too).
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -41,7 +41,7 @@ const table = (name) => {
   return s.rows.slice(1).filter((r) => (r || []).some((c) => str(c))).map((r) => Object.fromEntries(h.map((k, i) => [k, r[i] == null ? '' : r[i]])));
 };
 const sel = K.select({ payerMap: table('Payer Map'), payerLearning: table('Payer Learning'), soharPayers: table('Sohar Payers'),
-  feeLocations: table('Fee Locations'), feePayerMap: table('Fee Payer Map') });
+  feeLocations: table('Fee Locations'), feePayerMap: table('Fee Payer Map'), estimateCodes: table('Estimate Codes'), estimateDefaults: table('Estimate Defaults') });
 
 // --approved: the review list after a person filled "OK to build in?" (Yes / No / No, <flag> / a column name).
 let feeFlags = [];
@@ -57,7 +57,8 @@ if (approvedAt) {
 }
 
 const rows = (list) => (list.length ? `[\n${list.map((r) => `    ${JSON.stringify(r)},`).join('\n')}\n  ]` : '[]');
-const counts = { payerMap: sel.payerMap.length, soharPayers: sel.soharPayers.length, feeLocations: sel.feeLocations.length, feePayerMap: sel.feePayerMap.length, feeFlags: feeFlags.length };
+const counts = { payerMap: sel.payerMap.length, soharPayers: sel.soharPayers.length, feeLocations: sel.feeLocations.length, feePayerMap: sel.feePayerMap.length, feeFlags: feeFlags.length,
+  estimateCodes: sel.estimateCodes.length, estimateDefaults: sel.estimateDefaults.length };
 const block = [
   '  // BEGIN GENERATED: scripts/build-payer-knowledge.mjs. Do not edit by hand.',
   `  const META = ${JSON.stringify({ generated: new Date().toISOString().slice(0, 10), counts })};`,
@@ -71,6 +72,10 @@ const block = [
   `  const FEE_PAYER_MAP = ${rows(sel.feePayerMap)};`,
   '  // [Payer, Fee Tab, Flag]',
   `  const FEE_FLAGS = ${rows(feeFlags)};`,
+  '  // [Event keyword, Codes]',
+  `  const ESTIMATE_CODES = ${rows(sel.estimateCodes)};`,
+  '  // [Fee Payer, Plan, Code, Deductible, Coinsurance, Copay]',
+  `  const ESTIMATE_DEFAULTS = ${rows(sel.estimateDefaults)};`,
   '  // END GENERATED',
 ].join('\n');
 

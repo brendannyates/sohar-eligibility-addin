@@ -115,3 +115,32 @@ test('v0.18 approved review list: Yes keeps the match, a column name must be on 
 test('generated fee flags read back in the shape fees.prepareEstimates takes', () => {
   for (const f of K.feeFlags()) { assert.ok(f.Payer && f['Fee Tab'] && f.Flag); }
 });
+
+// ---------- v0.26: edited estimate codes and saved code rules are built in too ----------
+const F = require('../fees.js');
+test('select builds in edited Estimate Codes and every Estimate Defaults choice, never notes or who saved them', () => {
+  const sel = K.select({
+    estimateCodes: [{ 'Event keyword': 'Telepsych', Codes: '99214 x1', Source: 'default, review', Note: 'seed' },
+      { 'Event keyword': 'Synthetic Group Visit', Codes: '90853 x1', Source: 'manual', Note: 'typed by Dana P.' }],
+    estimateDefaults: [{ 'Fee Payer': 'Acme Synthetic', Plan: 'GOLD PPO', Code: '99214', Deductible: 'Waived', Coinsurance: 'None', Copay: 'Added', Updated: 't', By: 'Dana P.' },
+      { 'Fee Payer': 'Acme Synthetic', Plan: '', Code: '', Deductible: 'Applies', Coinsurance: 'After deductible', Copay: 'None', By: 'Sam O.' }],
+  });
+  assert.deepEqual(sel.estimateCodes, [['Synthetic Group Visit', '90853 x1']], 'seed rows stay with the seeds');
+  assert.deepEqual(sel.estimateDefaults, [['Acme Synthetic', 'GOLD PPO', '99214', 'Waived', 'None', 'Added'], ['Acme Synthetic', '', '', 'Applies', 'After deductible', 'None']]);
+  assert.doesNotMatch(JSON.stringify(sel.estimateCodes.concat(sel.estimateDefaults)), /Dana|Sam|typed/);
+});
+
+test('merges: an empty Estimate Codes sheet is the seeds with built-in rows over them; the sheet wins; built-in rows never go back on a sheet', () => {
+  const seeds = F.ESTIMATE_CODE_SEEDS;
+  const kw = (rows) => rows.map((r) => r['Event keyword'].toLowerCase());
+  const fromSeeds = K.mergeEstimateCodes([], seeds);
+  assert.ok(kw(fromSeeds).includes('telepsych'), 'the seeds are there');
+  assert.deepEqual(K.mergeEstimateCodes([{ 'Event keyword': 'X', Codes: '1' }], seeds).length, 1 + K.estimateCodes().length, 'a sheet replaces the seeds');
+  const rows = [{ Payer: 'A', 'Fee Tab': 'T', Source: 'manual' }, { Payer: 'B', 'Fee Tab': 'T', Source: 'built in' }, { 'Fee Payer': 'C', By: 'Built in (payer knowledge)' }];
+  assert.deepEqual(K.sheetOnly(rows), [rows[0]]);
+  // fees keeps a built-in Fee Payer Map row as it is instead of matching it again.
+  const index = new Map([['T', { payers: new Map([['Acme', {}], ['Acme Gold', {}]]) }]]);
+  const out = F.feePayerMapRows([{ Payer: 'Acme Gold Plan', 'Fee Tab': 'T', 'Fee Payer': 'Acme Gold', Confidence: 'High', Source: 'built in', 'Auto Match': 'Acme Gold' }], [], index, new Map(), {});
+  assert.deepEqual([out[0]['Fee Payer'], out[0].Source, out[0].Confidence], ['Acme Gold', 'built in', 'High']);
+  assert.ok(K.mergeEstimateDefaults([]).every((r) => r.By === 'Built in (payer knowledge)'));
+});

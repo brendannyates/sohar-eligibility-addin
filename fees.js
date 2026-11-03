@@ -384,6 +384,8 @@
       if (!k || out.has(k)) continue;
       const v = str(r[vc]), a = str(r['Auto Match']);
       if (/^manual/i.test(str(r.Source)) || v !== a) out.set(k, { [kc]: str(r[kc]), [vc]: v, Source: 'manual', 'Auto Match': a, Note: str(r.Note) });
+      // Built in (payer-knowledge.js, v0.26): reviewed and compiled, so kept as it is (and never saved on the sheet).
+      else if (/^built in$/i.test(str(r.Source))) out.set(k, { [kc]: str(r[kc]), [vc]: v, Source: 'built in', 'Auto Match': a, Note: str(r.Note) });
       else out.set(k, { [kc]: str(r[kc]), [vc]: '', Source: 'auto', 'Auto Match': '', Note: '', stale: true });
     }
     for (const { label } of keys) { const k = keyOf(label); if (k && !out.has(k)) out.set(k, { [kc]: str(label), [vc]: '', Source: 'auto', 'Auto Match': '', Note: '', stale: true }); }
@@ -590,6 +592,8 @@
       if (!keyOf(r.Payer) || out.has(k)) continue;
       const v = str(r['Fee Payer']), a = str(r['Auto Match']);
       if (isManual(r)) out.set(k, { Payer: str(r.Payer), 'Sohar payerId': str(r['Sohar payerId']), 'Fee Tab': str(r['Fee Tab']), Region: str(r.Region), 'Fee Payer': v, Confidence: 'Manual', Source: 'manual', 'Auto Match': a, Note: str(r.Note) });
+      // Built in (payer-knowledge.js, v0.26): a reviewed High match, kept as it is (and never saved on the sheet).
+      else if (/^built in$/i.test(str(r.Source)) && keyOf(r['Fee Tab'])) out.set(k, { Payer: str(r.Payer), 'Sohar payerId': str(r['Sohar payerId']), 'Fee Tab': str(r['Fee Tab']), Region: str(r.Region), 'Fee Payer': v, Confidence: 'High', Source: 'built in', 'Auto Match': a, Note: str(r.Note) });
       else if (keyOf(r['Fee Tab']) && !everyTab.has(keyOf(r.Payer))) out.set(k, { Payer: str(r.Payer), 'Sohar payerId': str(r['Sohar payerId']), 'Fee Tab': str(r['Fee Tab']), stale: true });
     }
     const candBy = new Map();
