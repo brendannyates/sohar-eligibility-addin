@@ -443,7 +443,8 @@ button.small:hover { background: var(--t-sunken); border-color: var(--t-line2); 
 #btnRefresh { padding: 0 9px; }
 button.link, a.link { color: var(--t-primary); font-weight: 600; text-decoration: none; }
 button.link:hover, a.link:hover { color: var(--t-primary-deep); text-decoration: underline; }
-select, input[type="date"], input[type="search"], input[type="text"], input[type="number"] { min-height: 40px; padding: 0 10px; border-radius: 10px; border-color: var(--t-line2); }
+select, input[type="date"], input[type="search"], input[type="text"], input[type="number"] { min-height: 40px; padding: 0 10px; border: 1px solid var(--t-line2); border-radius: 10px; background: var(--t-raised); color: var(--t-fg); }
+.estcode input, .estcode select { min-height: 36px; padding: 0 8px; border: 1px solid var(--t-line2); border-radius: 10px; background: var(--t-raised); color: var(--t-fg); }
 .filters select, .filters input { height: auto; }
 label { font-size: 13px; }
 /* tabs: the patient view's section buttons, in a row */
