@@ -651,6 +651,22 @@
   }
 
   // ---------- estimate codes ----------
+  /**
+   * v0.26: an Estimate Codes row still holding the v0.16-v0.25 intervention default (codes "none", the seed's Source and
+   * note) takes the current seed's codes. Rows anyone edited are left as they are. {rows, changed}.
+   */
+  function upgradeInterventionSeeds(rows) {
+    const OLD = new Set([TMS_NOTE, MT_NOTE, MTR_NOTE, ESK_NOTE]);
+    const now = new Map(ESTIMATE_CODE_SEEDS.map((r) => [keyOf(r['Event keyword']), r]));
+    let changed = 0;
+    const out = (rows || []).map((r) => {
+      const seed = now.get(keyOf(r['Event keyword']));
+      if (!seed || str(r.Source) !== SEED_NOTE || str(r.Codes).toLowerCase() !== 'none' || !OLD.has(str(r.Note))) return r;
+      changed++;
+      return { ...r, Codes: seed.Codes, Note: seed.Note };
+    });
+    return { rows: changed ? out : rows || [], changed };
+  }
   const ESTIMATE_CODE_COLS = ['Event keyword', 'Codes', 'Source', 'Note'];
   const SEED_NOTE = 'default, review';
   const seedRows = (rows) => rows.map(([k, c, n]) => ({ 'Event keyword': k, Codes: c, Source: SEED_NOTE, Note: n }));
@@ -666,22 +682,25 @@
     ['therapy 60', '90837 x1', 'Psychotherapy, 60 minutes'],
     ['TMS', '90868 x1', 'TMS treatment session'],
   ]);
-  // Codes "none": the event is labeled and never estimated. Interventions (TMS, motor threshold, esketamine) are checked
-  // for eligibility, deductible and OOP max, not cost.
+  // Codes "none": the event is labeled and never estimated. v0.16-v0.25 did that for interventions; since v0.26
+  // (Brendan, 11/3: allow coding cost) they are priced by code like any visit, and still checked for eligibility,
+  // deductible and OOP max.
   const VERIFY_NOTE = 'verify deductible, OOP max and insurance status';
   // MT (90867) is the motor threshold visit and MTR (90869) the MT redo (Brendan, 11/2).
   const TMS_NOTE = `TMS (intervention): no estimate; ${VERIFY_NOTE}`, MT_NOTE = `TMS motor threshold, MT (intervention): no estimate; ${VERIFY_NOTE}`;
   const MTR_NOTE = `TMS motor threshold redo, MTR (intervention): no estimate; ${VERIFY_NOTE}`;
   const ESK_NOTE = `Esketamine (intervention): no estimate; ${VERIFY_NOTE}`;
+  const TMS_COST = `TMS treatment session (intervention); ${VERIFY_NOTE}`, MT_COST = `TMS motor threshold, MT (intervention); ${VERIFY_NOTE}`;
+  const MTR_COST = `TMS motor threshold redo, MTR (intervention); ${VERIFY_NOTE}`, ESK_COST = `Esketamine (intervention). ${ESK_DOSE_NOTE}; ${VERIFY_NOTE}`;
   const IVK_NOTE = 'IV ketamine infusion: provider visit, plus the self-pay medication (Config IVK medication rows)';
   const VISIT_30 = '30-minute visit';
   // From the NextGen event names in use (10/2026) and their short forms (MMI, MMT, TFU, TTF, Tel). The longest keyword
   // found in the event wins; on a tie the earlier row wins.
   const ESTIMATE_CODE_SEEDS = seedRows([
-    ['TMS', 'none', TMS_NOTE], ['TMS treatment', 'none', TMS_NOTE], ['TMS theta', 'none', TMS_NOTE], ['TMS mapping', 'none', TMS_NOTE],
-    ['TMS initial', 'none', TMS_NOTE], ['MT', 'none', MT_NOTE], ['motor threshold', 'none', MT_NOTE], ['MTR', 'none', MTR_NOTE], ['MT redo', 'none', MTR_NOTE],
-    ['motor threshold redo', 'none', MTR_NOTE],
-    ['esketamine', 'none', ESK_NOTE], ['esketamine follow up', 'none', ESK_NOTE], ['ESK', 'none', ESK_NOTE], ['Spravato', 'none', ESK_NOTE],
+    ['TMS', '90868 x1', TMS_COST], ['TMS treatment', '90868 x1', TMS_COST], ['TMS theta', '90868 x1', TMS_COST], ['TMS mapping', '90867 x1', MT_COST],
+    ['TMS initial', '90867 x1', MT_COST], ['MT', '90867 x1', MT_COST], ['motor threshold', '90867 x1', MT_COST], ['MTR', '90869 x1', MTR_COST], ['MT redo', '90869 x1', MTR_COST],
+    ['motor threshold redo', '90869 x1', MTR_COST],
+    ['esketamine', 'G2083 x1', ESK_COST], ['esketamine follow up', 'G2083 x1', ESK_COST], ['ESK', 'G2083 x1', ESK_COST], ['Spravato', 'G2083 x1', ESK_COST],
     // New patient intakes and consults.
     ['intake', '90792 x1', 'New patient intake'], ['new patient', '90792 x1', 'New patient intake'], ['new', '90792 x1', 'New patient'],
     ['consult', '90792 x1', 'Consult'], ['ConsultTelepsych', '90792 x1', 'Consult'], ['consult med mgt', '90792 x1', 'Consult with med management'],
@@ -992,8 +1011,11 @@
     // may not be any visit's location in this report, and it still needs a fee tab.
     const locationRows = feeLocationRows(inp.locations, [...appts.map((a) => a.loc), ...pers.map((p) => byPer.get(p)['Next Location']), ...homeRows.map((r) => r['Home Location'])], tabs, tele);
     // Empty, or still the v1 seeds nobody edited: the current seeds (the pane saves them to Estimate Codes).
-    const seeded = !(inp.codes || []).some((r) => str(r['Event keyword'])) || sameSeeds(inp.codes, ESTIMATE_CODE_SEEDS_V1);
-    const codeRows = seeded ? ESTIMATE_CODE_SEEDS.map((r) => ({ ...r })) : inp.codes;
+    let seeded = !(inp.codes || []).some((r) => str(r['Event keyword'])) || sameSeeds(inp.codes, ESTIMATE_CODE_SEEDS_V1);
+    // v0.26: intervention rows still on the old "none" default take their codes; the pane saves them (seeded).
+    const up = seeded ? null : upgradeInterventionSeeds(inp.codes);
+    const codeRows = seeded ? ESTIMATE_CODE_SEEDS.map((r) => ({ ...r })) : up.rows;
+    if (up && up.changed) seeded = true;
     const ivkPrice = (inp.feeRules && inp.feeRules.ivkMed) || { first: 400, later: 450 };
     const locRow = new Map(locationRows.map((r) => [keyOf(r['NextGen Location']), r]));
     const homeRow = new Map(homeRows.map((r) => [keyOf(r.Provider), r]));
@@ -1503,7 +1525,7 @@
     FEE_COLS, FEE_META_COLS, parseCodes, parseRate, parseLocations, parseFeeSheet, parseFeeSchedule, feeMetaRows, readMeta, feeStatus, feeIndex,
     isTele, matchLocationTab, FEE_LOCATION_COLS, feeLocationRows, PROVIDER_HOME_COLS, providerHomes, providerHomeRows,
     feeTokens, matchFeePayer, matchFeePayerSohar, payerState, tabRegions, productOf, FEE_PAYER_MAP_COLS, feePayerMapRows, lookupFeePayer, FEE_PAYER_LOG_COLS, feePayerLog,
-    ESTIMATE_CODE_COLS, ESTIMATE_CODE_SEEDS, ESTIMATE_CODE_SEEDS_V1, parseCodeList, codesForEvent,
+    ESTIMATE_CODE_COLS, ESTIMATE_CODE_SEEDS, ESTIMATE_CODE_SEEDS_V1, upgradeInterventionSeeds, parseCodeList, codesForEvent,
     isIvkInfusion, ivkInfusion, ivkMedication,
     ESTIMATE_DEFAULT_COLS, defaultsFor, rememberDefaults, CODE_CLASSES, codeClassOf, ruleLabel, countsTowardDeductible, codeRulesFor, rememberCodeRule,
     coinsRate, estimateMath, partialNote, benefitsMissing, estimateText, prepareEstimates, estimatePatient, usd,
