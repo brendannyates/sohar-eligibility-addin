@@ -209,30 +209,36 @@
     const rs = groups.map((g) => g.row);
     const byPer = new Map();
     for (const t of tasks) if (open(t)) { const k = keyOf(t) || `ref:${t['Sohar Ref']}`; byPer.set(k, (byPer.get(k) || 0) + 1); }
-    const days = new Map();
-    for (const r of rs) {
-      const d = r['Next Appt'] || 'No upcoming appointment';
-      if (!days.has(d)) days.set(d, []);
-      days.get(d).push(r);
-    }
-    const order = [...days.keys()].sort((a, b) => (C.parseDate(a) || new Date(8.64e15)) - (C.parseDate(b) || new Date(8.64e15)));
-    const wd = (s) => { const d = C.parseDate(s); return d ? d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' }) + ' ' : ''; };
-    const minutes = (t) => { const m = String(t || '').match(/(\d+):(\d+)\s*(AM|PM)/i); return m ? ((+m[1] % 12) + (/pm/i.test(m[3]) ? 12 : 0)) * 60 + +m[2] : 9999; };
-    $('prepList').innerHTML = order.length ? order.map((d) => {
-      const day = days.get(d).sort((a, b) => minutes(a['Next Time']) - minutes(b['Next Time']) || name(a).localeCompare(name(b)));
-      const need = day.filter((r) => byPer.get(keyOf(r) || `ref:${r['Sohar Ref']}`)).length;
-      return `<div class="day"><h3>${esc(wd(d) + d)} <span class="hint">${day.length} patient${day.length > 1 ? 's' : ''}${need ? ` · ${need} with NextGen tasks` : ''}</span></h3>
-        <table class="prep"><tbody>${day.map((r) => {
-          const n = byPer.get(keyOf(r) || `ref:${r['Sohar Ref']}`) || 0;
-          return `<tr class="q-${queueClass(r['Work Queue'])}" data-key="${esc(keyOf(r) + '|' + r['Sohar Ref'])}" tabindex="0">
-            ${cell(r['Next Time'])}<td><b>${esc(name(r))}</b><br><span class="hint">${esc(idText(r))}${esc(moreText(gOf.get(r)))}${r['Searched As'] && r['Searched As'] !== 'Patient' ? ` · searched as ${esc(r['Searched As'].toLowerCase())}` : ''}</span>${pillsOf(r).length || guarFlag(r) || precheckPill(r) ? `<div class="pills">${pillsHtml(r)}${guarFlag(r)}${precheckPill(r)}</div>` : ''}</td>
-            <td>${esc(r['Next Event'])}<br><span class="hint">${esc([r['Next Location'], r['Next Provider']].filter(Boolean).join(' · '))}</span></td>
-            <td><span class="pill ${r['Sent As'] === 'Discovery' ? 'd' : 'v'}">${esc(r['Sent As'])}</span><br><span class="hint">${esc(r['Sohar Status'])}</span></td>
-            <td>${esc(r['Benefit Flag'] || (r['Sent As'] === 'Verification' ? '' : ''))}${r.Copay !== '' && r.Copay != null ? `<br><span class="hint">Copay ${esc(r.Copay)}${r.Coinsurance ? ` · ${esc(r.Coinsurance)}` : ''}</span>` : ''}</td>
-            <td class="wide">${n ? `<span class="pill t">${n} task${n > 1 ? 's' : ''}</span> ` : ''}${esc(r.Action)}${r['Choose in NextGen'] ? `<br><span class="hint">NextGen: ${esc(r['Choose in NextGen'])}</span>` : ''}</td>
-          </tr>`;
-        }).join('')}</tbody></table></div>`;
+    // v0.25 (design handoff, screen 1): one row per patient, soonest visit first; the date is on each row.
+    const at = (r) => { const d = C.parseDate(r['Next Appt']); return d ? d.getTime() + minsOf(r['Next Time']) * 6e4 : 8.64e15; };
+    rs.sort((a, b) => at(a) - at(b) || name(a).localeCompare(name(b)));
+    const wd = (d) => d.toLocaleDateString('en-US', { weekday: 'short', timeZone: 'UTC' });
+    const guarOf = (r) => guarState((profiles[String(r['Per Nbr'] || '')] || {}).checks || []);
+    $('prepList').innerHTML = rs.length ? rs.map((r) => {
+      const n = byPer.get(keyOf(r) || `ref:${r['Sohar Ref']}`) || 0;
+      const d = C.parseDate(r['Next Appt']);
+      const [gt, gl] = guarOf(r);
+      const more = moreText(gOf.get(r)) + (r['Searched As'] && r['Searched As'] !== 'Patient' ? ` · searched as ${r['Searched As'].toLowerCase()}` : '');
+      return `<button type="button" class="prow q-${queueClass(r['Work Queue'])}" data-key="${esc(keyOf(r) + '|' + r['Sohar Ref'])}">
+        <span class="prow-when"><b>${d ? esc(`${wd(d)} ${sd(r['Next Appt'])}`) : 'No visit'}</b><span class="hint">${esc(r['Next Time'] || '')}</span></span>
+        <span class="prow-who"><b>${esc(name(r))}</b><span class="hint">${esc(idText(r) + more)}</span></span>
+        <span class="prow-plan"><span>${esc(planTitle(r) || 'No plan from Sohar')}</span>${r['Work Queue'] !== 'Clear' && r.Action ? `<span class="act">${esc(r.Action)}</span>` : ''}</span>
+        <span class="prow-pills">${gl === 'Not checked' ? '' : `<span class="pill p-${gt}">Guarantor: ${esc(gl)}</span>`}${precheckPill(r)}${pillsHtml(r)}${r['Sent As'] === 'Discovery' ? '<span class="pill d">Discovery</span>' : ''}${n ? `<span class="pill t">${n} NextGen task${n > 1 ? 's' : ''}</span>` : ''}</span>
+      </button>`;
     }).join('') : '<p class="hint">No patients match these filters.</p>';
+    // The title's line counts what matters: visits in range, guarantors to fix, pre-checks still open.
+    const dated = rs.map((r) => C.parseDate(r['Next Appt'])).filter(Boolean);
+    const fix = rs.filter((r) => guarOf(r)[0] === 'red').length, pre = rs.filter((r) => precheckOf(r) === 'open').length;
+    const span = dated.length ? dayRange(dated[0], dated[dated.length - 1]) : '';
+    const bits = [dated.length ? `${dated.length} with visits ${span}` : `${rs.length} patient${rs.length === 1 ? '' : 's'}, no upcoming visits`,
+      fix ? `<b class="sev">${fix} guarantor${fix === 1 ? '' : 's'} to fix</b>` : '', pre ? `${pre} pre-check${pre === 1 ? '' : 's'} open` : ''].filter(Boolean);
+    $('vSub').innerHTML = rs.length ? bits.join(', ') : '';
+  }
+  /** "Oct 20–23", or "Oct 30–Nov 2" across months (dates parsed as UTC days). */
+  function dayRange(a, b) {
+    const m = (d) => d.toLocaleDateString('en-US', { month: 'short', timeZone: 'UTC' });
+    if (a.getTime() === b.getTime()) return `${m(a)} ${a.getUTCDate()}`;
+    return m(a) === m(b) ? `${m(a)} ${a.getUTCDate()}–${b.getUTCDate()}` : `${m(a)} ${a.getUTCDate()}–${m(b)} ${b.getUTCDate()}`;
   }
 
   function renderWorklist() {
@@ -371,7 +377,7 @@
     if (from) {
       const panel = from.closest('[data-panel]') || document;
       const seen = new Set();
-      order = [...panel.querySelectorAll('tr[data-key]')].map((tr) => tr.dataset.key).filter((x) => { const pk = keyOfDetail(x); if (!pk || seen.has(pk)) return false; seen.add(pk); return true; });
+      order = [...panel.querySelectorAll('[data-key]')].map((tr) => tr.dataset.key).filter((x) => { const pk = keyOfDetail(x); if (!pk || seen.has(pk)) return false; seen.add(pk); return true; });
       sec = 'overview';
     }
     detailKey = k; detailDk = dk;
@@ -1348,6 +1354,11 @@
     tab = name;
     document.querySelectorAll('[data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
     document.querySelectorAll('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== name; });
+    const tb = document.querySelector(`[data-tab="${name}"]`);
+    $('vTitle').textContent = tb ? tb.firstChild.textContent.trim() : '';
+    $('vSub').hidden = name !== 'prep';
+    $('vNote').textContent = name === 'prep' || name === 'worklist' || name === 'benefits'
+      ? `${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} · select a patient to open their record` : '';
     $('sharedFilters').hidden = name === 'upload' || name === 'clinic' || name === 'learning';
     hideDetail();
   }
@@ -1471,6 +1482,8 @@
   document.querySelectorAll('[data-queue]').forEach((b) => b.addEventListener('click', () => { $('fQueue').value = b.dataset.queue; $('fBen').value = ''; render(); }));
   document.querySelectorAll('[data-benefit]').forEach((b) => b.addEventListener('click', () => { $('fBen').value = b.dataset.benefit; $('fQueue').value = ''; render(); }));
   document.addEventListener('click', (e) => {
+    const pr = e.target.closest('button.prow[data-key]'); // Prep rows are buttons (v0.25)
+    if (pr) { showDetail(pr.dataset.key, pr); return; }
     if (e.target.closest('a, input, button')) return;
     const tr = e.target.closest('tr[data-key]');
     if (tr) showDetail(tr.dataset.key, tr);
@@ -1599,7 +1612,7 @@
         put('arietis', 'AccountDetailReport (demo).xlsx', AU.parseArietis(d.arietis));
         put('appointments', 'Appointments (demo).xls', AU.parseAppointments(d.appointments));
       }
-      showDetail(dk, document.querySelector(`#prepList tr[data-key="${CSS.escape(dk)}"]`));
+      showDetail(dk, document.querySelector(`#prepList [data-key="${CSS.escape(dk)}"]`));
       if (ph[2]) uiOf(keyOf(res[0])).open = +ph[2];
       if (ph[1] && SECTIONS.some(([k]) => k === ph[1])) { sec = ph[1]; renderDetail(); }
       // ?fees=1&svc=med management&visits=4&start=booked#patient/calc prices a service in the calculator.
