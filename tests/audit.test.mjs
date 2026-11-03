@@ -334,3 +334,27 @@ test('balance lines: the charges behind each balance, with PR-1 / PR-2 / PR-3 an
     lines: [{ carc: 'PR1', resp: 50 }, { carc: 'PR204', amount: -40 }, { carc: 'CO45', amount: -60 }] });
   assert.deepEqual(row.pr, [{ code: 'PR1', label: 'Deductible', amount: 50 }, { code: 'PR2', label: 'Coinsurance', amount: 20 }, { code: 'PR204', label: 'Not covered by the current plan', amount: 40 }]);
 });
+
+// v0.26: the save path on a workbook (excel mock): an old two-sheet save moves onto the one hidden Account Audits sheet.
+test('saving an audit on a workbook: one hidden Account Audits sheet; the old lines sheet is read, then removed', async () => {
+  const { createMock } = await import('./helpers/excel-mock.mjs');
+  const m = createMock(), X = m.SoharExcel;
+  const a = demoAudit();
+  const old = AU.auditRecord(a, { lasfir: 'OTHPER', mrn: '700002', key: '700002' }, { when: 'before' });
+  // Before v0.26: the summary on Account Audits, the lines on Account Audit Lines.
+  await X.writeAccountAudits(AU.AUDIT_COLS, [old.summary]);
+  await X.writeAccountAuditLines(AU.AUDIT_LINE_COLS, old.lines);
+  let saved = AU.auditsFromSheet(await X.readAccountAudits(), await X.readAccountAuditLines());
+  assert.equal(saved.lines.length, old.lines.length, 'the old lines are read');
+  // Save a new audit the way app.js saveAudit does.
+  saved = AU.mergeAudits(saved, AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'now' }));
+  await X.writeAccountAudits(AU.AUDIT_SHEET_COLS, AU.auditSheetRows(saved));
+  assert.equal(await X.dropAccountAuditLines(), true);
+  assert.ok(!m.sheetNames().includes('Account Audit Lines'), 'the old lines sheet is gone');
+  assert.equal(m.sheetVisibility('Account Audits'), 'Hidden');
+  const back = AU.auditsFromSheet(await X.readAccountAudits(), await X.readAccountAuditLines());
+  assert.deepEqual(back.summary.map((r) => r.Key).sort(), ['700001', '700002'], 'both audits on the one sheet');
+  assert.equal(back.lines.length, saved.lines.length);
+  assert.ok(back.lines.some((l) => l.Key === '700002' && l.Part === 'Payment'), 'the moved lines came along');
+  assert.equal(await X.dropAccountAuditLines(), false, 'nothing to remove the second time');
+});
