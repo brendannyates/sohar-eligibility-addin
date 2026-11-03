@@ -268,6 +268,25 @@ test('auditRecord: one summary row and its lines, with no names or card numbers 
   assert.ok(rec.lines.every((l) => AU.AUDIT_LINE_COLS.every((c) => c in l)));
   assert.ok(rec.lines.some((l) => l.Part === 'Payment' && l.Status === 'Not posted' && l.Paid === 71.51));
 });
+test('v0.26: summary and lines share one hidden sheet and come back the same; old two-sheet saves still read', () => {
+  const a = demoAudit();
+  const saved = AU.mergeAudits(AU.mergeAudits({ summary: [], lines: [] }, AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'w1' })),
+    AU.auditRecord(a, { lasfir: 'OTHPER', mrn: '700002', key: '700002' }, { when: 'w2' }));
+  const rows = AU.auditSheetRows(saved);
+  assert.ok(rows.every((r) => Object.keys(r).join() === AU.AUDIT_SHEET_COLS.join()), 'every row has the sheet columns');
+  assert.equal(rows.filter((r) => r.Part === 'Summary').length, 2);
+  assert.equal(rows.length, 2 + saved.lines.length);
+  assert.deepEqual(AU.AUDIT_SHEET_COLS.filter((c) => NAME_COLS.includes(c)), []);
+  const back = AU.auditsFromSheet(rows, []);
+  assert.deepEqual(back.summary.map((r) => r.Key).sort(), ['700001', '700002']);
+  assert.equal(back.lines.length, saved.lines.length);
+  assert.deepEqual(back, { summary: [...back.summary], lines: back.lines.map((l) => ({ ...l })) });
+  // Before v0.26: summary rows (no Part) on Account Audits, lines on Account Audit Lines.
+  const old = AU.auditsFromSheet(saved.summary, saved.lines);
+  assert.equal(old.summary.length, 2);
+  assert.equal(old.lines.length, saved.lines.length);
+  assert.deepEqual(AU.auditsFromSheet(saved.summary, [{ Key: 'GONE', Part: 'Visit' }]).lines, [], 'lines for an audit no longer saved are dropped');
+});
 test('saving again replaces only that patient\'s audit', () => {
   const a = demoAudit();
   const r1 = AU.auditRecord(a, { ...WHO, key: '700001' }, { when: 'first' });

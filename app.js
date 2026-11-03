@@ -304,6 +304,8 @@
   async function lockNames() {
     if (state.demo || !X.lockNameSheets) return;
     try { const w = await X.lockNameSheets(); if (w) setStatus(w, 'warn'); } catch (e) { console.error(e); setStatus(`Could not hide the sheets with patient names: ${e.message}`, 'warn'); }
+    // v0.26: and the back-room tabs (logs, metrics, import rows, compiled lookups) go hidden.
+    if (X.tidyTabs) try { const w = await X.tidyTabs(); if (w) setStatus(w, 'warn'); } catch (e) { console.error('tidyTabs', e); }
   }
 
   async function scan() {
@@ -444,15 +446,13 @@
         ${latestNote ? `<div class="hint ev">${esc(latestNote)}</div>` : ''}
         ${evidence ? `<div class="hint ev">${esc(evidence)}</div>` : ''}
         ${it.flagged ? `<p class="warn">${esc(it.lr.note)}</p>` : ''}
-        ${sg ? `<div class="alt-actions"><button class="small" data-act="suggest">Use ${esc(sg.payerName || sg.payerId)} <span class="id">${esc(sg.payerId)}</span></button> <span class="hint">${sg.n} of ${it.lr.discovery} discovery patients</span></div>` : ''}
-        <div class="alt-actions">${h.payerId ? '<button class="link" data-act="ok">Looks right</button>' : ''}<button class="link" data-act="change">Change</button><button class="link" data-act="notpayer">Not a payer</button></div>
+        <div class="assign"><label>Sohar payer for ${esc(it.name)}<select data-act="assign"></select></label><button class="small" data-act="save">Save</button></div>
         <div class="pick" hidden><input type="search" placeholder="Search Sohar payers" aria-label="Search Sohar payers for ${esc(it.name)}"><div class="sugg"></div></div>`;
-      const use = wrap.querySelector('[data-act="suggest"]');
-      if (use) use.addEventListener('click', () => guard(async () => {
+      const useSuggestion = () => guard(async () => {
         await writeMap([{ entry: { nextgenPayerName: it.name, payerId: sg.payerId, payerName: sg.payerName, confidence: 'Confirmed', notes: `Suggested by Sohar results (${sg.n} of ${it.lr.discovery} discovery patients), confirmed in the add-in` },
           evidence: `${sg.n} of ${it.lr.discovery} discovery patients returned ${sg.payerName || sg.payerId}` }], 'Suggestion', true);
         await afterMap();
-      }, 'payerList'));
+      }, 'payerList');
       const pick = wrap.querySelector('.pick');
       const input = wrap.querySelector('input');
       const sugg = wrap.querySelector('.sugg');
@@ -471,8 +471,7 @@
         }
       };
       input.addEventListener('input', () => show(input.value));
-      const ok = wrap.querySelector('[data-act="ok"]');
-      if (ok) ok.addEventListener('click', () => guard(async () => {
+      const looksRight = () => guard(async () => {
         // A human label stays as it is (Exact stays Exact); anything else becomes Confirmed. With Sohar conflicts on
         // record, the note marks them reviewed, so the flag stays quiet until more conflicts arrive (core.learnPayers).
         const keep = HUMAN_LABELS.has(it.conf);
@@ -482,12 +481,32 @@
         await writeMap([{ entry: { nextgenPayerName: it.name, payerId: h.payerId, payerName: h.payerName, confidence: keep ? h.confidence : 'Confirmed', notes: [ack, what].filter(Boolean).join('; ') },
           evidence: ack ? `${ack}${it.lr.note ? `: ${it.lr.note}` : ''}` : what, always: !!ack }], 'Pane', true);
         await afterMap();
-      }, 'payerList'));
-      wrap.querySelector('[data-act="change"]').addEventListener('click', () => { pick.hidden = !pick.hidden; if (!pick.hidden) { show(''); input.focus(); } });
-      wrap.querySelector('[data-act="notpayer"]').addEventListener('click', () => guard(async () => {
+      }, 'payerList');
+      const usePayer = (s) => guard(async () => {
+        await writeMap([{ nextgenPayerName: it.name, payerId: s.payerId, payerName: s.payerName, confidence: 'Confirmed', notes: 'Mapped in the add-in' }], 'Pane', true);
+        await afterMap();
+      }, 'payerList');
+      const notPayer = () => guard(async () => {
         await writeMap([{ nextgenPayerName: it.name, payerId: '', payerName: '', confidence: 'Not a payer', notes: 'Marked in the add-in' }], 'Pane', true);
         await afterMap();
-      }, 'payerList'));
+      }, 'payerList');
+      // v0.26: one dropdown: keep the current match, take Sohar's suggestion, pick one of the closest Sohar payers, mark
+      // it not a payer, or search every Sohar payer. Save applies it (a dropdown alone would apply on an arrow key).
+      const choices = [{ label: 'Choose…', run: null }];
+      if (h.payerId) choices.push({ label: `Keep ${h.payerName || h.payerId} (${h.payerId})${HUMAN_LABELS.has(it.conf) ? `, ${h.confidence}` : ', confirm it'}`, run: looksRight });
+      if (sg) choices.push({ label: `Sohar suggests ${sg.payerName || sg.payerId} (${sg.payerId}): ${sg.n} of ${it.lr.discovery} discovery patients`, run: useSuggestion });
+      for (const c of C.suggestPayers(it.name, state.soharPayers || [], 8)) {
+        if (c.payerId === h.payerId || (sg && c.payerId === sg.payerId)) continue;
+        choices.push({ label: `${c.payerName} (${c.payerId})`, run: () => usePayer(c) });
+      }
+      choices.push({ label: 'Not a payer (self-pay, VIP, a placeholder)', run: notPayer });
+      choices.push({ label: 'Search all Sohar payers…', run: () => { pick.hidden = false; show(''); input.focus(); } });
+      const sel = wrap.querySelector('[data-act="assign"]');
+      sel.innerHTML = choices.map((c, i) => `<option value="${i}">${esc(c.label)}</option>`).join('');
+      const save = wrap.querySelector('[data-act="save"]');
+      save.disabled = true;
+      sel.addEventListener('change', () => { save.disabled = !choices[+sel.value].run; });
+      save.addEventListener('click', () => { const c = choices[+sel.value]; if (c.run) c.run(); });
       list.appendChild(wrap);
     }
   }
@@ -2127,18 +2146,21 @@
     });
     return state.precheckQueue;
   }
-  /** Saved account audits (v0.23.3, hidden Account Audits + Account Audit Lines), read once per pane session. */
+  /**
+   * Saved account audits, read once per pane session. v0.26: summary and lines share the hidden Account Audits sheet;
+   * lines still on the old Account Audit Lines sheet are read too until the next save moves them.
+   */
   async function currentAudits(fresh) {
     if (state.demo) return state.audits || { summary: [], lines: [] };
     if (fresh || !state.audits) {
-      const read = async () => ({ summary: await X.readAccountAudits(), lines: await X.readAccountAuditLines() });
+      const read = async () => AU.auditsFromSheet(await X.readAccountAudits(), await X.readAccountAuditLines());
       state.audits = fresh ? await read() : await read().catch((e) => { console.error(e); return null; });
     }
     return state.audits || { summary: [], lines: [] };
   }
   /**
    * The last account audit for one patient, from full screen: it replaces that patient's saved rows (audit.mergeAudits).
-   * Two saves: the summary and then its lines. Saves run in order, like the pre-check ticks.
+   * One save (v0.26: one sheet), then the old lines sheet goes. Saves run in order, like the pre-check ticks.
    */
   function saveAudit(m) {
     state.auditQueue = (state.auditQueue || Promise.resolve()).catch(() => {}).then(async () => {
@@ -2146,12 +2168,10 @@
       const rec = { summary: pick(AU.AUDIT_COLS, { ...m.record.summary, Saved: fmtStamp(new Date()) }), lines: (m.record.lines || []).map((r) => pick(AU.AUDIT_LINE_COLS, r)) };
       rec.lines.forEach((r) => { r.Saved = rec.summary.Saved; });
       const next = AU.mergeAudits(await currentAudits(true), rec);
-      await X.writeAccountAudits(AU.AUDIT_COLS, next.summary);
-      try { await X.writeAccountAuditLines(AU.AUDIT_LINE_COLS, next.lines); } catch (e) {
-        state.audits = null; // the summary was saved but not its lines: read both again next time
-        throw new Error(`the summary was saved, but its visits and findings were not (${e.message}). Save again.`);
-      }
+      await X.writeAccountAudits(AU.AUDIT_SHEET_COLS, AU.auditSheetRows(next));
       state.audits = next;
+      // The lines are on Account Audits now; the old sheet is only a copy. Left for the next save if this fails.
+      try { await X.dropAccountAuditLines(); } catch (e) { console.warn('old Account Audit Lines sheet not removed', e); }
       return rec.summary.Saved;
     });
     return state.auditQueue;
@@ -2571,7 +2591,8 @@
       async readFlowResults() { return state.flow || []; }, async writeFlowResults(c, r) { state.flow = r; return r.length; },
       async readPreCheck() { return state.precheck || []; }, async writePreCheck(c, r) { state.precheck = r; return r.length; },
       async readAccountAudits() { return (state.audits && state.audits.summary) || []; }, async readAccountAuditLines() { return (state.audits && state.audits.lines) || []; },
-      async writeAccountAudits(c, r) { state.audits = { ...(state.audits || {}), summary: r }; return r.length; }, async writeAccountAuditLines(c, r) { state.audits = { ...(state.audits || {}), lines: r }; return r.length; },
+      // v0.26: one sheet holds summary and lines (saveAudit keeps state.audits as {summary, lines}).
+      async writeAccountAudits(c, r) { return r.length; }, async writeAccountAuditLines(c, r) { return r.length; }, async dropAccountAuditLines() { return false; },
       TABLES: { patients: 'tblPatients', review: 'tblReview', verification: 'tblVerification', discovery: 'tblDiscovery' },
       async readImportRows() { return rows; },
       async writeImportRows(r) { rows = r; },

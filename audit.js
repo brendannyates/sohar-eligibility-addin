@@ -704,7 +704,7 @@
   }
 
   // ---------- saved audits and the export (v0.23.1) ----------
-  // The last audit per patient is saved on two hidden sheets: one summary row (AUDIT_COLS) and its lines
+  // The last audit per patient is saved on the hidden Account Audits sheet (v0.26; two sheets before): one summary row (AUDIT_COLS) and its lines
   // (AUDIT_LINE_COLS: findings, visits, re-quote, payments). LASFIR and MRN only: no names, file names or card numbers.
   // Saving again replaces that patient's rows. The export compiles every saved audit into one workbook.
   const AUDIT_COLS = ['Key', 'MRN', 'LASFIR', 'Saved', 'By', 'Plan Year', 'Sources', 'Arietis Through', 'Arietis Balance', 'Processed Balance',
@@ -766,6 +766,29 @@
     const k = str(rec.summary.Key);
     const keep = (rows) => (rows || []).filter((r) => str(r.Key) !== k);
     return { summary: [...keep(saved && saved.summary), rec.summary].sort((x, y) => str(x.LASFIR).localeCompare(str(y.LASFIR))), lines: [...keep(saved && saved.lines), ...rec.lines] };
+  }
+  // v0.26 (Brendan, 11/3: fewer tabs): both go on the one hidden Account Audits sheet. Part says what a row is: "Summary"
+  // for the audit's summary row, else the line's part (Finding, Visit, Re-quote, Payment).
+  const AUDIT_SHEET_COLS = [...new Set(['Key', 'MRN', 'LASFIR', 'Saved', 'Part', ...AUDIT_COLS, ...AUDIT_LINE_COLS])];
+  /** Saved audits ({summary, lines}) as Account Audits sheet rows: each summary, then its lines. */
+  function auditSheetRows(saved) {
+    const blank = Object.fromEntries(AUDIT_SHEET_COLS.map((c) => [c, '']));
+    const lines = (saved && saved.lines) || [];
+    return ((saved && saved.summary) || []).flatMap((s) => [{ ...blank, ...s, Part: 'Summary' },
+      ...lines.filter((l) => str(l.Key) === str(s.Key)).map((l) => ({ ...blank, ...l }))]);
+  }
+  /**
+   * Account Audits sheet rows back to {summary, lines}. A row with no Part is a summary saved before v0.26; oldLines are
+   * the rows of the old Account Audit Lines sheet, if it is still there.
+   */
+  function auditsFromSheet(rows, oldLines) {
+    const pick = (cols, r) => Object.fromEntries(cols.map((c) => [c, r[c] == null ? '' : r[c]]));
+    const isSummary = (r) => !str(r.Part) || str(r.Part) === 'Summary';
+    const summary = (rows || []).filter(isSummary).map((r) => pick(AUDIT_COLS, r));
+    const keys = new Set(summary.map((r) => str(r.Key)));
+    const lines = (rows || []).filter((r) => !isSummary(r)).concat((oldLines || []).filter((r) => str(r.Part)))
+      .filter((r) => keys.has(str(r.Key))).map((r) => pick(AUDIT_LINE_COLS, r));
+    return { summary, lines };
   }
   /** A saved summary row for a patient key, or null. */
   const savedFor = (saved, key) => ((saved && saved.summary) || []).find((r) => str(r.Key) === str(key)) || null;
@@ -852,7 +875,7 @@
     return { instamed: I, arietis: A, appointments: P };
   }
 
-  return { AUDIT_COLS, AUDIT_LINE_COLS, auditRecord, mergeAudits, savedFor, exportSpec, exportName,
+  return { AUDIT_COLS, AUDIT_LINE_COLS, AUDIT_SHEET_COLS, auditSheetRows, auditsFromSheet, auditRecord, mergeAudits, savedFor, exportSpec, exportName,
     detectKind, parseInstamed, demoRows, parseArietis, parseAppointments, identify, chargeCode, expectedFor, codeChecks, familyOf, classOf,
     matchPayments, subsetSum, learnBenefits, planYearOf, requote, runAudit, summaryText, dayOf, iso, us, usd, KEPT_RE, chargeRow, PR_PARTS };
 });

@@ -500,7 +500,7 @@ test('fee sheets: the schedule and its info are hidden, mapping sheets visible; 
   await XL.writeFee('locations', F.FEE_LOCATION_COLS, [{ 'NextGen Location': 'Harbor Point', 'Fee Tab': 'Bayview', Source: 'auto', 'Auto Match': 'Bayview', Note: '' }]);
   assert.equal(m.sheetVisibility('Fee Schedule'), 'Hidden');
   assert.equal(m.sheetVisibility('Fee Schedule Info'), 'Hidden');
-  assert.equal(m.sheetVisibility('Fee Locations'), 'Visible');
+  assert.equal(m.sheetVisibility('Fee Locations'), 'Hidden');
   assert.equal((await XL.readFee('schedule')).length, 5);
   await XL.writeFee('schedule', F.FEE_COLS, rows.slice(0, 2));
   assert.equal((await XL.readFee('schedule')).length, 2, 're-upload replaces it completely');

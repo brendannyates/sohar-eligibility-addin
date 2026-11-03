@@ -108,6 +108,21 @@ test('lockNameSheets: Import, Sohar Uploads and IR Uploads go very hidden, Expor
   assert.deepEqual((await X.readImportRows()).flat().map(String), ['Per Nbr', 'Pat Name', '1', 'Zzalder, Bennet'], 'the add-in still reads a very hidden Import');
 });
 
+test('tidyTabs (v0.26): the back-room tabs go hidden, staff tabs stay, nothing is deleted or written', async () => {
+  const m = createMock({ sheets: ['Patients', 'Review', 'Verification', 'Discovery', 'Sohar Payers', 'Config'] }), X = m.SoharExcel;
+  m.seedTable('Payer Map Log', 'tblPayerMapLog', ['When'], [{ When: 't' }]);
+  m.seedTable('Fee Payer Map', 'tblFeePayerMap', ['Fee Payer'], [{ 'Fee Payer': 'Cigna' }]);
+  m.seedTable('Clinic Work Inbox', 'tblClinicWorkInbox', ['Location'], []);
+  await X.activate('Verification');
+  assert.equal(await X.tidyTabs(), '');
+  for (const s of ['Verification', 'Discovery', 'Sohar Payers', 'Payer Map Log']) assert.equal(m.sheetVisibility(s), 'Hidden', s);
+  assert.deepEqual(m.visibleSheets().sort(), ['Clinic Work Inbox', 'Config', 'Fee Payer Map', 'Patients', 'Review']);
+  assert.equal(m.activeSheet(), 'Patients', 'moved off a sheet that went hidden');
+  assert.deepEqual(await X.readPayerMapLog(), [{ When: 't' }], 'hidden, still read');
+  assert.equal(await X.tidyTabs(), '', 'second run: nothing to do');
+  assert.ok(X.TIDY_SHEETS.every((s) => !['Patients', 'Review', 'Sohar Results', 'NextGen Tasks', 'Payer Map', 'Config', 'Fee Payer Map', 'Clinic Work Inbox'].includes(s)));
+});
+
 test('lockNameSheets on a structure-protected workbook changes nothing and says why', async () => {
   const m = createMock({ sheets: ['Import', 'Patients'] }), X = m.SoharExcel;
   m.protectStructure(true);

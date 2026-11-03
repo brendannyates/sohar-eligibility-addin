@@ -752,3 +752,8 @@ select.au-inline { display: inline-block; width: auto; min-height: 30px; margin:
 .au-pay p, .au-rq p, .au-bal p, .au-ben p { margin: 8px 0 0; }
 .au-acts { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
 .au-acts .pv-btn { flex: none; }
+/* v0.26: one dropdown assigns a payer match (keep, Sohar's suggestion, a close Sohar payer, not a payer, search) */
+.assign { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px; margin-top: 8px; }
+.assign label { flex: 1 1 220px; min-width: 0; }
+.assign select { width: 100%; }
+.assign button.small { min-height: 40px; padding: 0 14px; }
