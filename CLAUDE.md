@@ -22,6 +22,9 @@ Hard rules:
   `plansOf` (payer + member ID), `milestones` (first seen), `sinceLast`, `projection` (booked Flow estimates applied to
   the deductible and OOP max; sandbox and missing estimates left out) and `actionItems` / `leadLine`. New derivations go
   there, with a test, not in `dashboard.js`.
+  v0.25: the pane and the main screen use the patient view's tokens (`--t-*` and the status colors on `:root` in
+  `style.css`; the older names like `--pine` and `--ink` point at them). Prep by appointment is the handoff's list
+  (one row button per patient). Style new screens with these tokens, not new colors.
 - `audit.js` (v0.23, the patient view's Account audit) is pure too. The InstaMed, Arietis and NextGen files it reads carry
   names: they stay in the full-screen window's memory only (never a sheet, never `toPane`, never localStorage), and
   the copied summary is LASFIR + MRN with no names, file names or card numbers. Matching and balance rules live in
