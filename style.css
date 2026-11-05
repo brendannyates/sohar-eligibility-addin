@@ -236,6 +236,11 @@ table.prep tr.q-clr td:first-child { box-shadow: inset 3px 0 var(--ok); }
 .drop:hover, .drop.over, .drop:focus-visible { border-color: var(--pine); color: var(--ink); }
 .savelist { display: grid; gap: 6px; }
 .savelist button { text-align: left; }
+/* v0.27 IVN export clinic picker (pane step 4 and the full-screen Save files list) */
+.ivnpick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-weight: 600; }
+.ivnpick select { min-width: 0; flex: 1 1 140px; }
+.ivnrow { display: grid; gap: 4px; padding: 6px 0; }
+.ivnrow .hint, #ivnHint { margin: 0; }
 .msgbox textarea { font: 12px/1.45 ui-monospace, Consolas, monospace; color: var(--ink); background: var(--field); border: 1px solid var(--line); border-radius: 4px; padding: 8px; width: 100%; resize: vertical; }
 
 .foot { padding: 10px 16px 14px; border-top: 1px solid var(--line); }

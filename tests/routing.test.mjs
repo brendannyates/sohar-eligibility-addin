@@ -332,7 +332,7 @@ test('autoMatchPayer: an unmatched brand word that names another payer is never 
 });
 
 test('trackerExport: Secondary Payer and Cost-share Flags trail the old columns', () => {
-  assert.deepEqual(C.TRACKER_EXPORT_COLS.slice(-5), ['Service', 'Source', 'Exported', 'Secondary Payer', 'Cost-share Flags']);
+  assert.deepEqual(C.TRACKER_EXPORT_COLS.slice(-6), ['Service', 'Source', 'Exported', 'Secondary Payer', 'Cost-share Flags', 'Clinic']);
   const rows = [...TITLE, HDR, BS('50'), ['Total Appointments (1)']];
   const v = [VER_HDR, ver({ requestId: 'q-1', id: '50', resolved: '2026-10-14T01:00:00Z', memberId: 'BS50', payerName: 'Blue Shield of California', status: 'complete.eligible' })];
   const res = C.mergeSoharResults(rows, [{ name: 'ver.csv', rows: v }], CFG);
@@ -341,4 +341,38 @@ test('trackerExport: Secondary Payer and Cost-share Flags trail the old columns'
   assert.equal(out['Secondary Payer'], 'QMB Noridian Southern CA');
   assert.equal(out['Cost-share Flags'], 'QMB; Secondary may cover');
   assert.equal(C.trackerExport(res.results, '').rows[0]['Secondary Payer'], '');
+});
+
+test('IVN export: narrowed to one clinic by kept or expected visits; Service from those visits incl. IVK', () => {
+  const rows = [...TITLE, HDR,
+    // 50: kept TMS at San Rafael last month, expected IVK at Castro Street next week
+    BS('50').map((v, i) => (i === H('Appt Date') ? '9/20/2026' : i === H('Status') ? 'Kept' : i === H('Event') ? 'TMS Treatment Unilateral' : v)),
+    BS('50').map((v, i) => (i === H('Appt Date') ? '10/20/2026' : i === H('Status') ? 'Expected' : i === H('Event') ? 'IV Ketamine Follow Up' : i === H('Loc Name') ? 'Castro Street' : v)),
+    // 51: only a no-show and a cancelled visit at Castro Street, expected esketamine at San Rafael
+    BS('51').map((v, i) => (i === H('Status') ? 'No Show' : i === H('Loc Name') ? 'Castro Street' : i === H('Appt Date') ? '9/22/2026' : v)),
+    BS('51').map((v, i) => (i === H('Status') ? 'Cancelled' : i === H('Loc Name') ? 'Castro Street' : v)),
+    BS('51').map((v, i) => (i === H('Status') ? 'Expected' : i === H('Event') ? 'Esketamine Follow Up' : i === H('Appt Date') ? '10/21/2026' : v)),
+    ['Total Appointments (5)']];
+  const v = [VER_HDR,
+    ver({ requestId: 'q-1', id: 'M50', resolved: '2026-10-14T01:00:00Z', memberId: 'BS50', payerName: 'Blue Shield of California', status: 'complete.eligible' }),
+    ver({ requestId: 'q-2', id: 'M51', resolved: '2026-10-14T01:00:00Z', memberId: 'BS51', payerName: 'Blue Shield of California', status: 'complete.eligible' })];
+  const res = C.mergeSoharResults(rows, [{ name: 'ver.csv', rows: v }], CFG);
+  const built = C.buildPatients(rows, CFG);
+  const idx = C.ivnIndex(built.patients);
+  assert.deepEqual(idx.get('50'), { 'San Rafael': 'TMS Treatment Unilateral', 'Castro Street': 'IV Ketamine Follow Up' });
+  assert.deepEqual(idx.get('51'), { 'San Rafael': 'Esketamine Follow Up' }, 'no-show and cancelled visits do not count');
+  assert.deepEqual(C.ivnClinics(idx), [{ clinic: 'Castro Street', patients: 1 }, { clinic: 'San Rafael', patients: 2 }]);
+
+  const all = C.trackerExport(res.results, '', null, { visits: idx });
+  assert.deepEqual(all.rows.map((r) => [r['Per Nbr'], r.Service, r.Clinic]).sort(), [['50', 'TMS; IVK', ''], ['51', 'ESK', '']]);
+  const castro = C.trackerExport(res.results, '', null, { clinic: 'Castro Street', visits: idx });
+  assert.deepEqual(castro.rows.map((r) => [r['Per Nbr'], r.Service, r.Clinic]), [['50', 'IVK', 'Castro Street']]);
+  assert.equal(castro.otherClinic, 1);
+  const sr = C.trackerExport(res.results, '', null, { clinic: 'San Rafael', visits: idx });
+  assert.deepEqual(sr.rows.map((r) => [r['Per Nbr'], r.Service]).sort(), [['50', 'TMS'], ['51', 'ESK']], 'a kept visit counts, not just upcoming ones');
+
+  assert.equal(C.serviceLine('IV Ketamine Treatment Start'), 'IVK');
+  assert.equal(C.serviceLine('Esketamine Tx Start'), 'ESK', 'esketamine is never IVK');
+  assert.match(C.ivnFileName('Castro Street', new Date(2026, 10, 4)), /^Sohar IVN Export - Castro Street 2026-11-04\.csv$/);
+  assert.match(C.ivnFileName('', new Date(2026, 10, 4)), /^Sohar IVN Export 2026-11-04\.csv$/);
 });
