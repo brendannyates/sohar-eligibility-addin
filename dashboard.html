@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar eligibility, full screen</title>
-  <link rel="stylesheet" href="style.css?v=0.26.0">
+  <link rel="stylesheet" href="style.css?v=0.27.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
@@ -252,7 +252,11 @@
             <button class="primary alt" data-save="verifyFailed">Sohar Ready Import - Discovery (from Verification)</button>
             <button class="primary alt" data-save="mapping">Sohar Ready Import - Discovery (Payer Mapping)</button>
             <button class="primary alt" data-save="payerTests">Sohar Ready Import - Verification (Payer Tests)</button>
-            <button class="primary" data-save="tracker">Tracker file (TMS + ESK)</button>
+            <div class="ivnrow">
+              <label class="ivnpick">IVN export for <select id="ivnClinicFs"><option value="">All clinics</option></select></label>
+              <button class="primary" data-save="tracker">IVN export (TMS, ESK, IVK)</button>
+              <p class="hint">One clinic keeps only patients with a kept or expected visit there on the report.</p>
+            </div>
             <button class="primary alt" data-save="benefits">Benefits and OOP progress</button>
             <button class="primary alt" data-save="tasks">NextGen tasks (open)</button>
             <button class="primary alt" data-save="allTasks">NextGen tasks (all)</button>
@@ -266,13 +270,13 @@
     <section id="detail" class="detail" hidden></section>
   </main>
 
-  <script src="payer-rules.js?v=0.26.0"></script>
-  <script src="core.js?v=0.26.0"></script>
-  <script src="rules.js?v=0.26.0"></script>
-  <script src="fees.js?v=0.26.0"></script>
-  <script src="record.js?v=0.26.0"></script>
-  <script src="xlsx.js?v=0.26.0"></script>
-  <script src="audit.js?v=0.26.0"></script>
-  <script src="dashboard.js?v=0.26.0"></script>
+  <script src="payer-rules.js?v=0.27.0"></script>
+  <script src="core.js?v=0.27.0"></script>
+  <script src="rules.js?v=0.27.0"></script>
+  <script src="fees.js?v=0.27.0"></script>
+  <script src="record.js?v=0.27.0"></script>
+  <script src="xlsx.js?v=0.27.0"></script>
+  <script src="audit.js?v=0.27.0"></script>
+  <script src="dashboard.js?v=0.27.0"></script>
 </body>
 </html>

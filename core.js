@@ -498,6 +498,10 @@
 
   // ---------- build ----------
   const NOT_KEPT_FUTURE = new Set(['cancelled', 'canceled', 'no show', 'noshow', 'deleted']);
+  // v0.27 IVN export: a visit that counts for a clinic is kept (or arrived / checked in or out) on any date in the
+  // report, or expected (or confirmed). A blank status counts only on or after the as-of day (still to come).
+  const IVN_STATUS_RE = /^(kept|expected|arrived|confirmed|checked[ -]?(in|out))$/i;
+  const ivnCounts = (rec, asOf) => (rec.status ? IVN_STATUS_RE.test(rec.status.trim()) : rec.dt >= asOf);
 
   /**
    * rows: 2D array from the Import sheet (including title rows). cfg:
@@ -705,6 +709,8 @@
           vip, payerConfidence: lk.confidence || '', payerGuess: lk.payerId ? { payerId: lk.payerId, payerName: lk.payerName || '' } : null,
           appointments: future.map((a) => ({ date: fmtDate(a.dt), time: fmtTime(a.tmRaw), event: a.event, loc: a.loc, rendering: a.rendering, status: a.status, authCd: a.authCd, authCdLstEnc: a.authCdLst })),
           verifyRows, guarantor, apptCount: future.length,
+          // v0.27: clinic -> events of the kept or expected visits there (any date in the report), for the IVN export.
+          ivn: ivnVisits(recs, asOf),
         },
       });
     }
@@ -2004,43 +2010,95 @@
     return [...by.values()].map((r) => Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, cellOf(r, c) == null ? '' : cellOf(r, c)])));
   }
 
-  // Final file for the TMS Tracker and ESK Tracker imports: the benefits columns, then these. Add columns at the end only.
+  // The IVN export (v0.27; was the "tracker file"): the file the TMS, ESK and IVK Trackers import. The benefits
+  // columns, then these. Add columns at the end only (all three trackers read by header and ignore the rest).
   // Secondary Payer and Cost-share Flags (Secondary may cover / QMB / VIP on the day of export) let a later copay-log
-  // report join on Per Nbr + Sohar Date and spot copays a secondary or QMB should have covered.
-  const TRACKER_EXPORT_COLS = [...BENEFITS_EXPORT_COLS, 'Service', 'Source', 'Exported', 'Secondary Payer', 'Cost-share Flags'];
+  // report join on Per Nbr + Sohar Date and spot copays a secondary or QMB should have covered. Clinic (v0.27) is the
+  // clinic the export was narrowed to, blank for all clinics.
+  const TRACKER_EXPORT_COLS = [...BENEFITS_EXPORT_COLS, 'Service', 'Source', 'Exported', 'Secondary Payer', 'Cost-share Flags', 'Clinic'];
   const COST_SHARE_PILLS = ['Secondary may cover', 'QMB', 'VIP'];
 
-  /** "TMS", "ESK", "TMS; ESK" or '' from a patient's upcoming NextGen events. */
+  /** "TMS", "ESK", "IVK", "TMS; ESK" ... or '' from a patient's NextGen events. Esketamine is never IVK. */
   function serviceLine(text) {
     const s = String(text || '');
-    return [/\btms\b|magv|\bmt\b/i.test(s) ? 'TMS' : '', /esketamine|spravato|\besk\b/i.test(s) ? 'ESK' : ''].filter(Boolean).join('; ');
+    return [/\btms\b|magv|\bmt\b/i.test(s) ? 'TMS' : '', /esketamine|spravato|\besk\b/i.test(s) ? 'ESK' : '',
+      /\bivk\b|\biv ketamine\b|\bketamine infusion/i.test(s) ? 'IVK' : ''].filter(Boolean).join('; ');
+  }
+
+  /** Report rows of one patient -> {clinic: 'event; event'} for the visits that count (ivnCounts). */
+  function ivnVisits(recs, asOf) {
+    const out = {};
+    for (const rec of recs || []) {
+      if (!rec.loc || !ivnCounts(rec, asOf)) continue;
+      const ev = str(rec.event);
+      if (!(rec.loc in out)) out[rec.loc] = [];
+      if (ev && !out[rec.loc].includes(ev)) out[rec.loc].push(ev);
+    }
+    return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, v.join('; ')]));
+  }
+  /** Built patients -> Map(Per Nbr -> {clinic: events}), for trackerExport's clinic choice. */
+  function ivnIndex(patients) {
+    const m = new Map();
+    for (const p of patients || []) if (p && p['Per Nbr'] && p.x && p.x.ivn) m.set(String(p['Per Nbr']), p.x.ivn);
+    return m;
+  }
+  /** The clinics on the report with a kept or expected visit, and how many patients each: [{clinic, patients}] by name. */
+  function ivnClinics(index) {
+    const n = new Map();
+    for (const v of (index instanceof Map ? index.values() : [])) for (const c of Object.keys(v || {})) n.set(c, (n.get(c) || 0) + 1);
+    return [...n.entries()].map(([clinic, patients]) => ({ clinic, patients })).sort((a, b) => a.clinic.localeCompare(b.clinic));
+  }
+  /** "Sohar IVN Export 2026-11-04.csv", or "Sohar IVN Export - Castro Street 2026-11-04.csv" for one clinic. */
+  function ivnFileName(clinic, d) {
+    const c = str(clinic).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim();
+    return `${FILE_LABELS.tracker}${c ? ` - ${c}` : ''} ${localDate(d)}.csv`;
   }
 
   /**
    * One row per patient with a Sohar verification, for the tracker imports. Patients whose discovered coverage
    * is still waiting on a verification are left out and returned as pending, so their benefits are not stale.
+   * opts (v0.27): {clinic, visits: ivnIndex(patients)}. With a clinic, only patients with a kept or expected visit there
+   * are in the file (the rest are counted in otherClinic). With visits, Service comes from the kept and expected
+   * events (at that clinic when one is chosen), else from the upcoming events on the results, as before.
    */
-  function trackerExport(results, exportedAt, secondaryByPer) {
+  function trackerExport(results, exportedAt, secondaryByPer, opts) {
+    const o = opts || {}, clinic = str(o.clinic), visits = o.visits instanceof Map ? o.visits : null;
     const sec = (per) => (secondaryByPer instanceof Map ? secondaryByPer.get(per) : secondaryByPer && secondaryByPer[per]) || '';
     const pendingPer = new Set((results || []).filter((r) => r['Discovery Follow-up'] === 'Ready to verify' && r['Per Nbr']).map((r) => r['Per Nbr']));
     const events = new Map();
     for (const r of results || []) if (r['Per Nbr']) events.set(r['Per Nbr'], `${events.get(r['Per Nbr']) || ''} ${r['Next Event']} ${r['Upcoming Detail']}`);
+    const at = (per) => (visits && visits.get(String(per))) || null;
     const by = new Map();
+    let otherClinic = 0;
     for (const r of results || []) {
       if (r['Sent As'] !== 'Verification' || !r['Per Nbr'] || !r['Sohar Ref'] || pendingPer.has(r['Per Nbr']) || /^Superseded/.test(r.Action || '')) continue;
       const prev = by.get(r['Per Nbr']);
       if (!prev || String(r['Sohar Date']) > String(prev['Sohar Date'])) by.set(r['Per Nbr'], r);
     }
-    const rows = [...by.values()].map((r) => ({
+    const kept = [...by.values()].filter((r) => {
+      if (!clinic) return true;
+      const v = at(r['Per Nbr']);
+      if (v && Object.prototype.hasOwnProperty.call(v, clinic)) return true;
+      otherClinic++;
+      return false;
+    });
+    const serviceOf = (per) => {
+      const v = at(per);
+      const fromVisits = v ? serviceLine(clinic ? v[clinic] : Object.values(v).join('; ')) : '';
+      return fromVisits || (clinic ? '' : serviceLine(events.get(per)));
+    };
+    const rows = kept.map((r) => ({
       ...Object.fromEntries(BENEFITS_EXPORT_COLS.map((c) => [c, cellOf(r, c) == null ? '' : cellOf(r, c)])),
-      'Service': serviceLine(events.get(r['Per Nbr'])),
+      'Service': serviceOf(r['Per Nbr']),
       'Source': r['Discovery Follow-up'] === 'From discovery' ? 'Discovery, then verification' : 'Verification',
       'Exported': exportedAt || '',
       'Secondary Payer': str(sec(r['Per Nbr']) || r['Secondary Payer']),
       'Cost-share Flags': String(r.Pills || '').split(';').map((x) => x.trim()).filter((x) => COST_SHARE_PILLS.includes(x)).join('; '),
+      'Clinic': clinic,
     }));
-    const pending = (results || []).filter((r) => r['Discovery Follow-up'] === 'Ready to verify' && r['Per Nbr']);
-    return { rows, pending };
+    const pending = (results || []).filter((r) => r['Discovery Follow-up'] === 'Ready to verify' && r['Per Nbr']
+      && (!clinic || Object.prototype.hasOwnProperty.call(at(r['Per Nbr']) || {}, clinic)));
+    return { rows, pending, otherClinic };
   }
 
   // ---------- saved file names ----------
@@ -2054,7 +2112,7 @@
     discovery: 'Sohar Ready Import - Discovery',
     discoveryVerify: 'Sohar Ready Import - Verification (from Discovery)',
     verifyFailed: 'Sohar Ready Import - Discovery (from Verification)',
-    tracker: 'Sohar Tracker Import (TMS + ESK)',
+    tracker: 'Sohar IVN Export',
     benefits: 'Sohar Benefits',
     worklist: 'Sohar Results Worklist',
     tasks: 'NextGen Tasks',
@@ -3197,7 +3255,7 @@
   return {
     VERIFICATION_COLS, DISCOVERY_COLS, VERIFICATION_SHEET_COLS, DISCOVERY_SHEET_COLS, MAPPING_SHEET_COLS, tagOf, cellOf, fillNames, namesMissing, PATIENT_COLS, REVIEW_COLS, RESULTS_COLS, UPLOAD_COLS, BENEFITS_EXPORT_COLS,
     localDate, fileName, FILE_LABELS, BENEFIT_SHEET_COLS, BENEFIT_PCT_COLS, benefitsView, benefitsSummary,
-    resultKey, accumulateResults, stampSentPayerIds, combineResults, keepMemberIds, TRACKER_EXPORT_COLS, serviceLine, trackerExport, TASK_COLS, TASK_TYPES, TASK_FLAGS, IR_COLS, HEADER_SYNONYMS,
+    resultKey, accumulateResults, stampSentPayerIds, combineResults, keepMemberIds, TRACKER_EXPORT_COLS, serviceLine, trackerExport, ivnVisits, ivnIndex, ivnClinics, ivnFileName, TASK_COLS, TASK_TYPES, TASK_FLAGS, IR_COLS, HEADER_SYNONYMS,
     irCategory, parseIrPortal, irCrossReference, irMessage,
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, timeMins, soharTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,

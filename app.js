@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.26.0';
+  const VERSION = '0.27.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -244,6 +244,8 @@
     $('btnDlDiscVer').addEventListener('click', () => guard(downloadDiscoveryVerify, 'resultsResult'));
     $('btnDlVerFail').addEventListener('click', () => guard(downloadVerifyFailed, 'resultsResult'));
     $('btnDlFinal').addEventListener('click', () => guard(downloadTrackerFile, 'benBox'));
+    $('ivnClinic').addEventListener('change', () => { try { localStorage.setItem(IVN_KEY, $('ivnClinic').value); } catch (e) { /* private mode */ } });
+    $('ivnClinic').addEventListener('focus', fillIvnClinics);
     $('btnClearSaved').addEventListener('click', () => guard(clearSaved, 'resultsResult'));
     $('btnDlTasks').addEventListener('click',() => guard(async () => saveCSV(C.fileName('tasks'), C.TASK_COLS, await currentTasks(), 'resultsResult', { safe: true }), 'resultsResult'));
     $('btnFull').addEventListener('click', () => guard(() => openFull(), 'resultsResult'));
@@ -1025,7 +1027,7 @@
     state.flags = state.patients ? R.allFlags(inScopePatients(), state.results || [], rulesCfg()) : new Map();
     return state.flags;
   }
-  /** Per Nbr -> secondary payer (chart, else the one billed at the last encounter), for the tracker file. */
+  /** Per Nbr -> secondary payer (chart, else the one billed at the last encounter), for the IVN export. */
   function secondaryByPer() {
     const m = new Map();
     for (const p of state.patients || []) {
@@ -1639,6 +1641,7 @@
     await X.writeBenefits(benefitCols(), benefitRows(view), C.BENEFIT_PCT_COLS);
     state.benefits = view;
     $('benActions').hidden = !s.verified;
+    if (s.verified) fillIvnClinics();
     if (!s.verified) {
       box.innerHTML = !kinds.verification
         ? `<p class="warn"><b>No benefits yet: only discovery results are loaded.</b> Discovery finds the insurance; copay, deductible and OOP max come from a <b>verification</b> run.</p>
@@ -1906,18 +1909,39 @@
     if (noId) note('resultsResult', `${noId} row${noId === 1 ? ' has' : 's have'} no member ID. Sohar may reject ${noId === 1 ? 'it' : 'them'}; fill the memberId column on the Discovery Verify sheet and download again.`, 'warn');
   }
 
-  /** Final file for the TMS Tracker and ESK Tracker: verified benefits; patients still waiting on a discovery verification are listed, not included. */
+  /**
+   * v0.27 IVN export clinic picker: the clinics with a kept or expected visit on the report (core.ivnClinics). The
+   * choice is remembered on this computer; the Clinic tab's Config "Clinic location" is the first default.
+   */
+  const IVN_KEY = 'sohar.ivnClinic';
+  function fillIvnClinics() {
+    const sel = $('ivnClinic');
+    if (!sel) return;
+    const list = C.ivnClinics(C.ivnIndex(state.patients || []));
+    const sig = JSON.stringify(list);
+    if (sel.dataset.sig === sig) return; // same clinics: leave an open dropdown alone
+    sel.dataset.sig = sig;
+    let want = sel.dataset.ready ? sel.value : '';
+    if (!sel.dataset.ready) { try { want = localStorage.getItem(IVN_KEY) || ''; } catch (e) { want = ''; } if (!want) want = (state.cfg && state.cfg.clinicLocation) || ''; }
+    sel.innerHTML = '<option value="">All clinics</option>' + list.map((c) => `<option value="${esc(c.clinic)}">${esc(c.clinic)} (${c.patients})</option>`).join('');
+    sel.value = list.some((c) => c.clinic === want) ? want : '';
+    sel.dataset.ready = '1';
+  }
+  /** The IVN export (was the tracker file) for the TMS, ESK and IVK Trackers: verified benefits, all clinics or the one picked. */
   async function downloadTrackerFile() {
     const rows = (await currentResults()) || [];
     if (!rows.length) throw new Error('Upload Sohar results first.');
-    const out = C.trackerExport(rows, fmtStamp(new Date()), secondaryByPer());
-    if (!out.rows.length) throw new Error('No verified patients yet. The final file needs at least one Sohar verification result.');
-    await saveCSV(C.fileName('tracker'), C.TRACKER_EXPORT_COLS, out.rows, 'benBox');
-    const n = `${out.rows.length} patient${out.rows.length === 1 ? '' : 's'}`;
+    const clinic = ($('ivnClinic') && $('ivnClinic').value) || '';
+    const out = C.trackerExport(rows, fmtStamp(new Date()), secondaryByPer(), { clinic, visits: C.ivnIndex(state.patients || []) });
+    const where = clinic ? ` at ${clinic}` : '';
+    if (!out.rows.length) throw new Error(clinic && out.otherClinic ? `No verified patients have a kept or expected visit at ${clinic} on this report.` : 'No verified patients yet. The IVN export needs at least one Sohar verification result.');
+    await saveCSV(C.ivnFileName(clinic), C.TRACKER_EXPORT_COLS, out.rows, 'benBox');
+    const n = `${out.rows.length} patient${out.rows.length === 1 ? '' : 's'}${where}`;
+    const other = clinic && out.otherClinic ? ` ${out.otherClinic} verified patient${out.otherClinic === 1 ? ' has' : 's have'} no kept or expected visit there, so ${out.otherClinic === 1 ? 'is' : 'are'} left out.` : '';
     if (out.pending.length) {
       const who = out.pending.map((r) => `${C.tagOf(r)} · ${C.idLabel(r)}`).join(', ');
-      note('benBox', `${n} in the file. Left out, still waiting on the step 3 verification: ${who}. Save the tracker file again after that output is uploaded.`, 'warn');
-    } else note('benBox', `${n} in the tracker file. Import it in the TMS Tracker and the ESK Tracker.`, 'ok');
+      note('benBox', `${n} in the IVN export.${other} Left out, still waiting on the step 3 verification: ${who}. Save the IVN export again after that output is uploaded.`, 'warn');
+    } else note('benBox', `${n} in the IVN export.${other} Import it in the TMS, ESK or IVK Tracker.`, 'ok');
   }
 
   let clearArmed = 0;
@@ -2038,6 +2062,8 @@
       guarantor: { count: (state.guarantorCandidates || []).length, noDob: (state.guarantorCandidates || []).filter((x) => !x.hasDob).length },
       // v0.20 patient record: Sohar Flow results and the Payer Outcomes ledger (older checks, for the timeline), trimmed.
       flow: await currentFlow(), outcomes: await timelineOutcomes(), profiles: await patientProfiles(),
+      // v0.27 IVN export: clinic -> kept/expected events per Per Nbr, and secondary payers, so full screen saves the same file.
+      ivn: { visits: [...C.ivnIndex(state.patients || []).entries()], secondary: [...secondaryByPer().entries()] },
       visits: await patientVisits(), notes: await patientNotesByKey(), audits: await currentAudits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On

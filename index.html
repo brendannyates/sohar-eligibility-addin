@@ -6,7 +6,7 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.26.0">
+  <link rel="stylesheet" href="style.css?v=0.27.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -150,7 +150,11 @@
           <h2>Benefits and OOP max</h2>
           <div id="benBox" class="result"><p class="hint">Copay, deductible and out-of-pocket max come from Sohar's <b>verification</b> output. They show here once it is uploaded.</p></div>
           <div class="actions" id="benActions" hidden>
-            <button class="primary" id="btnDlFinal"><span>Save tracker file (TMS + ESK)</span></button>
+            <label class="ivnpick">IVN export for
+              <select id="ivnClinic" aria-describedby="ivnHint"><option value="">All clinics</option></select>
+            </label>
+            <p class="hint" id="ivnHint">One clinic keeps only patients with a kept or expected visit there on the report. Import the file in the TMS, ESK or IVK Tracker.</p>
+            <button class="primary" id="btnDlFinal"><span>Save IVN export</span></button>
             <button class="primary alt" id="btnCopyBen">Copy OOP / deductible message</button>
             <button class="link" data-goto="Benefits">Benefits sheet</button>
           </div>
@@ -253,15 +257,15 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.26.0"></script>
-  <script src="core.js?v=0.26.0"></script>
-  <script src="rules.js?v=0.26.0"></script>
-  <script src="fees.js?v=0.26.0"></script>
-  <script src="record.js?v=0.26.0"></script>
-  <script src="audit.js?v=0.26.0"></script>
-  <script src="xlsx.js?v=0.26.0"></script>
-  <script src="payer-knowledge.js?v=0.26.0"></script>
-  <script src="excel.js?v=0.26.0"></script>
-  <script src="app.js?v=0.26.0"></script>
+  <script src="payer-rules.js?v=0.27.0"></script>
+  <script src="core.js?v=0.27.0"></script>
+  <script src="rules.js?v=0.27.0"></script>
+  <script src="fees.js?v=0.27.0"></script>
+  <script src="record.js?v=0.27.0"></script>
+  <script src="audit.js?v=0.27.0"></script>
+  <script src="xlsx.js?v=0.27.0"></script>
+  <script src="payer-knowledge.js?v=0.27.0"></script>
+  <script src="excel.js?v=0.27.0"></script>
+  <script src="app.js?v=0.27.0"></script>
 </body>
 </html>

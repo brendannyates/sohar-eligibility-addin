@@ -23,6 +23,7 @@
   // Per Nbr -> upcoming visits with the report's Pre-Check Complete and the checklist; when each source last came in.
   let visits = {}, lastUpdated = null, admins = []; // admins: Config "Admin names"
   let notes = {}; // patient key (MRN) -> the patient's notes, newest first (record.patientNotes)
+  let ivn = { visits: [], secondary: [] }; // v0.27 IVN export: [Per Nbr, {clinic: events}] and [Per Nbr, secondary payer] from the pane
   let savedAudits = { summary: [], lines: [] }; // v0.23.1: the last saved account audit per patient (audit.AUDIT_COLS rows)
   const take = C.messageAssembler();
   // Flag pills come from the pane as a Pills column ("Medi-Cal; Re-verify"). Colors from rules.js.
@@ -64,6 +65,7 @@
   }
 
   function load(m) {
+    ivn = { visits: (m.ivn && m.ivn.visits) || [], secondary: (m.ivn && m.ivn.secondary) || [] }; fillIvnClinicsFs();
     clinic = m.clinic || null; skipped = m.skipped || []; skipCols = m.skipCols || []; learning = m.learning || null; guarantor = m.guarantor || { count: 0, noDob: 0 };
     rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; verFailed = m.verifyFailed || []; scope = m.scope || 'upcoming'; web = !!m.web;
     asOf = m.asOf ? new Date(m.asOf) : null;
@@ -1391,6 +1393,18 @@
   }
 
   // ---------- saving ----------
+  /** v0.27 IVN export clinic picker (same choice as the pane, remembered on this computer). */
+  function fillIvnClinicsFs() {
+    const sel = $('ivnClinicFs');
+    if (!sel) return;
+    const list = C.ivnClinics(new Map(ivn.visits));
+    let want = sel.dataset.ready ? sel.value : '';
+    if (!sel.dataset.ready) { try { want = localStorage.getItem('sohar.ivnClinic') || ''; } catch (e) { want = ''; } }
+    sel.innerHTML = '<option value="">All clinics</option>' + list.map((c) => `<option value="${esc(c.clinic)}">${esc(c.clinic)} (${c.patients})</option>`).join('');
+    sel.value = list.some((c) => c.clinic === want) ? want : '';
+    if (!sel.dataset.ready) sel.addEventListener('change', () => { try { localStorage.setItem('sohar.ivnClinic', sel.value); } catch (e) { /* private mode */ } });
+    sel.dataset.ready = '1';
+  }
   function save(kind) {
     let name, cols, data, extra = '', safe = false; // safe: typed notes, so guard against Excel formulas
     if (kind === 'verification' || kind === 'discovery') {
@@ -1425,10 +1439,13 @@
     } else if (kind === 'tasks') { name = C.fileName('tasks').replace('Tasks', 'Tasks (open)'); cols = C.TASK_COLS; data = tasks.filter(open); safe = true; }
     else if (kind === 'allTasks') { name = C.fileName('tasks'); cols = C.TASK_COLS; data = tasks; safe = true; }
     else if (kind === 'tracker') {
-      const out = C.trackerExport(rows, new Date().toLocaleString());
-      if (!out.rows.length) { notice('No verified patients yet. The tracker file needs at least one Sohar verification result.', false); return; }
-      name = C.fileName('tracker'); cols = C.TRACKER_EXPORT_COLS; data = out.rows;
-      if (out.pending.length) extra = ` ${out.pending.length} left out, still waiting on the verification of what discovery found.`;
+      // v0.27 IVN export: all clinics or the one picked (kept or expected visits there on the report).
+      const clinic = ($('ivnClinicFs') && $('ivnClinicFs').value) || '';
+      const out = C.trackerExport(rows, new Date().toLocaleString(), new Map(ivn.secondary), { clinic, visits: new Map(ivn.visits) });
+      if (!out.rows.length) { notice(clinic && out.otherClinic ? `No verified patients have a kept or expected visit at ${clinic} on this report.` : 'No verified patients yet. The IVN export needs at least one Sohar verification result.', false); return; }
+      name = C.ivnFileName(clinic); cols = C.TRACKER_EXPORT_COLS; data = out.rows;
+      if (clinic && out.otherClinic) extra += ` ${out.otherClinic} verified patient${out.otherClinic === 1 ? '' : 's'} with no kept or expected visit at ${clinic} left out.`;
+      if (out.pending.length) extra += ` ${out.pending.length} left out, still waiting on the verification of what discovery found.`;
     }
     else if (kind === 'benefits') { name = C.fileName('benefits'); cols = C.BENEFIT_SHEET_COLS; data = C.benefitsView(rows).rows; }
     else if (kind === 'ir') {
@@ -1591,7 +1608,7 @@
       rows: [], mapping: [{ id: '80101-M' }], payerTestRows: [] };
     // One task the clinic ticked done with a note (Clinic Template Tool file or the clinic inbox), made up.
     const demoTasks = C.buildTasks(res).map((t, i) => (i === 0 ? { ...t, Done: `Yes (clinic ${t['Next Location']})`, 'Clinic Note': `Called the patient, new card scanned (Front desk, ${t['Next Location']}, 10/19)` } : t));
-    load({ results: res, tasks: demoTasks, exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees,
+    load({ results: res, tasks: demoTasks, ivn: { visits: res.filter((r) => r['Per Nbr'] && r['Next Location']).map((r) => [r['Per Nbr'], { [r['Next Location']]: r['Next Event'] || '' }]), secondary: [] }, exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees,
       clinic: demoClinic, skipped: demoSkipped, skipCols: ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'], learning: demoLearning, guarantor: { count: 2, noDob: 1 },
       flow: demoFlow, outcomes: demoOutcomes, profiles: demoProfiles, visits: demoVisits, admins: ['Jordan Lee', 'Sam Ortiz'],
       notes: { 80100: [{ note: 'Called the patient; new card scanned, plan unchanged', by: 'Jordan Lee', when: '10/19/2026 4:12 PM', visit: '' }] },
