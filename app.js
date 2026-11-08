@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.27.0';
+  const VERSION = '0.28.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -25,6 +25,116 @@
     // v0.14: Clinic Notes / Clinic Payer Notes rows brought back from Clinic Eligibility files.
     clinicNotes: [], clinicPayerNotes: [] };
   const $ = (id) => document.getElementById(id);
+  const W = window.SoharWho; // v0.28: who is using the add-in (who.js)
+
+  // ---------- loading screen (v0.28) ----------
+  // Shown on open while the workbook is read. Each step ticks as autoRefresh moves past it (step() names what runs).
+  const BOOT = [['Connecting to the workbook', null], ['Reading the NextGen report', /payer credential|clinic notes|Import sheet|report on/],
+    ['Building the patient list', /building the patient/], ['Matching saved Sohar results', /saved Sohar|IR cross/], ['Checking the rules and the clinic inbox', /checking the rules|clinic inbox/]];
+  const boot = { i: 0, m: [], done: false };
+  function renderBoot() {
+    const ol = $('bootSteps'); if (!ol) return;
+    ol.innerHTML = BOOT.map(([t], i) => `<li class="bstep ${boot.i > i ? 'done' : boot.i === i ? 'now' : 'next'}"><span class="k">${boot.i > i ? '✓' : ''}</span><span><span class="t">${t}</span><span class="m">${esc(boot.m[i] || '')}</span></span></li>`).join('');
+  }
+  function bootAt(i, note) { if (boot.done || i < boot.i) return; if (note != null) boot.m[boot.i] = note; boot.i = i; renderBoot(); }
+  /** Loading finished (or stopped): the steps not reached say why, the screen goes, then the name screen if needed. */
+  function bootDone(skipped) {
+    if (boot.done) return;
+    for (let i = boot.i; i < BOOT.length; i++) if (skipped && i > 0 && !boot.m[i]) boot.m[i] = skipped;
+    boot.i = BOOT.length; renderBoot(); boot.done = true;
+    $('boot').hidden = true;
+    startWho();
+  }
+  renderBoot();
+  // The Dev Update bell docks in the toolbar (#duSlot gets .du-slot) once the loading and name screens are gone; over them
+  // there is no toolbar, so it floats top right (dev-updates.js re-checks after every change).
+  const syncSlot = () => $('duSlot').classList.toggle('du-slot', $('boot').hidden && $('whoScreen').hidden);
+  new MutationObserver(syncSlot).observe($('boot'), { attributes: true, attributeFilter: ['hidden'] });
+  new MutationObserver(syncSlot).observe($('whoScreen'), { attributes: true, attributeFilter: ['hidden'] });
+  syncSlot();
+
+  // ---------- who is using the add-in (v0.28, the IVK Tracker's "Enter your name") ----------
+  // The workbook's list is in its document settings (no sheet); today's pick is kept on this computer per workbook.
+  const who = { wb: '', name: '', users: [], picking: false };
+  const lsGet = (k) => { try { return k ? localStorage.getItem(k) || '' : ''; } catch (e) { return ''; } };
+  const lsSet = (k, v) => { try { if (k) localStorage.setItem(k, v); } catch (e) { /* storage blocked: this session only */ } };
+  function workbookKey() {
+    const url = X.docUrl ? X.docUrl() : '';
+    if (url) return W.wbKeyOf(url);
+    let id = X.getDoc ? X.getDoc(W.WB_ID_SETTING) : '';
+    if (!id) { id = `id${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`; if (X.setDoc) X.setDoc(W.WB_ID_SETTING, id).catch(() => { /* read-only: this session only */ }); }
+    return W.wbKeyOf(id);
+  }
+  const whoRead = () => W.whoRec(lsGet(W.whoKey(who.wb)));
+  const whoList = () => W.listFor(who.users, REC.adminNames(state.cfg ? state.cfg.adminNames : who.adminNames));
+  const loadUsers = () => { who.users = W.usersFrom(X.getDoc ? X.getDoc(W.USERS_SETTING) : []); };
+  async function startWho() {
+    if (!X) return;
+    try { who.wb = workbookKey(); loadUsers(); } catch (e) { console.error('who', e); }
+    // No report yet means Config was not read: its "Admin names" are still offered.
+    if (!state.cfg && !state.clinicFile) who.adminNames = await X.readConfig().then((c) => c.adminNames).catch(() => '');
+    who.name = W.pickedToday(whoRead(), W.dayIso(), whoList());
+    renderWhoLine();
+    if (!who.name) showWho();
+  }
+  function renderWhoLine() {
+    $('whoLine').hidden = !who.name;
+    $('whoName').textContent = who.name;
+  }
+  function setWho(name) {
+    who.name = name || ''; who.picking = false;
+    if (name) lsSet(W.whoKey(who.wb), JSON.stringify(W.whoPick(whoRead(), name, W.dayIso())));
+    $('whoScreen').hidden = true;
+    renderWhoLine();
+    sendToDialog({ type: 'who', name: who.name, users: whoList(), here: whoRead().used }).catch(() => {});
+  }
+  /** Pick a name; one from Config "Admin names" or typed in goes on the workbook's list first. */
+  async function pickWho(name, typed) {
+    const n = W.cleanName(name);
+    if (!n) return '';
+    const listed = who.users.find((u) => W.userKey(u.name) === W.userKey(n));
+    if (listed) { setWho(listed.name); return listed.name; }
+    let saved = n;
+    try {
+      if (X.refreshDoc) await X.refreshDoc(); // a name another computer added since this one opened
+      loadUsers();
+      const r = W.addUser(who.users, n, fmtStamp(new Date()));
+      saved = r.name;
+      if (r.users.length !== who.users.length && X.setDoc) await X.setDoc(W.USERS_SETTING, r.users);
+      who.users = r.users;
+    } catch (e) { console.error('who save', e); if (typed) setStatus(`Your name is used today, but it could not be saved to this workbook's list: ${e.message}`, 'warn'); }
+    setWho(saved);
+    return saved;
+  }
+  function showWho() {
+    const L = W.pickOrder(whoList(), whoRead().used), cancel = who.picking && who.name, box = $('whoScreen');
+    box.innerHTML = `<div class="bootin"><div class="whohero"><h1>Enter your name</h1>
+      <p class="muted">${L.length ? 'Pick yours below, or add it if you’re new. Pre-check ticks, notes, code rules and saved audits say who did what.' : 'Nobody has added their name to this workbook yet. Add yours to start. Pre-check ticks, notes, code rules and saved audits say who did what.'}</p></div>
+      ${L.length ? `<div class="wholist" role="group" aria-label="People on this workbook">${L.map((u) => `<button type="button" class="whob" data-who="${esc(u.name)}">${esc(u.name)}${u.here ? '<span class="tag">On this computer</span>' : ''}</button>`).join('')}</div>` : ''}
+      <details class="whonew"${L.length ? '' : ' open'}><summary>${L.length ? 'I’m not on the list' : 'Add your name'}</summary>
+        <label>Your name<input type="text" id="whoNew" autocomplete="off" spellcheck="false" maxlength="30"></label><p class="hint">Usually your first name and last initial.</p>
+        <div class="actions"><button type="button" class="primary" id="btnWhoAdd">Add me and start</button></div></details>
+      ${cancel ? `<div class="actions"><button type="button" class="link" id="btnWhoStay">Stay as ${esc(who.name)}</button></div>` : ''}</div>`;
+    box.hidden = false;
+    const f = L.length ? box.querySelector('.whob') : $('whoNew'); if (f) f.focus();
+  }
+  $('whoScreen').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.who) pickWho(b.dataset.who);
+    else if (b.id === 'btnWhoAdd') { const v = W.cleanName($('whoNew').value); if (v) pickWho(v, true); else $('whoNew').focus(); }
+    else if (b.id === 'btnWhoStay') { who.picking = false; $('whoScreen').hidden = true; }
+  });
+  $('whoScreen').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'whoNew') { e.preventDefault(); $('btnWhoAdd').click(); } });
+  $('btnSwitchUser').addEventListener('click', () => { who.picking = true; showWho(); });
+  // A pane left open overnight asks again on the new day.
+  setInterval(() => {
+    if (!boot.done || !who.name || !$('whoScreen').hidden) return;
+    if (!W.pickedToday(whoRead(), W.dayIso(), whoList())) { who.name = ''; renderWhoLine(); showWho(); sendToDialog({ type: 'who', name: '', users: whoList(), here: whoRead().used }).catch(() => {}); }
+  }, 60000);
+
+  // Dev Update notices (dev-updates.js): the bell top right. What full screen dismisses comes back through fromDialog;
+  // while full screen is open, send passes what the pane dismisses to it.
+  if (window.DevUpdates) DevUpdates.init({ app: 'sohar', send: null });
 
   // ---------- boot ----------
   document.getElementById('version').textContent = `v${VERSION}`;
@@ -32,11 +142,11 @@
   $('btnRefresh').addEventListener('click', async (e) => {
     const b = e.currentTarget;
     if (!X || state.clinicFile) { location.reload(); return; }
-    b.disabled = true;
+    b.disabled = true; b.classList.add('spin');
     await guard(async () => { setStatus('Refreshing from this workbook…', ''); await loadConfig(); await refreshAll();
       if ($('btnBuild').disabled) setStatus('Refreshed. No usable report has been uploaded yet; see step 1.', 'bad');
     }, 'scanResult');
-    b.disabled = false;
+    b.disabled = false; b.classList.remove('spin');
   });
   if (window.Office && Office.onReady) {
     Office.onReady((info) => { if (info.host === Office.HostType.Excel) startExcel(); else startDemo('Not running inside Excel.'); });
@@ -60,9 +170,11 @@
         // Still wire the buttons so each step can say what is wrong, instead of the whole pane going dead.
         setStatus(`This workbook is missing ${missing.join(', ')}. Steps that use them will fail; open the Sohar Eligibility template.`, 'bad');
         wire();
+        bootAt(1, 'Not the Sohar Eligibility template'); bootDone('Skipped');
         return;
       }
       setStatus('Template workbook detected.', 'ok');
+      bootAt(1, 'Connected');
       // A save cut off last time (Excel closed, network drop): finish it before anything reads those sheets.
       const fixed = await X.recoverAll().catch((e) => { console.error(e); return []; });
       if (fixed.length) {
@@ -70,6 +182,7 @@
         setStatus(state.recoveredNote, 'warn');
       }
     } catch (e) { setStatus(`Could not read the workbook: ${e.message}`, 'bad'); }
+    bootAt(1);
     wire();
     await autoRefresh();
   }
@@ -84,15 +197,17 @@
       step('reading the Import sheet');
       const rows = await X.readImportRows();
       const det = C.detectHeader(rows);
-      if (!det || det.missing.length || det.dataEnd <= det.headerRow + 1) { step(''); await loadInbox(); return; }
+      if (!det || det.missing.length || det.dataEnd <= det.headerRow + 1) { step(''); await loadInbox(); bootDone('No report uploaded yet'); return; }
       setStatus('Loading what is already in this workbook…', '');
       await loadConfig();
       await refreshAll();
+      bootDone(state.patients ? '' : 'No usable report yet');
     } catch (e) {
       console.error(e);
       setStatus(`Opened, but loading stopped${state.step ? ` while ${state.step}` : ''}: ${errText(e)}`, 'bad');
       state.step = '';
       await loadInbox(); // its own errors stay in its box
+      bootDone('Stopped: see the message at the top');
     }
   }
 
@@ -156,6 +271,7 @@
     // ?tab=clinic or #clinic opens the Clinic tab, as a clinic file would.
     showPaneTab(/(^|[?&])tab=clinic\b/.test(location.search) || location.hash === '#clinic' ? 'clinic' : 'admin');
     wire();
+    bootAt(1, 'Demo workbook');
     autoRefresh();
   }
 
@@ -177,6 +293,7 @@
     renderClinic(m.Location || '');
     showPaneTab('clinic');
     diagnostics();
+    bootAt(1, 'Clinic file'); bootDone('Not needed in a clinic file');
   }
 
   // ---------- pane tabs: Clinic | Admin ----------
@@ -2065,6 +2182,8 @@
       // v0.27 IVN export: clinic -> kept/expected events per Per Nbr, and secondary payers, so full screen saves the same file.
       ivn: { visits: [...C.ivnIndex(state.patients || []).entries()], secondary: [...secondaryByPer().entries()] },
       visits: await patientVisits(), notes: await patientNotesByKey(), audits: await currentAudits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
+      // v0.28: who picked their name in the pane (ticks, notes, code rules and audits record it) and the list to switch to.
+      who: { name: who.name, users: whoList(), here: whoRead().used },
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -2218,7 +2337,8 @@
   }
 
   async function openFull(focus) {
-    const url = new URL(`dashboard.html?v=${VERSION}`, location.href).href;
+    // The Dev Updates already dismissed here go along, so full screen does not show them again.
+    const url = window.DevUpdates ? DevUpdates.dialogUrl(`dashboard.html?v=${VERSION}`) : new URL(`dashboard.html?v=${VERSION}`, location.href).href;
     if (state.demo) { showFloat(url + (feesOn() ? '&fees=1' : '') + (focus ? `#${focus}` : '')); return; } // browser preview: the same float, drawn in the page
     if (!Office.context.requirements.isSetSupported('DialogApi', '1.2')) throw new Error('This version of Excel cannot open the full-screen window (needs DialogApi 1.2). Use the Sohar Results and NextGen Tasks sheets.');
     if (dlg) { await sendToDialog(await payload(focus)); return; }
@@ -2229,16 +2349,19 @@
         return;
       }
       dlg = r.value;
+      if (window.DevUpdates) DevUpdates.setSend((m) => sendToDialog(m));
       dlg.addEventHandler(Office.EventType.DialogMessageReceived, (arg) => guard(() => fromDialog(arg.message), 'resultsResult'));
-      dlg.addEventHandler(Office.EventType.DialogEventReceived, () => { dlg = null; });
+      dlg.addEventHandler(Office.EventType.DialogEventReceived, () => { dlg = null; if (window.DevUpdates) DevUpdates.setSend(null); });
     });
   }
 
   async function fromDialog(raw) {
     const m = take(raw);
     if (!m) return;
+    if (window.DevUpdates && DevUpdates.receive(m)) return; // a Dev Update dismissed in full screen
     if (m.type === 'ready') { await sendToDialog(await payload(state.pendingFocus)); state.pendingFocus = ''; }
-    else if (m.type === 'close') { if (dlg) dlg.close(); dlg = null; }
+    else if (m.type === 'close') { if (dlg) dlg.close(); dlg = null; if (window.DevUpdates) DevUpdates.setSend(null); }
+    else if (m.type === 'who-pick') { await pickWho(m.name, !!m.typed); } // "Switch user" in full screen; setWho tells it back
     else if (m.type === 'task-done') {
       await X.setTaskDone(m.key, m.done);
       if (state.tasks) state.tasks = state.tasks.map((t) => (t['Task Key'] === m.key ? { ...t, Done: m.done ? 'Yes' : '' } : t));
@@ -2393,7 +2516,10 @@
   }
   /** Run fn; show any error next to the step that failed (boxId) as well as in the header. */
   /** The step running now, for error messages (blank when none). */
-  function step(what) { state.step = what; }
+  function step(what) {
+    state.step = what;
+    if (!boot.done && what) { const i = BOOT.findIndex(([, re]) => re && re.test(what)); if (i > boot.i) bootAt(i, boot.i === 2 && state.patients ? `${state.patients.length} patient${state.patients.length === 1 ? '' : 's'}` : null); }
+  }
   /**
    * An error's message plus where Excel says it failed (Office.js debugInfo: e.g. "WorksheetCollection.getItem"),
    * so an error like "the specified worksheet cannot be found" says which call it was.
@@ -2454,6 +2580,7 @@
   // ---------- demo adapter (browser preview, synthetic data) ----------
   // Every name, MRN, member ID and auth code below is made up. Dates are relative to today so the demo stays current.
   function demoAdapter() {
+    const docSettings = { [W.USERS_SETTING]: [{ name: 'Sam O.', added: '' }, { name: 'Ana R.', added: '' }, { name: 'Jo K.', added: '' }] };
     const hdr = ['Appointment Pre-Check Complete', 'Res Name', 'Pat Sts', 'Portal Enrollment', 'Pat Name', 'Appt Date', 'Beg Tm', 'Event', 'Details', 'Loc Name',
       'Gender Identity', 'Current Gender', 'Preferred Pronoun', 'MRN', 'Status', 'Dur', 'Birth Dt', 'Rendering', 'End Tm', 'Per Nbr', 'Nxt Appt Dt', 'Nxt Beg Tm',
       'Nxt Event', 'Rschd', 'Rschd Desc', 'Guar Zip', 'Chkin Dt', 'Chkout Dt', 'Sec Payer (Lst Enc)', 'Fin Class (Lst Enc)', 'Pol Nbr (Lst Enc)', 'Auth Cd (Lst Enc)',
@@ -2661,6 +2788,9 @@
         return list.length;
       },
       async replaceTable() {}, async setConfigValue() {}, async activate() {}, async templateCheck() { return []; }, async recoverAll() { return []; }, takeRecovered() { return []; },
+      // v0.28: document settings, in memory (made-up names). The demo workbook has one fixed key, so a pick lasts the day here too.
+      getDoc(k) { return docSettings[k] ?? null; }, async setDoc(k, v) { if (v == null) delete docSettings[k]; else docSettings[k] = v; return true; },
+      async refreshDoc() {}, docUrl() { return 'demo:sohar-eligibility'; },
     };
   }
 })();

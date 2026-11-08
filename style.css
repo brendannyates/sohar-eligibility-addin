@@ -42,7 +42,6 @@ b { font-weight: 600; }
 .top { padding: 14px 16px 10px; border-bottom: 1px solid var(--line); }
 .top h1 { margin: 0 0 2px; font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
 .title-actions { display: flex; gap: 4px; align-items: center; }
-#btnRefresh { font-size: 14px; line-height: 1; padding: 3px 7px; }
 .titlebar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 4px 8px; }
 .status { margin: 0; color: var(--muted); font-size: 12px; }
 .status.ok::before, .status.bad::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
@@ -445,7 +444,6 @@ button.primary.alt:hover:not(:disabled) { background: var(--t-sunken); }
 button.filebtn { padding: 9px 14px; }
 button.small { min-height: 32px; padding: 0 10px; border-radius: 8px; border-color: var(--t-line2); font-size: 13px; font-weight: 600; }
 button.small:hover { background: var(--t-sunken); border-color: var(--t-line2); }
-#btnRefresh { padding: 0 9px; }
 button.link, a.link { color: var(--t-primary); font-weight: 600; text-decoration: none; }
 button.link:hover, a.link:hover { color: var(--t-primary-deep); text-decoration: underline; }
 select, input[type="date"], input[type="search"], input[type="text"], input[type="number"] { min-height: 40px; padding: 0 10px; border: 1px solid var(--t-line2); border-radius: 10px; background: var(--t-raised); color: var(--t-fg); }
@@ -564,8 +562,9 @@ h3.cday { margin: 14px 0 6px; font-size: 14px; }
 .pv-nav button:hover { background: var(--t-sunken); }
 .pv-nav button[aria-current="page"] { background: var(--green-bg); color: var(--green-fg); font-weight: 600; }
 .pv-foot { margin-top: auto; display: flex; flex-direction: column; gap: 10px; padding-top: 8px; border-top: 1px solid var(--t-line); }
-.pv-as { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--t-muted); }
-.pv-as select, .pv-as input { min-height: 40px; padding: 0 10px; border-radius: 10px; border: 1px solid var(--t-line2); background: var(--t-raised); color: var(--t-fg); font-weight: 600; font-size: 14px; }
+.pv-as { font-size: 12px; color: var(--t-muted); }
+.pv-as b { color: var(--t-fg); }
+.pv-as button.link { padding: 2px 0 2px 4px; font-size: 12px; }
 .pv-steps { display: flex; gap: 8px; }
 .pv-btn { flex: 1; min-height: 40px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--t-line2); background: var(--t-raised); color: var(--t-fg); font-size: 13px; font-weight: 600; cursor: pointer; }
 .pv-btn:hover { background: var(--t-sunken); }
@@ -763,3 +762,56 @@ select.au-inline { display: inline-block; width: auto; min-height: 30px; margin:
 .assign label { flex: 1 1 220px; min-width: 0; }
 .assign select { width: 100%; }
 .assign button.small { min-height: 40px; padding: 0 14px; }
+
+/* v0.28: the loading screen on open, then "Enter your name" (the IVK Tracker's layout). */
+.boot { position: fixed; inset: 0; z-index: 950; display: flex; overflow: auto; background: var(--t-page); padding: 24px; }
+.boot[hidden] { display: none; }
+.bootin { width: min(380px, 100%); margin: auto; display: flex; flex-direction: column; align-items: center; text-align: center; }
+.bootin h1 { margin: 22px 0 0; font-size: 26px; font-weight: 600; letter-spacing: -0.01em; }
+.bootin > p, .whohero p { margin: 6px 0 0; font-size: 14px; color: var(--t-muted); }
+.spinner { width: 44px; height: 44px; border-radius: 50%; border: 4px solid var(--t-line); border-top-color: var(--t-primary); animation: sohar-spin .9s linear infinite; }
+@keyframes sohar-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2.4s; } }
+.bsteps { list-style: none; width: 100%; margin: 24px 0 0; padding: 0; text-align: left; }
+.bstep { display: grid; grid-template-columns: 22px 1fr; gap: 12px; align-items: start; padding: 8px 0; border-top: 1px solid var(--t-line); }
+.bstep .k { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--t-line); margin-top: 1px; display: grid; place-items: center; font-size: 11px; font-weight: 600; color: var(--t-on-primary); }
+.bstep.done .k { background: var(--t-primary); border-color: var(--t-primary); }
+.bstep.now .k { border-color: var(--t-fg); }
+.bstep.next .t { color: var(--t-muted); }
+.bstep .t { font-size: 14px; }
+.bstep .m { display: block; min-height: 17px; font-size: 12.5px; color: var(--t-muted); margin-top: 1px; }
+.boot.who .bootin { width: min(420px, 100%); }
+.whohero { display: flex; flex-direction: column; align-items: center; }
+.whohero h1 { margin: 0; }
+.wholist { display: flex; flex-direction: column; gap: 8px; width: 100%; margin-top: 22px; }
+.wholist .whob { display: flex; justify-content: space-between; align-items: center; gap: 8px; width: 100%; min-height: 48px; padding: 0 14px; font-size: 16px; text-align: left; background: var(--t-raised); color: var(--t-fg); border: 1px solid var(--t-line2); border-radius: 10px; }
+.wholist .whob:hover { border-color: var(--t-primary); background: var(--t-sunken); }
+.wholist .whob .tag { background: var(--green-bg); color: var(--green-fg); }
+.whonew { width: 100%; margin-top: 14px; text-align: left; }
+.whonew > summary { cursor: pointer; display: flex; align-items: center; min-height: 44px; font-weight: 600; color: var(--t-primary); }
+.whonew label { margin-top: 4px; }
+.whonew input { width: 100%; }
+.whonew .hint { margin-top: 4px; }
+.who .actions { justify-content: center; }
+.whonew .actions { justify-content: flex-start; }
+/* the name in the pane header and the full-screen title bar, with Switch user */
+.wholine { margin: 4px 0 0; font-size: 12.5px; color: var(--t-muted); }
+.wholine b { color: var(--t-fg); }
+.wholine button.link { padding: 0 0 0 4px; font-size: 12.5px; }
+.titlebar .wholine { margin: 0 0 0 auto; }
+/* Dev Update bell (dev-updates.css), in this add-in's tokens; hidden behind the demo's full-screen float */
+.devupd { --surface: var(--t-raised); --surface-2: var(--t-line); --accent: var(--t-primary); --accent-soft: var(--green-bg); --ink: var(--t-fg); --muted: var(--t-muted); }
+body:has(#floatBox) .devupd { display: none; }
+body:has(> .boot:not([hidden])) { overflow: hidden; }
+/* v0.28 toolbar (the IVK Tracker's): icon tools flush right, the Dev Update bell docked last (#duSlot) */
+.titlebar .tools { display: flex; align-items: center; gap: 2px; }
+.ibtn.spin svg { animation: sohar-spin .9s linear infinite; }
+.ibtn { position: relative; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 12px; background: none; color: var(--t-muted); transition: background .2s, color .2s; }
+.ibtn:hover:not(:disabled) { background: var(--t-sunken); color: var(--t-fg); }
+.ibtn:disabled { opacity: .5; cursor: default; }
+.ibtn[hidden] { display: none; }
+/* toolbar hover labels: what the press does */
+.tools .ibtn[data-tip]:hover::after, .tools .ibtn[data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; top: calc(100% + 6px); right: 0; white-space: nowrap; padding: 5px 9px; border-radius: 8px; background: var(--t-fg); color: var(--t-raised); font-size: 12px; font-weight: 500; line-height: 1.2; pointer-events: none; z-index: 60; }
+.devupd.du-docked .du-bell:hover { background: var(--t-sunken); color: var(--t-fg); }
+/* over the loading and name screens there is no toolbar: the bell floats above them */
+body:has(> .boot:not([hidden])) > .devupd { z-index: 960; }

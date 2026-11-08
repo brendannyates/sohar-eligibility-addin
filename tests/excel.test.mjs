@@ -927,6 +927,7 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
     lockNameSheets: () => X.lockNameSheets(),
     tidyTabs: () => X.tidyTabs(),
     dropAccountAuditLines: () => X.dropAccountAuditLines(),
+    setDoc: () => X.setDoc('soharUsers', [{ name: 'Sam O.', added: '' }]), // document settings, not a sheet
   };
   // Every other write* export: a plain (cols, rows) table save.
   for (const k of Object.keys(X)) if (/^write/.test(k) && !calls[k]) calls[k] = () => X[k](['Key', 'Record'], two(['Key', 'Record']));
