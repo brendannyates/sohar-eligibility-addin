@@ -6,8 +6,8 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.28.0">
-  <link rel="stylesheet" href="dev-updates.css?v=0.28.0">
+  <link rel="stylesheet" href="style.css?v=0.28.1">
+  <link rel="stylesheet" href="dev-updates.css?v=0.28.1">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -17,11 +17,10 @@
   <header class="top">
     <div class="titlebar">
       <h1>Sohar eligibility</h1>
-      <!-- v0.28: icon tools flush right, each with a hover label; the Dev Update bell docks last (dev-updates.js, #duSlot) -->
+      <!-- v0.28: icon tools flush right, each with a hover label; the Dev Update bell floats (dev-updates.js) -->
       <span class="title-actions tools">
         <button class="ibtn" id="btnRefresh" type="button" data-tip="Refresh" aria-label="Refresh from the workbook"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
         <button class="ibtn" id="btnFull" type="button" data-tip="Full screen" aria-label="Full screen"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg></button>
-        <span id="duSlot"></span>
       </span>
     </div>
     <p id="wbStatus" class="status">Checking workbook…</p>
@@ -264,17 +263,17 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.28.0"></script>
-  <script src="core.js?v=0.28.0"></script>
-  <script src="rules.js?v=0.28.0"></script>
-  <script src="fees.js?v=0.28.0"></script>
-  <script src="record.js?v=0.28.0"></script>
-  <script src="audit.js?v=0.28.0"></script>
-  <script src="xlsx.js?v=0.28.0"></script>
-  <script src="payer-knowledge.js?v=0.28.0"></script>
-  <script src="excel.js?v=0.28.0"></script>
-  <script src="who.js?v=0.28.0"></script>
-  <script src="dev-updates.js?v=0.28.0"></script>
-  <script src="app.js?v=0.28.0"></script>
+  <script src="payer-rules.js?v=0.28.1"></script>
+  <script src="core.js?v=0.28.1"></script>
+  <script src="rules.js?v=0.28.1"></script>
+  <script src="fees.js?v=0.28.1"></script>
+  <script src="record.js?v=0.28.1"></script>
+  <script src="audit.js?v=0.28.1"></script>
+  <script src="xlsx.js?v=0.28.1"></script>
+  <script src="payer-knowledge.js?v=0.28.1"></script>
+  <script src="excel.js?v=0.28.1"></script>
+  <script src="who.js?v=0.28.1"></script>
+  <script src="dev-updates.js?v=0.28.1"></script>
+  <script src="app.js?v=0.28.1"></script>
 </body>
 </html>

@@ -803,7 +803,7 @@ select.au-inline { display: inline-block; width: auto; min-height: 30px; margin:
 .devupd { --surface: var(--t-raised); --surface-2: var(--t-line); --accent: var(--t-primary); --accent-soft: var(--green-bg); --ink: var(--t-fg); --muted: var(--t-muted); }
 body:has(#floatBox) .devupd { display: none; }
 body:has(> .boot:not([hidden])) { overflow: hidden; }
-/* v0.28 toolbar (the IVK Tracker's): icon tools flush right, the Dev Update bell docked last (#duSlot) */
+/* v0.28 toolbar (the IVK Tracker's): icon tools flush right; the Dev Update bell floats (dev-updates.js) */
 .titlebar .tools { display: flex; align-items: center; gap: 2px; }
 .ibtn.spin svg { animation: sohar-spin .9s linear infinite; }
 .ibtn { position: relative; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 12px; background: none; color: var(--t-muted); transition: background .2s, color .2s; }
