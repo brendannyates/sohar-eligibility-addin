@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.28.0';
+  const VERSION = '0.28.1';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -46,12 +46,7 @@
     startWho();
   }
   renderBoot();
-  // The Dev Update bell docks in the toolbar (#duSlot gets .du-slot) once the loading and name screens are gone; over them
-  // there is no toolbar, so it floats top right (dev-updates.js re-checks after every change).
-  const syncSlot = () => $('duSlot').classList.toggle('du-slot', $('boot').hidden && $('whoScreen').hidden);
-  new MutationObserver(syncSlot).observe($('boot'), { attributes: true, attributeFilter: ['hidden'] });
-  new MutationObserver(syncSlot).observe($('whoScreen'), { attributes: true, attributeFilter: ['hidden'] });
-  syncSlot();
+  // The Dev Update bell floats on every screen (dev-updates.js): it starts bottom right and can be dragged anywhere.
 
   // ---------- who is using the add-in (v0.28, the IVK Tracker's "Enter your name") ----------
   // The workbook's list is in its document settings (no sheet); today's pick is kept on this computer per workbook.

@@ -1688,10 +1688,7 @@
   }
 
   // Dev Update notices (dev-updates.js): what is dismissed here goes back to the pane (and the pane's come in by onParent).
-  // It docks in the title bar's tools (#duSlot gets .du-slot) once the loading and name screens are gone; over them it floats.
-  const syncSlot = () => $('duSlot').classList.toggle('du-slot', $('boot').hidden && $('whoScreen').hidden);
-  ['boot', 'whoScreen'].forEach((id) => new MutationObserver(syncSlot).observe($(id), { attributes: true, attributeFilter: ['hidden'] }));
-  syncSlot();
+  // The bell floats (it starts bottom right and can be dragged anywhere).
   const bell = () => { if (window.DevUpdates) DevUpdates.init({ app: 'sohar', send: inOffice ? (m) => toPane(m) : null }); };
   // Boot last, so everything above is initialized before demo() or the first message can use it.
   if (window.Office && Office.onReady) {

@@ -1,6 +1,13 @@
 {
   "updates": [
     {
+      "id": "2026-11-08-bell-float",
+      "date": "2026-11-08",
+      "bullets": [
+        "Changed: The Dev Update bell floats again. Drag it anywhere; it starts at the bottom right."
+      ]
+    },
+    {
       "id": "2026-11-07-name-screen-bell",
       "date": "2026-11-07",
       "bullets": [
