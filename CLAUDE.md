@@ -58,7 +58,15 @@ Hard rules:
   the same key; `--fresh` rebuilds); the pane merges built-in Fee Locations, Fee Payer Map, Estimate Codes and Estimate
   Defaults under the sheets and saves only what is not built in (`sheetOnly`). Payer matches are assigned from one
   dropdown in step 1.
-- Never add a network call. `connect-src 'none'` in `index.html` is deliberate; the only remote script is Office.js.
+- Never add a network call. The one exception (v0.28) is `dev-updates.js` fetching the add-in's own `dev-updates.json`
+  from the same origin, so `index.html` and `dashboard.html` have `connect-src 'self'` (`save.html` keeps `'none'`);
+  `tests/who.test.mjs` fails on any other `fetch`. The only remote script is Office.js.
+- v0.28: on open the pane shows a loading screen (`BOOT` steps in `app.js`), then "Enter your name" when nobody is
+  picked today on this computer for this workbook. The workbook's people are in Office document settings
+  (`who.USERS_SETTING`, no sheet), plus Config "Admin names"; today's pick is in localStorage per workbook (`who.whoKey`).
+  Full screen gets the name in the payload and records it on ticks, notes, code rules and audits; its "Switch user"
+  sends `who-pick` to the pane. `dev-updates.js` / `.css` are copied from the IVK Tracker; add a notice to
+  `dev-updates.json` (newest first) for each change staff will notice.
 - `VERIFICATION_COLS`, `DISCOVERY_COLS` and `record.FLOW_IMPORT_COLS` (the "MHS Eligibility - Discovery vs NextGen" Flow's CSV
   template, v0.21) match the Sohar CSV templates exactly, in order. Do not rename or reorder. The Flow file has no
   rateTable column, so Flow runs from it never estimate cost.

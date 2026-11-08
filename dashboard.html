@@ -4,16 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
+        content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none';">
   <title>Sohar eligibility, full screen</title>
-  <link rel="stylesheet" href="style.css?v=0.27.0">
+  <link rel="stylesheet" href="style.css?v=0.28.0">
+  <link rel="stylesheet" href="dev-updates.css?v=0.28.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
+  <!-- v0.28: the loading screen until the pane sends the workbook, and "Switch user" (dashboard.js renders it) -->
+  <div id="boot" class="boot" role="status" aria-live="polite"><div class="bootin"><div class="spinner" aria-hidden="true"></div><h1>Sohar eligibility</h1><p class="muted">Getting the workbook from the task pane.</p>
+    <ol class="bsteps"><li class="bstep now"><span class="k"></span><span><span class="t">Getting the workbook from the task pane</span><span class="m">Keep the task pane open</span></span></li></ol></div></div>
+  <div id="whoScreen" class="boot who" hidden></div>
   <header class="top">
     <div class="titlebar">
       <h1>Sohar eligibility</h1>
       <span id="dUpdated" class="pill upd" hidden tabindex="0"></span>
+      <span id="dWho" class="wholine" hidden>Working as <b id="dWhoName"></b> <button class="link" id="btnDSwitch" type="button">Switch user</button></span>
       <button class="small" id="btnClose" hidden>Close</button>
     </div>
     <p id="dStatus" class="status">Waiting for data from the pane…</p>
@@ -270,13 +276,15 @@
     <section id="detail" class="detail" hidden></section>
   </main>
 
-  <script src="payer-rules.js?v=0.27.0"></script>
-  <script src="core.js?v=0.27.0"></script>
-  <script src="rules.js?v=0.27.0"></script>
-  <script src="fees.js?v=0.27.0"></script>
-  <script src="record.js?v=0.27.0"></script>
-  <script src="xlsx.js?v=0.27.0"></script>
-  <script src="audit.js?v=0.27.0"></script>
-  <script src="dashboard.js?v=0.27.0"></script>
+  <script src="payer-rules.js?v=0.28.0"></script>
+  <script src="core.js?v=0.28.0"></script>
+  <script src="rules.js?v=0.28.0"></script>
+  <script src="fees.js?v=0.28.0"></script>
+  <script src="record.js?v=0.28.0"></script>
+  <script src="xlsx.js?v=0.28.0"></script>
+  <script src="audit.js?v=0.28.0"></script>
+  <script src="who.js?v=0.28.0"></script>
+  <script src="dev-updates.js?v=0.28.0"></script>
+  <script src="dashboard.js?v=0.28.0"></script>
 </body>
 </html>

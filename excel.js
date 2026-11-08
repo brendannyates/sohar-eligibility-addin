@@ -978,7 +978,21 @@
     });
   }
 
-  root.SoharExcel = { SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, upsertPayerMapMany, replaceTable,
+  // v0.28: Office document settings (saved inside the workbook, no sheet): the list of people (who.js) and the
+  // workbook's own id when Excel gives no file URL.
+  const getDoc = (k) => { try { return Office.context.document.settings.get(k); } catch (e) { return null; } };
+  // Pick up a name another computer added since this one opened the workbook.
+  const refreshDoc = () => new Promise((res) => { try { Office.context.document.settings.refreshAsync(() => res()); } catch (e) { res(); } });
+  function setDoc(k, v) {
+    return new Promise((res, rej) => {
+      const s = Office.context.document.settings;
+      if (v == null) s.remove(k); else s.set(k, v);
+      s.saveAsync((r) => (r.status === Office.AsyncResultStatus.Succeeded ? res(true) : rej(new Error('Could not save to the workbook. Try again.'))));
+    });
+  }
+  const docUrl = () => { try { return Office.context.document.url || ''; } catch (e) { return ''; } };
+
+  root.SoharExcel = { getDoc, setDoc, refreshDoc, docUrl, SHEETS, TABLES, readImportRows, readTable, readConfig, readPayerMap, readSoharPayers, upsertPayerMap, upsertPayerMapMany, replaceTable,
     readPayerEvidence, writePayerEvidence, tableExists, readClinicFile, ensureConfigRows,
     readPayerOutcomes, writePayerOutcomes, readPayerMapLog, writePayerMapLog, appendPayerMapLog, writePayerLearning,
     readSoharRefs, writeSoharRefs, readReverifyRequests, writeReverifyRequests, FEE_TABLES, readFee, writeFee,

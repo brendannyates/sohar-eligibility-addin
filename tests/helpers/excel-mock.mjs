@@ -667,8 +667,13 @@ export function createMock(opts = {}) {
     ConditionalFormatType: Object.fromEntries([...CF_TYPES].map((t) => [t[0].toLowerCase() + t.slice(1), t])),
     ErrorCodes: { itemNotFound: 'ItemNotFound', invalidArgument: 'InvalidArgument', invalidOperation: 'InvalidOperation', insertDeleteConflict: 'InsertDeleteConflict' },
   };
+  // Document settings (v0.28, who.js): kept in memory, saved by saveAsync.
+  const docSettings = new Map();
   const Office = {
-    context: { requirements: { isSetSupported: (name, ver) => M.supported(name, ver) } },
+    context: { requirements: { isSetSupported: (name, ver) => M.supported(name, ver) },
+      document: { url: '', settings: { get: (k) => (docSettings.has(k) ? docSettings.get(k) : null), set: (k, v) => docSettings.set(k, v), remove: (k) => docSettings.delete(k),
+        saveAsync: (cb) => cb({ status: 'succeeded' }), refreshAsync: (cb) => cb({ status: 'succeeded' }) } } },
+    AsyncResultStatus: { Succeeded: 'succeeded', Failed: 'failed' },
     onReady: (cb) => Promise.resolve(cb ? cb({ host: 'Excel' }) : { host: 'Excel' }),
     HostType: { Excel: 'Excel' },
   };

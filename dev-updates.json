@@ -1,0 +1,14 @@
+{
+  "updates": [
+    {
+      "id": "2026-11-07-name-screen-bell",
+      "date": "2026-11-07",
+      "bullets": [
+        "New: When you open the add-in, it asks for your name once a day. Pick yours, or add it if you're new. Pre-check ticks, notes, code rules and saved audits say who did them.",
+        "New: Your name shows at the top of the pane. Press Switch user if someone else takes over.",
+        "New: A loading screen shows each step while the workbook is read.",
+        "New: This bell lists what changed. Drag it anywhere and it stays put."
+      ]
+    }
+  ]
+}

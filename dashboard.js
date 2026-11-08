@@ -47,7 +47,10 @@
   function onParent(arg) {
     const m = take(arg.message);
     if (!m) return;
+    if (window.DevUpdates && DevUpdates.receive(m)) return; // a Dev Update dismissed in the pane
+    if (m.type === 'who') { setWhoFrom(m); return; }
     if (m.type === 'data') {
+      $('boot').hidden = true;
       load(m);
       if (m.notice) notice(m.notice.text, m.notice.ok);
       if (m.focus) showTab(m.focus === 'exports' ? 'upload' : m.focus);
@@ -72,6 +75,7 @@
     flow = m.flow || []; outcomes = m.outcomes || []; profiles = m.profiles || {};
     visits = m.visits || {}; lastUpdated = m.lastUpdated || null; admins = m.admins || []; notes = m.notes || {};
     savedAudits = m.audits || savedAudits;
+    if (m.who) setWhoFrom(m.who);
     fees = F && m.fees && m.fees.on ? m.fees : null;
     renderFeeBar(); renderUpdated();
     const people = REC.byPatient(rows).length;
@@ -964,31 +968,72 @@
   $('detail').addEventListener('drop', (e) => { const d = e.target.closest('#auDrop'); if (!d) return; e.preventDefault(); d.classList.remove('over'); auditFiles([...e.dataTransfer.files]); });
 
   // ----- the admin's name, ticks and notes (saved on the hidden Pre-Check sheet by the pane) -----
-  // The name is picked once from Config "Admin names" and remembered on this computer; every tick and note records it.
-  const NAME_KEY = 'sohar.precheck.by';
-  let adminName = (() => { try { return localStorage.getItem(NAME_KEY) || ''; } catch (e) { return ''; } })();
-  function whoHtml() {
-    const names = admins.includes(adminName) || !adminName ? admins : [adminName, ...admins];
-    return `<label class="pv-as">Working as
-      ${names.length ? `<select id="pcBy"><option value="">Pick your name</option>${names.map((n) => `<option${n === adminName ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select>`
-        : `<input id="pcBy" value="${esc(adminName)}" placeholder="Your name" maxlength="60">`}</label>
-      ${names.length ? '' : '<span class="hint">Add the admin names to Config "Admin names" (separated by ;) to pick from a list.</span>'}`;
+  // v0.28: the name is the one picked on the pane's "Enter your name" screen (who.js); every tick, note, code rule and
+  // saved audit records it. "Switch user" here shows the same screen and the pane saves the pick.
+  const W = window.SoharWho;
+  const NAME_KEY = 'sohar.precheck.by'; // demo mode only (no pane): remembered on this computer
+  let adminName = '';
+  let whoUsers = [], whoHere = [];
+  if (!inOffice) { try { adminName = localStorage.getItem(NAME_KEY) || ''; } catch (e) { adminName = ''; } }
+  /** The pane's pick and list ({name, users, here}). */
+  function setWhoFrom(o) {
+    adminName = o.name || '';
+    whoUsers = o.users || whoUsers; whoHere = o.here || whoHere;
+    renderWho();
+    if (!$('detail').hidden && detailKey) renderDetail();
   }
+  function renderWho() {
+    $('dWho').hidden = !adminName; $('dWhoName').textContent = adminName;
+    if (adminName && !$('whoScreen').hidden && !whoPicking) $('whoScreen').hidden = true;
+  }
+  function whoHtml() {
+    return adminName
+      ? `<div class="pv-as">Working as <b>${esc(adminName)}</b> <button type="button" class="link" data-who-switch>Switch user</button></div>`
+      : '<div class="pv-as"><button type="button" class="link" data-who-switch>Enter your name</button></div>';
+  }
+  let whoPicking = false;
+  function showWho() {
+    const list = W.listFor(whoUsers, admins), L = W.pickOrder(list.length || !adminName ? list : [{ name: adminName }], whoHere), box = $('whoScreen');
+    box.innerHTML = `<div class="bootin"><div class="whohero"><h1>Enter your name</h1>
+      <p class="muted">${L.length ? 'Pick yours below, or add it if you’re new. Pre-check ticks, notes, code rules and saved audits say who did what.' : 'Nobody has added their name to this workbook yet. Add yours to start. Pre-check ticks, notes, code rules and saved audits say who did what.'}</p></div>
+      ${L.length ? `<div class="wholist" role="group" aria-label="People on this workbook">${L.map((u) => `<button type="button" class="whob" data-who="${esc(u.name)}">${esc(u.name)}${u.here ? '<span class="tag">On this computer</span>' : ''}</button>`).join('')}</div>` : ''}
+      <details class="whonew"${L.length ? '' : ' open'}><summary>${L.length ? 'I’m not on the list' : 'Add your name'}</summary>
+        <label>Your name<input type="text" id="whoNew" autocomplete="off" spellcheck="false" maxlength="30"></label><p class="hint">Usually your first name and last initial.</p>
+        <div class="actions"><button type="button" class="primary" id="btnWhoAdd">Add me and start</button></div></details>
+      ${adminName ? `<div class="actions"><button type="button" class="link" id="btnWhoStay">Stay as ${esc(adminName)}</button></div>` : ''}</div>`;
+    whoPicking = true; box.hidden = false;
+    const f = L.length ? box.querySelector('.whob') : $('whoNew'); if (f) f.focus();
+  }
+  function pickWho(name, typed) {
+    const n = W.cleanName(name); if (!n) return;
+    const had = whoUsers.find((u) => W.userKey(u.name) === W.userKey(n));
+    adminName = had ? had.name : n; whoPicking = false;
+    if (!had) whoUsers = W.addUser(whoUsers, n, '').users;
+    whoHere = [adminName].concat(whoHere.filter((x) => W.userKey(x) !== W.userKey(adminName)));
+    $('whoScreen').hidden = true; renderWho();
+    if (inOffice) toPane({ type: 'who-pick', name: adminName, typed: !!typed });
+    else { try { localStorage.setItem(NAME_KEY, adminName); } catch (e) { /* storage blocked */ } }
+    if (!$('detail').hidden && detailKey) renderDetail();
+  }
+  $('whoScreen').addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.who) pickWho(b.dataset.who);
+    else if (b.id === 'btnWhoAdd') { const v = W.cleanName($('whoNew').value); if (v) pickWho(v, true); else $('whoNew').focus(); }
+    else if (b.id === 'btnWhoStay') { whoPicking = false; $('whoScreen').hidden = true; }
+  });
+  $('whoScreen').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.id === 'whoNew') { e.preventDefault(); $('btnWhoAdd').click(); } });
+  $('btnDSwitch').addEventListener('click', showWho);
+  document.addEventListener('click', (e) => { if (e.target.closest('[data-who-switch]')) showWho(); });
   const stamp = () => { const now = new Date(); return `${now.getMonth() + 1}/${now.getDate()}/${now.getFullYear()} ${now.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}`; };
   const detailRow = () => rows.find((x) => keyOf(x) === detailKey) || rows.find((x) => `ref:${x['Sohar Ref']}` === detailKey);
   /** The admin's name, or a notice and null when none is picked. */
   function byOrAsk() {
     if (adminName) return adminName;
-    notice('Pick your name first ("Working as", bottom of the sidebar). It is saved with each tick and note.', false);
-    const el = $('pcBy'); if (el) el.focus();
+    notice('Enter your name first. It is saved with each tick and note.', false);
+    showWho();
     return null;
   }
   $('detail').addEventListener('change', (e) => {
-    if (e.target.id === 'pcBy') {
-      adminName = e.target.value.trim();
-      try { localStorage.setItem(NAME_KEY, adminName); } catch (err) { /* storage blocked: remembered for this window only */ }
-      return;
-    }
     const c = e.target.closest('input[data-pc]');
     if (!c || !detailKey) return;
     const r = detailRow(), v = r && (visits[String(r['Per Nbr'] || '')] || [])[+c.dataset.pc];
@@ -1044,12 +1089,6 @@
   });
   // Ctrl+Enter adds the note (Enter makes a new line in the box).
   $('detail').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && e.target.id === 'pnText') { e.preventDefault(); addNote(); } });
-  // Free-text name (no Config list yet): remembered as it is typed.
-  $('detail').addEventListener('input', (e) => {
-    if (e.target.id !== 'pcBy') return;
-    adminName = e.target.value.trim();
-    try { localStorage.setItem(NAME_KEY, adminName); } catch (err) { /* storage blocked */ }
-  });
 
   // ---------- patient responsibility calculator (v0.20; the West Coast calculator's math, pre-filled from Sohar) ----------
   // Shown when the pane sends fee data (Config "Fee estimates" On). estOver: the open panel's inputs and codes.
@@ -1537,6 +1576,8 @@
 
   // Browser preview outside Office: synthetic rows only.
   function demo() {
+    $('boot').hidden = true;
+    whoUsers = [{ name: 'Sam O.' }, { name: 'Ana R.' }, { name: 'Jo K.' }]; renderWho(); // made-up names
     const b = document.createElement('div');
     b.className = 'banner';
     b.textContent = 'Demo mode. Synthetic data only.';
@@ -1646,17 +1687,19 @@
     else if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
   }
 
+  // Dev Update notices (dev-updates.js): what is dismissed here goes back to the pane (and the pane's come in by onParent).
+  const bell = () => { if (window.DevUpdates) DevUpdates.init({ app: 'sohar', send: inOffice ? (m) => toPane(m) : null }); };
   // Boot last, so everything above is initialized before demo() or the first message can use it.
   if (window.Office && Office.onReady) {
     Office.onReady(() => {
       if (Office.context && Office.context.ui && Office.context.ui.messageParent) {
-        inOffice = true;
+        inOffice = true; adminName = ''; bell();
         Office.context.ui.addHandlerAsync(Office.EventType.DialogParentMessageReceived, onParent, () => {
           Office.context.ui.messageParent(JSON.stringify({ type: 'ready' }));
         });
         $('btnClose').hidden = false;
         $('btnClose').addEventListener('click', () => Office.context.ui.messageParent(JSON.stringify({ type: 'close' })));
-      } else demo();
+      } else { bell(); demo(); }
     });
-  } else demo();
+  } else { bell(); demo(); }
 })();

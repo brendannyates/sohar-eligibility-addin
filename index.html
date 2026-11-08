@@ -4,12 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'none'; form-action 'none';">
+        content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.27.0">
+  <link rel="stylesheet" href="style.css?v=0.28.0">
+  <link rel="stylesheet" href="dev-updates.css?v=0.28.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
+  <!-- v0.28: the loading screen while the workbook is read, then "Enter your name" (app.js renders both) -->
+  <div id="boot" class="boot" role="status" aria-live="polite"><div class="bootin"><div class="spinner" aria-hidden="true"></div><h1>Sohar eligibility</h1><p class="muted">Reading the workbook.</p><ol class="bsteps" id="bootSteps"></ol></div></div>
+  <div id="whoScreen" class="boot who" hidden></div>
   <header class="top">
     <div class="titlebar">
       <h1>Sohar eligibility</h1>
@@ -19,6 +23,7 @@
       </span>
     </div>
     <p id="wbStatus" class="status">Checking workbook…</p>
+    <p id="whoLine" class="wholine" hidden>Working as <b id="whoName"></b> <button class="link" id="btnSwitchUser">Switch user</button></p>
   </header>
   <nav class="tabs pane-tabs" role="tablist" aria-label="Pane views">
     <button role="tab" id="tabClinic" data-ptab="clinic" aria-controls="panelClinic" aria-selected="false" tabindex="-1">Clinic</button>
@@ -252,20 +257,22 @@
   </main>
 
   <footer class="foot">
-    <p class="fine">Data stays in this workbook and your Downloads folder. The pane makes no network calls.</p>
+    <p class="fine">Data stays in this workbook and your Downloads folder. The pane makes no network calls, apart from reading its own update notes.</p>
     <p id="version" class="fine"></p>
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.27.0"></script>
-  <script src="core.js?v=0.27.0"></script>
-  <script src="rules.js?v=0.27.0"></script>
-  <script src="fees.js?v=0.27.0"></script>
-  <script src="record.js?v=0.27.0"></script>
-  <script src="audit.js?v=0.27.0"></script>
-  <script src="xlsx.js?v=0.27.0"></script>
-  <script src="payer-knowledge.js?v=0.27.0"></script>
-  <script src="excel.js?v=0.27.0"></script>
-  <script src="app.js?v=0.27.0"></script>
+  <script src="payer-rules.js?v=0.28.0"></script>
+  <script src="core.js?v=0.28.0"></script>
+  <script src="rules.js?v=0.28.0"></script>
+  <script src="fees.js?v=0.28.0"></script>
+  <script src="record.js?v=0.28.0"></script>
+  <script src="audit.js?v=0.28.0"></script>
+  <script src="xlsx.js?v=0.28.0"></script>
+  <script src="payer-knowledge.js?v=0.28.0"></script>
+  <script src="excel.js?v=0.28.0"></script>
+  <script src="who.js?v=0.28.0"></script>
+  <script src="dev-updates.js?v=0.28.0"></script>
+  <script src="app.js?v=0.28.0"></script>
 </body>
 </html>
