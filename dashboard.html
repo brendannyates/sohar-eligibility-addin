@@ -6,8 +6,9 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none';">
   <title>Sohar eligibility, full screen</title>
-  <link rel="stylesheet" href="style.css?v=0.28.1">
-  <link rel="stylesheet" href="dev-updates.css?v=0.28.1">
+  <link rel="stylesheet" href="style.css?v=0.28.2">
+  <script src="theme.js?v=0.28.2"></script>
+  <link rel="stylesheet" href="dev-updates.css?v=0.28.2">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
@@ -17,11 +18,14 @@
   <div id="whoScreen" class="boot who" hidden></div>
   <header class="top">
     <div class="titlebar">
-      <h1>Sohar eligibility</h1>
+      <!-- the Dev Update bell's home: right of the name, level with the title bar -->
+      <span class="brandline"><h1>Sohar eligibility</h1><span class="du-home" aria-hidden="true"></span></span>
       <span id="dUpdated" class="pill upd" hidden tabindex="0"></span>
       <span id="dWho" class="wholine" hidden>Working as <b id="dWhoName"></b> <button class="link" id="btnDSwitch" type="button">Switch user</button></span>
       <span class="title-actions tools">
+        <button class="ibtn" id="btnDRefresh" type="button" data-tip="Refresh" aria-label="Refresh from the workbook"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg></button>
         <button class="ibtn" id="btnClose" type="button" hidden data-tip="Exit full screen" aria-label="Exit full screen"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg></button>
+        <button class="ibtn theme" id="btnTheme" type="button" data-theme-btn data-tip="Dark mode" aria-label="Switch to dark mode" aria-pressed="false"></button>
       </span>
     </div>
     <p id="dStatus" class="status">Waiting for data from the pane…</p>
@@ -278,15 +282,15 @@
     <section id="detail" class="detail" hidden></section>
   </main>
 
-  <script src="payer-rules.js?v=0.28.1"></script>
-  <script src="core.js?v=0.28.1"></script>
-  <script src="rules.js?v=0.28.1"></script>
-  <script src="fees.js?v=0.28.1"></script>
-  <script src="record.js?v=0.28.1"></script>
-  <script src="xlsx.js?v=0.28.1"></script>
-  <script src="audit.js?v=0.28.1"></script>
-  <script src="who.js?v=0.28.1"></script>
-  <script src="dev-updates.js?v=0.28.1"></script>
-  <script src="dashboard.js?v=0.28.1"></script>
+  <script src="payer-rules.js?v=0.28.2"></script>
+  <script src="core.js?v=0.28.2"></script>
+  <script src="rules.js?v=0.28.2"></script>
+  <script src="fees.js?v=0.28.2"></script>
+  <script src="record.js?v=0.28.2"></script>
+  <script src="xlsx.js?v=0.28.2"></script>
+  <script src="audit.js?v=0.28.2"></script>
+  <script src="who.js?v=0.28.2"></script>
+  <script src="dev-updates.js?v=0.28.2"></script>
+  <script src="dashboard.js?v=0.28.2"></script>
 </body>
 </html>

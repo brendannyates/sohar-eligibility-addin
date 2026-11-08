@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.28.1';
+  const VERSION = '0.28.2';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -127,22 +127,34 @@
     if (!W.pickedToday(whoRead(), W.dayIso(), whoList())) { who.name = ''; renderWhoLine(); showWho(); sendToDialog({ type: 'who', name: '', users: whoList(), here: whoRead().used }).catch(() => {}); }
   }, 60000);
 
-  // Dev Update notices (dev-updates.js): the bell top right. What full screen dismisses comes back through fromDialog;
-  // while full screen is open, send passes what the pane dismisses to it.
+  // Dev Update notices (dev-updates.js): no bell in the pane (it lives in full screen, right of the name), but the pane
+  // still keeps what was opened. What full screen opens comes back through fromDialog; while full screen is open, send
+  // passes what the pane has seen to it.
   if (window.DevUpdates) DevUpdates.init({ app: 'sohar', send: null });
 
   // ---------- boot ----------
   document.getElementById('version').textContent = `v${VERSION}`;
   // Header ⟳: a clinic file re-opens from its saved tables; otherwise re-read and rebuild, same as on open.
-  $('btnRefresh').addEventListener('click', async (e) => {
-    const b = e.currentTarget;
+  // Full screen's ⟳ asks for the same (fromDialog 'refresh'), then gets the new payload.
+  async function refreshPane() {
+    const b = $('btnRefresh');
     if (!X || state.clinicFile) { location.reload(); return; }
     b.disabled = true; b.classList.add('spin');
     await guard(async () => { setStatus('Refreshing from this workbook…', ''); await loadConfig(); await refreshAll();
       if ($('btnBuild').disabled) setStatus('Refreshed. No usable report has been uploaded yet; see step 1.', 'bad');
     }, 'scanResult');
     b.disabled = false; b.classList.remove('spin');
-  });
+  }
+  $('btnRefresh').addEventListener('click', () => refreshPane());
+  // Light / dark (theme.js): kept per computer; full screen follows the pane both ways.
+  const TH = window.SoharTheme;
+  function themeToFull() {
+    if (!TH) return;
+    sendToDialog({ type: 'theme', theme: TH.get() }).catch(() => {});
+    const fr = document.querySelector('#floatBox iframe'); // demo: the full-screen float in the page
+    try { if (fr && fr.contentWindow.SoharTheme) fr.contentWindow.SoharTheme.set(TH.get(), { save: false }); } catch (e) { /* not loaded yet */ }
+  }
+  if (TH) { TH.paint($('btnTheme')); $('btnTheme').addEventListener('click', () => { TH.toggle(); themeToFull(); }); } else $('btnTheme').hidden = true;
   if (window.Office && Office.onReady) {
     Office.onReady((info) => { if (info.host === Office.HostType.Excel) startExcel(); else startDemo('Not running inside Excel.'); });
   } else {
@@ -2333,12 +2345,14 @@
 
   async function openFull(focus) {
     // The Dev Updates already dismissed here go along, so full screen does not show them again.
-    const url = window.DevUpdates ? DevUpdates.dialogUrl(`dashboard.html?v=${VERSION}`) : new URL(`dashboard.html?v=${VERSION}`, location.href).href;
+    // and the light / dark choice, so it opens in the pane's.
+    const page = TH ? TH.url(`dashboard.html?v=${VERSION}`) : `dashboard.html?v=${VERSION}`;
+    const url = window.DevUpdates ? DevUpdates.dialogUrl(page) : new URL(page, location.href).href;
     if (state.demo) { showFloat(url + (feesOn() ? '&fees=1' : '') + (focus ? `#${focus}` : '')); return; } // browser preview: the same float, drawn in the page
     if (!Office.context.requirements.isSetSupported('DialogApi', '1.2')) throw new Error('This version of Excel cannot open the full-screen window (needs DialogApi 1.2). Use the Sohar Results and NextGen Tasks sheets.');
     if (dlg) { await sendToDialog(await payload(focus)); return; }
     state.pendingFocus = focus || '';
-    Office.context.ui.displayDialogAsync(url, { height: 90, width: 90, displayInIframe: true }, (r) => {
+    Office.context.ui.displayDialogAsync(url, { height: 95, width: 95, displayInIframe: true }, (r) => {
       if (r.status !== Office.AsyncResultStatus.Succeeded) {
         note('resultsResult', `Could not open full screen: ${r.error.message}. If a pop-up blocker appeared, allow pop-ups for Excel and try again.`, 'bad');
         return;
@@ -2356,6 +2370,11 @@
     if (window.DevUpdates && DevUpdates.receive(m)) return; // a Dev Update dismissed in full screen
     if (m.type === 'ready') { await sendToDialog(await payload(state.pendingFocus)); state.pendingFocus = ''; }
     else if (m.type === 'close') { if (dlg) dlg.close(); dlg = null; if (window.DevUpdates) DevUpdates.setSend(null); }
+    else if (m.type === 'theme') { if (TH) TH.set(m.theme); } // light / dark switched in full screen
+    else if (m.type === 'refresh') { // full screen's ⟳
+      await refreshPane();
+      try { await sendToDialog({ ...(await payload()), notice: { ok: true, text: 'Refreshed from the workbook.' } }); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Not refreshed: ${e.message}` }); throw e; }
+    }
     else if (m.type === 'who-pick') { await pickWho(m.name, !!m.typed); } // "Switch user" in full screen; setWho tells it back
     else if (m.type === 'task-done') {
       await X.setTaskDone(m.key, m.done);

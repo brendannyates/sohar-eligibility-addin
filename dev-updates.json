@@ -1,6 +1,15 @@
 {
   "updates": [
     {
+      "id": "2026-11-08-bell-home",
+      "date": "2026-11-08",
+      "bullets": [
+        "New: A light/dark button at the top right, next to refresh and full screen. Your choice stays on this computer, and full screen follows it.",
+        "Changed: The Dev updates bell now sits next to the name at the top left of full screen, and isn't in the side pane. A red dot means something new. Click the bell to read it; nothing pops up on its own.",
+        "New: Full screen has its own refresh button, and opens a little larger."
+      ]
+    },
+    {
       "id": "2026-11-08-bell-float",
       "date": "2026-11-08",
       "bullets": [
