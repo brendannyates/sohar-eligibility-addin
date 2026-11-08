@@ -85,6 +85,12 @@ test('wiring: names in document settings (no sheet), the loading and name screen
     assert.match(h, /href="dev-updates\.css\?v=[\d.]+"/);
     assert.match(h, /id="boot" class="boot"/);
     assert.match(h, /id="whoScreen" class="boot who" hidden/);
+    // toolbar: icon tools with hover labels, the bell's slot last
+    assert.match(h, /<span class="title-actions tools">[\s\S]*?<span id="duSlot"><\/span>\s*<\/span>/, `${f}: the bell slot is last in the tools`);
+    const tools = h.slice(h.indexOf('class="title-actions tools"'), h.indexOf('id="duSlot"'));
+    const btns = tools.match(/<button[^>]*>/g) || [];
+    assert.ok(btns.length >= 1);
+    for (const b of btns) { assert.match(b, /class="ibtn"/); assert.match(b, /data-tip="[^"]+"/); assert.doesNotMatch(b, /title=/); }
     // the only fetch is the add-in's own dev-updates.json (same origin)
     assert.match(h, /connect-src 'self'/);
   }

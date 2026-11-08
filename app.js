@@ -46,6 +46,12 @@
     startWho();
   }
   renderBoot();
+  // The Dev Update bell docks in the toolbar (#duSlot gets .du-slot) once the loading and name screens are gone; over them
+  // there is no toolbar, so it floats top right (dev-updates.js re-checks after every change).
+  const syncSlot = () => $('duSlot').classList.toggle('du-slot', $('boot').hidden && $('whoScreen').hidden);
+  new MutationObserver(syncSlot).observe($('boot'), { attributes: true, attributeFilter: ['hidden'] });
+  new MutationObserver(syncSlot).observe($('whoScreen'), { attributes: true, attributeFilter: ['hidden'] });
+  syncSlot();
 
   // ---------- who is using the add-in (v0.28, the IVK Tracker's "Enter your name") ----------
   // The workbook's list is in its document settings (no sheet); today's pick is kept on this computer per workbook.
@@ -136,11 +142,11 @@
   $('btnRefresh').addEventListener('click', async (e) => {
     const b = e.currentTarget;
     if (!X || state.clinicFile) { location.reload(); return; }
-    b.disabled = true;
+    b.disabled = true; b.classList.add('spin');
     await guard(async () => { setStatus('Refreshing from this workbook…', ''); await loadConfig(); await refreshAll();
       if ($('btnBuild').disabled) setStatus('Refreshed. No usable report has been uploaded yet; see step 1.', 'bad');
     }, 'scanResult');
-    b.disabled = false;
+    b.disabled = false; b.classList.remove('spin');
   });
   if (window.Office && Office.onReady) {
     Office.onReady((info) => { if (info.host === Office.HostType.Excel) startExcel(); else startDemo('Not running inside Excel.'); });
