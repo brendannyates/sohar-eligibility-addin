@@ -85,18 +85,28 @@ test('wiring: names in document settings (no sheet), the loading and name screen
     assert.match(h, /href="dev-updates\.css\?v=[\d.]+"/);
     assert.match(h, /id="boot" class="boot"/);
     assert.match(h, /id="whoScreen" class="boot who" hidden/);
-    // toolbar: icon tools with hover labels; no slot for the bell, which floats
-    assert.doesNotMatch(h, /duSlot|du-slot/, `${f}: no bell slot in the toolbar`);
-    const t0 = h.indexOf('class="title-actions tools"'), tools = h.slice(t0, h.indexOf('</span>', t0));
+    // toolbar: icon tools with hover labels, flush right: refresh, full screen, light / dark (the IVK Tracker's order)
+    assert.doesNotMatch(h, /duSlot|du-slot|du-card/, `${f}: no bell slot in the toolbar`);
+    const t0 = h.indexOf('class="title-actions tools"'), tools = h.slice(t0, h.indexOf('\n    </div>', t0));
     const btns = tools.match(/<button[^>]*>/g) || [];
-    assert.ok(btns.length >= 1);
-    for (const b of btns) { assert.match(b, /class="ibtn"/); assert.match(b, /data-tip="[^"]+"/); assert.doesNotMatch(b, /title=/); }
+    assert.deepEqual(btns.map((b) => b.match(/id="(\w+)"/)[1]), f === 'index.html' ? ['btnRefresh', 'btnFull', 'btnTheme'] : ['btnDRefresh', 'btnClose', 'btnTheme']);
+    for (const b of btns) { assert.match(b, /class="ibtn( theme)?"/); assert.match(b, /data-tip="[^"]+"/); assert.doesNotMatch(b, /title=/); }
+    // light / dark is set in <head> (theme.js), before the page draws
+    assert.ok(h.indexOf('theme.js?v=') > 0 && h.indexOf('theme.js?v=') < h.indexOf('</head>'), `${f}: theme.js in head`);
+    // the Dev Update bell's home: full screen only, right of the name in the title bar
+    assert.equal((h.match(/class="du-home"/g) || []).length, f === 'dashboard.html' ? 1 : 0, `${f}: du-home`);
     // the only fetch is the add-in's own dev-updates.json (same origin)
     assert.match(h, /connect-src 'self'/);
   }
   assert.match(src('save.html'), /connect-src 'none'/);
+  assert.ok(src('dashboard.html').includes('<span class="brandline"><h1>Sohar eligibility</h1><span class="du-home" aria-hidden="true"></span></span>'));
+  // full screen floats over the Excel page: an in-page dialog, never a new window; it opens in the pane's light / dark
+  assert.ok(src('app.js').includes('displayDialogAsync(url, { height: 95, width: 95, displayInIframe: true }'));
+  assert.doesNotMatch(src('app.js') + src('dashboard.js'), /displayInIframe: false/);
+  assert.ok(src('app.js').includes('TH.url(`dashboard.html'));
+  assert.ok(src('app.js').includes("m.type === 'theme'") && src('dashboard.js').includes("m.type === 'theme'"));
   assert.equal((src('dev-updates.js').match(/fetch\(/g) || []).length, 1);
-  for (const f of ['app.js', 'dashboard.js', 'excel.js', 'who.js', 'core.js', 'rules.js', 'xlsx.js', 'record.js', 'audit.js', 'fees.js']) {
+  for (const f of ['app.js', 'dashboard.js', 'excel.js', 'who.js', 'theme.js', 'core.js', 'rules.js', 'xlsx.js', 'record.js', 'audit.js', 'fees.js']) {
     assert.doesNotMatch(src(f), /\bfetch\(|XMLHttpRequest|sendBeacon|WebSocket/, `${f} makes no network call`);
   }
 });

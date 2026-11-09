@@ -67,6 +67,11 @@ Hard rules:
   Full screen gets the name in the payload and records it on ticks, notes, code rules and audits; its "Switch user"
   sends `who-pick` to the pane. `dev-updates.js` / `.css` are copied from the IVK Tracker; add a notice to
   `dev-updates.json` (newest first) for each change staff will notice.
+  v0.28.2: the Dev Update bell shows only in full screen, on the `.du-home` right of the title (none in the pane).
+  Light / dark comes from `theme.js` in each page's `<head>` (localStorage `soharTheme`, else Windows); the dark
+  tokens are `:root[data-theme="dark"]` in `style.css`, never a `prefers-color-scheme` query. The pane passes its
+  choice to full screen on the URL (`?theme=`) and both send `{ type: 'theme' }` when it changes. Toolbars are
+  refresh, full screen, light / dark (full screen's ⟳ sends `refresh` to the pane).
 - `VERIFICATION_COLS`, `DISCOVERY_COLS` and `record.FLOW_IMPORT_COLS` (the "MHS Eligibility - Discovery vs NextGen" Flow's CSV
   template, v0.21) match the Sohar CSV templates exactly, in order. Do not rename or reorder. The Flow file has no
   rateTable column, so Flow runs from it never estimate cost.

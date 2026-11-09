@@ -49,18 +49,23 @@
     if (!m) return;
     if (window.DevUpdates && DevUpdates.receive(m)) return; // a Dev Update dismissed in the pane
     if (m.type === 'who') { setWhoFrom(m); return; }
+    if (m.type === 'theme') { if (window.SoharTheme) SoharTheme.set(m.theme); return; } // switched in the pane
     if (m.type === 'data') {
-      $('boot').hidden = true;
+      $('boot').hidden = true; refreshing(false);
       load(m);
       if (m.notice) notice(m.notice.text, m.notice.ok);
       if (m.focus) showTab(m.focus === 'exports' ? 'upload' : m.focus);
-    } else if (m.type === 'notice') { notice(m.text, m.ok); $('upState').textContent = ''; }
+    } else if (m.type === 'notice') { notice(m.text, m.ok); $('upState').textContent = ''; refreshing(false); }
     else if (m.type === 'audits') {
       savedAudits = m.audits || { summary: [], lines: [] };
       if (m.notice) notice(m.notice.text, m.notice.ok);
       if (!$('detail').hidden && sec === 'audit') renderDetail('[data-au-save]');
     }
     else if (m.type === 'fee-update') { fees = m.fees || null; renderFeeBar(); renderBenefits(); if (!$('detail').hidden && detailKey) renderDetail(); }
+  }
+  function refreshing(on) {
+    const b = $('btnDRefresh'); if (!b) return;
+    b.disabled = !!on; b.classList.toggle('spin', !!on); b.dataset.tip = on ? 'Reading the workbook…' : 'Refresh';
   }
   function toPane(obj) {
     if (!inOffice) { notice('Demo mode: nothing is sent to Excel.', false); return; }
@@ -1687,8 +1692,18 @@
     else if (location.hash) showTab(location.hash.slice(1) === 'exports' ? 'upload' : location.hash.slice(1));
   }
 
-  // Dev Update notices (dev-updates.js): what is dismissed here goes back to the pane (and the pane's come in by onParent).
-  // The bell floats (it starts bottom right and can be dragged anywhere).
+  // Dev Update notices (dev-updates.js): the bell's home is right of the name in the title bar (.du-home); a red dot
+  // means new, a click opens the history. What is opened here goes back to the pane (and the pane's come in by onParent).
+  const bellTools = () => {
+    // ⟳ asks the pane to read the workbook again (it sends the new data back); the demo just reloads.
+    $('btnDRefresh').addEventListener('click', () => { if (!inOffice) { location.reload(); return; } refreshing(true); toPane({ type: 'refresh' }); });
+    // light / dark (theme.js): kept per computer and passed to the pane, so both match
+    const TH = window.SoharTheme, b = $('btnTheme');
+    if (!TH) { b.hidden = true; return; }
+    TH.paint(b);
+    b.addEventListener('click', () => { TH.toggle(); if (inOffice) toPane({ type: 'theme', theme: TH.get() }); });
+  };
+  bellTools();
   const bell = () => { if (window.DevUpdates) DevUpdates.init({ app: 'sohar', send: inOffice ? (m) => toPane(m) : null }); };
   // Boot last, so everything above is initialized before demo() or the first message can use it.
   if (window.Office && Office.onReady) {

@@ -1,5 +1,6 @@
 /* One set of tokens for the pane, the main screen and the patient view (v0.25, from the v0.22 design handoff). */
 :root {
+  color-scheme: light;
   --t-page: #F3F4F1; --t-raised: #FFFFFF; --t-sunken: #F1F2EE; --t-line: #E3E6E1; --t-line2: #C9CEC9;
   --t-fg: #1B211F; --t-muted: #5E6863; --t-primary: #1E6B59; --t-primary-deep: #17574A; --t-on-primary: #FFFFFF; --t-focus: #1E6B59;
   --green-fg: #1E6B59; --green-bg: #DDEDE6; --amber-fg: #8F5400; --amber-bg: #FAE9CF; --red-fg: #B3261E; --red-bg: #F9DCD9;
@@ -8,16 +9,15 @@
   --discover: #A85A14;
   --exclude: #8a948f;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --t-page: #131716; --t-raised: #1B2220; --t-sunken: #182019; --t-line: #2A3330; --t-line2: #3C4743;
-    --t-fg: #ECEFED; --t-muted: #9BA59F; --t-primary: #6DC4A6; --t-primary-deep: #8FD3BA; --t-on-primary: #0E2A22; --t-focus: #6DC4A6;
-    --green-fg: #6DC4A6; --green-bg: #1D3A31; --amber-fg: #E9B150; --amber-bg: #3A2D13; --red-fg: #F19189; --red-bg: #43211E;
-    --blue-fg: #8FB8E6; --blue-bg: #1C2B3A; --grey-fg: #B8C0BB; --grey-bg: #252D2A; --purple-fg: #CDA6E6; --purple-bg: #2E2238;
-    --shadow: 0 0 0 1px rgba(255, 255, 255, .05), 0 12px 32px -14px rgba(0, 0, 0, .6);
-    --discover: #E3A060;
-    --exclude: #7d8782;
-  }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --t-page: #131716; --t-raised: #1B2220; --t-sunken: #182019; --t-line: #2A3330; --t-line2: #3C4743;
+  --t-fg: #ECEFED; --t-muted: #9BA59F; --t-primary: #6DC4A6; --t-primary-deep: #8FD3BA; --t-on-primary: #0E2A22; --t-focus: #6DC4A6;
+  --green-fg: #6DC4A6; --green-bg: #1D3A31; --amber-fg: #E9B150; --amber-bg: #3A2D13; --red-fg: #F19189; --red-bg: #43211E;
+  --blue-fg: #8FB8E6; --blue-bg: #1C2B3A; --grey-fg: #B8C0BB; --grey-bg: #252D2A; --purple-fg: #CDA6E6; --purple-bg: #2E2238;
+  --shadow: 0 0 0 1px rgba(255, 255, 255, .05), 0 12px 32px -14px rgba(0, 0, 0, .6);
+  --discover: #E3A060;
+  --exclude: #7d8782;
 }
 /* The names the pane and the worklist were written with, pointed at the tokens above. */
 :root {
@@ -35,7 +35,6 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-  color-scheme: light dark;
 }
 b { font-weight: 600; }
 
@@ -182,7 +181,7 @@ label.inline select { width: auto; }
   border-radius: 14px; box-shadow: 0 24px 48px -12px rgba(16, 24, 20, .4); }
 /* Anything that pops out over the add-in blurs what's behind it. Keep this on <body>: a transformed or filtered ancestor would trap it. */
 .backdrop { position: fixed; inset: 0; z-index: 900; background: rgba(16, 24, 20, .28); backdrop-filter: blur(3px); -webkit-backdrop-filter: blur(3px); }
-@media (prefers-color-scheme: dark) { .backdrop { background: rgba(0, 0, 0, .5); } }
+:root[data-theme="dark"] .backdrop { background: rgba(0, 0, 0, .5); }
 .float { position: fixed; inset: 4vh 4vw; z-index: 901; display: flex; flex-direction: column; overflow: hidden;
   background: var(--paper); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 12px 40px rgba(0, 0, 0, .25); }
 .floatbar { display: flex; justify-content: flex-end; padding: 6px 8px; border-bottom: 1px solid var(--line); }
@@ -199,7 +198,7 @@ label.inline select { width: auto; }
 .tabs button { background: none; border: none; border-bottom: 3px solid transparent; border-radius: 0; padding: 9px 12px; color: var(--muted); font-weight: 600; }
 .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--pine); }
 .tabs button:hover { color: var(--ink); }
-.badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--alert); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
+.badge { display: inline-block; min-width: 18px; padding: 0 5px; border-radius: 9px; background: var(--alert); color: var(--t-raised); font-size: 11px; line-height: 18px; text-align: center; }
 .badge:empty { display: none; }
 .notice { margin: 0; padding: 7px 10px; border-radius: 4px; font-size: 12.5px; border: 1px solid var(--line); }
 .notice.ok { color: var(--ok); }
@@ -799,11 +798,14 @@ select.au-inline { display: inline-block; width: auto; min-height: 30px; margin:
 .wholine b { color: var(--t-fg); }
 .wholine button.link { padding: 0 0 0 4px; font-size: 12.5px; }
 .titlebar .wholine { margin: 0 0 0 auto; }
-/* Dev Update bell (dev-updates.css), in this add-in's tokens; hidden behind the demo's full-screen float */
-.devupd { --surface: var(--t-raised); --surface-2: var(--t-line); --accent: var(--t-primary); --accent-soft: var(--green-bg); --ink: var(--t-fg); --muted: var(--t-muted); }
-body:has(#floatBox) .devupd { display: none; }
+/* Dev Update bell (dev-updates.css), in this add-in's tokens. It shows only in full screen, where the title bar has its
+   home (.du-home, right of the name); never over the loading or name screen. */
+.devupd { --bg: var(--t-page); --surface: var(--t-raised); --surface-2: var(--t-line); --surface-3: var(--t-sunken); --accent: var(--t-primary); --accent-soft: var(--green-bg); --ink: var(--t-fg); --muted: var(--t-muted); --danger: var(--red-fg); --danger-soft: var(--red-bg); }
+body:has(> .boot:not([hidden])) > .devupd { display: none; }
+.titlebar .brandline { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.titlebar .du-home { margin: -12px 0; }
 body:has(> .boot:not([hidden])) { overflow: hidden; }
-/* v0.28 toolbar (the IVK Tracker's): icon tools flush right; the Dev Update bell floats (dev-updates.js) */
+/* toolbar (the IVK Tracker's): refresh, full screen, light / dark, flush right */
 .titlebar .tools { display: flex; align-items: center; gap: 2px; }
 .ibtn.spin svg { animation: sohar-spin .9s linear infinite; }
 .ibtn { position: relative; display: grid; place-items: center; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 12px; background: none; color: var(--t-muted); transition: background .2s, color .2s; }
@@ -812,6 +814,16 @@ body:has(> .boot:not([hidden])) { overflow: hidden; }
 .ibtn[hidden] { display: none; }
 /* toolbar hover labels: what the press does */
 .tools .ibtn[data-tip]:hover::after, .tools .ibtn[data-tip]:focus-visible::after { content: attr(data-tip); position: absolute; top: calc(100% + 6px); right: 0; white-space: nowrap; padding: 5px 9px; border-radius: 8px; background: var(--t-fg); color: var(--t-raised); font-size: 12px; font-weight: 500; line-height: 1.2; pointer-events: none; z-index: 60; }
-.devupd.du-docked .du-bell:hover { background: var(--t-sunken); color: var(--t-fg); }
-/* over the loading and name screens there is no toolbar: the bell floats above them */
-body:has(> .boot:not([hidden])) > .devupd { z-index: 960; }
+/* light / dark: both symbols whole at the toolbar's 18px, the current one faded, the one a press switches to in ink; they
+   swap places on a change */
+.ibtn.theme { width: auto; padding: 0 8px; display: flex; align-items: center; gap: 3px; }
+.ibtn.theme svg { width: 18px; height: 18px; }
+.ibtn.theme .tsl { font-size: 14px; color: var(--t-line2); line-height: 1; }
+.ibtn.theme .tcur { opacity: .45; }
+.ibtn.theme .tgo { color: var(--t-fg); }
+.ibtn.theme .tcur, .ibtn.theme .tgo { display: grid; place-items: center; }
+.ibtn.theme.swap .tcur { animation: soharswapL .38s cubic-bezier(.3, .7, .3, 1); }
+.ibtn.theme.swap .tgo { animation: soharswapR .38s cubic-bezier(.3, .7, .3, 1); }
+@keyframes soharswapL { from { transform: translateX(12px) rotate(-90deg); opacity: 1; } }
+@keyframes soharswapR { from { transform: translateX(-12px) rotate(90deg); opacity: .6; } }
+@media (prefers-reduced-motion: reduce) { .ibtn.theme.swap .tcur, .ibtn.theme.swap .tgo { animation: none; } }
