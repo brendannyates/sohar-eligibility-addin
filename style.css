@@ -830,3 +830,15 @@ body:has(> .boot:not([hidden])) { overflow: hidden; }
 /* v0.29: the clinic-file lock password (Admin > Clinic files), typed each export and never saved */
 .lockpw { display: flex; flex-direction: column; gap: 4px; margin: 0 0 4px; font-weight: 600; }
 .lockpw input { max-width: 260px; font-weight: 400; }
+
+/* v0.30: the financial note box wraps under the textarea in the narrow window */
+.fn-add { flex-wrap: wrap; }
+.fn-add textarea { flex-basis: 100%; }
+.fn-add select { width: auto; flex: 0 1 auto; min-height: 44px; border-radius: 10px; border: 1px solid var(--t-line2); background: var(--t-raised); color: var(--t-fg); padding: 0 10px; }
+
+/* v0.30 Billing tickets tab */
+.tk-kpis { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 6px 0 12px; font-size: 14px; }
+.tk-kpis .bad { color: var(--alert); }
+.tk-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.tk-group h4 { margin: 0 0 4px; font-size: 13px; }
+.tk-bar { width: 50%; }

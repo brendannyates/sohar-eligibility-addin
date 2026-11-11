@@ -169,3 +169,10 @@ test('v0.29: the rotation, consent, desk, clinic file and Clinic Day column list
   }
   assert.ok(!R.CLINIC_DAY_COLS.includes('MRN'), 'Clinic Day shows no MRN (the patient view does)');
 });
+
+test('v0.30: financial notes and the clinic appointment list carry no name or DOB column', () => {
+  const REC = createRequire(import.meta.url)('../record.js'), R = createRequire(import.meta.url)('../rules.js');
+  for (const [k, cols] of [['FINANCIAL_NOTE_COLS', REC.FINANCIAL_NOTE_COLS], ['CLINIC_APPT_KEEP', R.CLINIC_APPT_KEEP]]) {
+    assert.deepEqual(cols.map((c) => c.replace(/\s*\((cht guar|lst enc)\)$/i, '')).filter((c) => NAME_COLS.includes(c) || /name|dob|birth|guar|pol nbr|other id/i.test(c)).filter((c) => !/^payer name$/i.test(c) && c !== 'Res Name' && c !== 'Loc Name'), [], `${k} has no name, DOB, guarantor or member columns`);
+  }
+});

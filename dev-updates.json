@@ -1,6 +1,17 @@
 {
   "updates": [
     {
+      "id": "2026-11-11-central-workbook",
+      "date": "2026-11-11",
+      "bullets": [
+        "New: Step 1 can use the daily NextGen list that Power Query brings into this workbook. Press Use the daily NextGen list instead of uploading the report.",
+        "New: The patient view has a Billing and balance section: open billing tickets with their age and due dates, the NextGen balance, and financial notes you can add.",
+        "New: Full screen has a Billing tickets tab with open tickets by clinic, status and age.",
+        "New: A Data pill in the patient view says when the Power Query data was last refreshed.",
+        "Changed: Clinic Template Tool files are now a Start Here page and the clinic's appointment list for the access views. Eligibility is worked in this workbook for now."
+      ]
+    },
+    {
       "id": "2026-11-10-clinic-files-v2",
       "date": "2026-11-10",
       "bullets": [
