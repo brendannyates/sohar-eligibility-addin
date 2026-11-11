@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.29.0';
+  const VERSION = '0.30.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -361,6 +361,7 @@
     $('btnDlDisc').addEventListener('click', () => guard(() => download('discovery'), 'preflight'));
     $('btnDlFlow').addEventListener('click', () => guard(downloadFlowImport, 'preflight'));
     dropZone('dropReport', 'fileImport', (files) => guard(() => uploadImport(files), 'scanResult'));
+    $('dailyList').addEventListener('click', (e) => { if (e.target.closest('#btnDaily')) guard(useDailyList, 'scanResult'); });
     dropZone('dropResults', 'fileResults', (files) => guard(() => uploadResults(files), 'resultsResult'));
     $('btnCopyMsg').addEventListener('click', () => guard(() => copyAdminMessage('action'), 'resultsResult'));
     $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits'), 'benBox'));
@@ -405,6 +406,7 @@
       $('scope').value = state.cfg.scope;
       $('asOf').value = state.cfg.asOf ? state.cfg.asOf.toISOString().slice(0, 10) : '';
       showFeeUi();
+      renderDailyList().catch((e) => console.warn('daily NextGen list not shown', e)); // v0.30
     } catch (e) { setStatus(e.message, 'bad'); }
   }
 
@@ -422,6 +424,44 @@
       // v0.20: when the report came in, for the "Last updated" pill in full screen.
       state.reportUploaded = utcStamp(new Date());
       if (!state.demo) await X.setConfigValue('Report uploaded', state.reportUploaded).catch((e) => console.warn('Report uploaded not stamped', e));
+      await lockNames();
+      await refreshAll();
+    } finally { dropBusy('dropReport'); }
+  }
+
+  // ---------- v0.30: the master's Power Query data (docs/powerquery; refreshed by Data > Refresh All or the 7:30 AM job) ----------
+  /** The newest refresh of the queries this add-in reads, and any query error, for step 1 and the full-screen pill. */
+  async function queryStatus() {
+    if (state.demo) return state.demoQueries || null;
+    const qs = X.readQueryStatus ? await X.readQueryStatus() : null;
+    if (!qs || !qs.length) return qs ? { at: '', errors: [], count: 0 } : null;
+    const at = qs.map((q) => q.refreshDate).filter(Boolean).sort()[0] || ''; // the oldest: one stale query makes the data stale
+    return { at, errors: qs.filter((q) => q.error).map((q) => `${q.name}: ${q.error}`), count: qs.length };
+  }
+  /** Step 1: "Use the daily NextGen list" when the NG Appointments query is in this workbook. */
+  async function renderDailyList() {
+    const box = $('dailyList');
+    if (!box) return;
+    const rows = state.demo ? null : await X.readQueryTable('appts').catch(() => null);
+    if (!rows) { box.hidden = true; box.innerHTML = ''; return; }
+    const st = await queryStatus();
+    const f = REC.dataFreshness(st, new Date());
+    box.hidden = false;
+    box.innerHTML = `<p><b>Daily NextGen list</b>: ${rows.length.toLocaleString()} rows${st && st.at ? `, refreshed ${esc(fmtStamp(new Date(st.at)))}` : ''}. <span class="${f.level === 'fresh' ? 'ok' : 'warn'}">${esc(f.text)}</span></p>
+      <div class="actions"><button class="small primary" id="btnDaily">Use the daily NextGen list</button></div>`;
+  }
+  /** The NG Appointments query's rows go onto the Import sheet the same way an uploaded report does, then the usual build. */
+  async function useDailyList() {
+    const rows = await X.readQueryTable('appts');
+    if (!rows || !rows.length) throw new Error('The NG Appointments query has no rows. Press Data > Refresh All, then try again.');
+    const head = Object.keys(rows[0]);
+    const grid = [head].concat(rows.map((r) => head.map((h) => (r[h] == null ? '' : r[h]))));
+    dropBusy('dropReport', 'Loading the daily NextGen list…');
+    try {
+      await X.writeImportRows(grid);
+      const st = await queryStatus();
+      state.reportUploaded = utcStamp(st && st.at ? new Date(st.at) : new Date());
+      await X.setConfigValue('Report uploaded', state.reportUploaded).catch((e) => console.warn('Report uploaded not stamped', e));
       await lockNames();
       await refreshAll();
     } finally { dropBusy('dropReport'); }
@@ -672,7 +712,7 @@
         const feeRows = F ? (feesOn() ? F.FEE_CONFIG_ROWS : F.FEE_CONFIG_ROWS.slice(0, 1)) : [];
         // "MRN ids since": Sohar checks created before this time carry the Per Nbr as their id, later ones the MRN.
         const since = { setting: 'MRN ids since', value: utcStamp(new Date()), what: 'When this workbook started sending the MRN (not the Per Nbr) as the Sohar id. Sohar results created before then are matched by Per Nbr. Set by the add-in; do not change.' };
-        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
+        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS, START_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
         if (!String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
       }
       const learn = state.cfg.learning || C.LEARN_DEFAULTS;
@@ -1087,22 +1127,33 @@
     box.innerHTML = `<p><b>Clinic inbox</b>: ${k ? `${s(k, 'new clinic change', 'new clinic changes')} waiting${p.s.n.locations > 1 ? ` from ${p.s.n.locations} clinics` : ''}.` : 'nothing new.'}${p.skipped ? ` <span class="hint">${s(p.skipped, 'row is', 'rows are')} blank or of a kind this version does not know, and ${p.skipped === 1 ? 'is' : 'are'} skipped.</span>` : ''}</p>
       <div class="actions">${k ? '<button class="primary small" id="btnInboxApply">Apply clinic changes</button>' : ''}${check}<button class="link" data-goto="${esc(X.INBOX ? X.INBOX.sheet : 'Clinic Work Inbox')}">Clinic Work Inbox</button></div>${await flowTablesHtml()}`;
   }
-  // v0.29: the rotation's tables (Eligibility Checks, Patient History, Copay Activity, Card On File, Needs Check).
-  const FLOW_COLS = () => ({ ledger: R.LEDGER_COLS, history: R.PATIENT_HISTORY_COLS, copay: R.COPAY_ACTIVITY_COLS, cards: R.CARD_ON_FILE_COLS, needs: R.NEEDS_CHECK_COLS });
+  // v0.30: the rotation's ledger, history, copays and card on file come from Power Query (QUERY_TABLES); Needs Check stays
+  // flow-owned (the lookup flow appends to it), so it is the only table this pane sets up.
+  const FLOW_COLS = () => ({ needs: R.NEEDS_CHECK_COLS });
+  const QUERY_KINDS = ['ledger', 'history', 'copay', 'cards'];
   async function readFlowRows() {
     const out = {};
-    for (const k of Object.keys(FLOW_COLS())) out[k] = X.readFlowTable ? await X.readFlowTable(k).catch((e) => { console.warn(`${k} not read`, e); return null; }) : null;
+    for (const k of QUERY_KINDS) out[k] = X.readQueryTable ? await X.readQueryTable(k).catch((e) => { console.warn(`${k} not read`, e); return null; }) : null;
+    out.needs = X.readFlowTable ? await X.readFlowTable('needs').catch((e) => { console.warn('needs not read', e); return null; }) : null;
     return out;
   }
+  // v0.30 (Brendan, 11/10): clinic files are Start Here + the appointment list for now; eligibility stays in this workbook.
+  // Set true to export the v0.29 Clinic Day file again (it is still built and tested by rules.clinicPack).
+  const CLINIC_ELIGIBILITY = false;
+  const START_CONFIG_ROWS = [
+    { setting: 'Start Here links', value: '', what: 'Clinic workbook Start Here page: links as Label | https://... separated by ; (for example Billing ticket form | https://...; Luma | https://...).' },
+    { setting: 'Start Here contact', value: '', what: 'Clinic workbook Start Here page: who the clinic asks about eligibility and billing (a name or a team inbox).' },
+  ];
   async function flowTablesHtml() {
     const f = await readFlowRows();
-    const missing = Object.keys(f).filter((k) => f[k] == null);
+    const missing = QUERY_KINDS.filter((k) => f[k] == null);
     const n = (k) => (f[k] || []).filter((r) => String(r.MRN ?? '').trim()).length;
     const open = (f.needs || []).filter((r) => !/^done$/i.test(String(r.Status ?? '').trim())).length;
-    return missing.length
-      ? `<p><b>Rotation tables</b>: ${missing.length === 5 ? 'not set up' : `${missing.length} of 5 missing`}. The rotation's flow fills them, so clinic files carry visit estimates, card on file, copays and history.</p>
-        <div class="actions"><button class="small" id="btnFlowSetup">Set up the rotation tables</button></div>`
-      : `<p><b>Rotation tables</b>: ${n('ledger')} visit checks, ${n('history')} history events, ${n('copay')} copays, ${n('cards')} card on file rows${open ? `, <span class="hi">${open} eligibility check${open === 1 ? '' : 's'} requested by clinics</span>` : ''}.</p>`;
+    const st = await queryStatus(), fr = REC.dataFreshness(st, new Date());
+    return (missing.length
+      ? `<p><b>Power Query data</b>: ${missing.length === QUERY_KINDS.length ? 'not set up' : `${missing.length} of ${QUERY_KINDS.length} rotation queries missing`}. Add the queries in docs/powerquery (ledger, history, copays, card on file), then Data &gt; Refresh All.</p>`
+      : `<p><b>Power Query data</b>: ${n('ledger')} visit checks, ${n('history')} history events, ${n('copay')} copays, ${n('cards')} card on file rows. <span class="${fr.level === 'fresh' ? 'ok' : 'warn'}">${esc(fr.text)}</span></p>`)
+      + (f.needs == null ? '<div class="actions"><button class="small" id="btnFlowSetup">Set up Needs Check</button></div>' : open ? `<p><span class="hi">${open} eligibility check${open === 1 ? '' : 's'} requested by clinics</span>.</p>` : '');
   }
   async function setupFlowTables() {
     const made = await X.createFlowTables(FLOW_COLS());
@@ -1476,6 +1527,13 @@
    * typed after the upload reaches the clinic.
    */
   async function cttWorkbook(loc, password) {
+    if (!CLINIC_ELIGIBILITY) {
+      // v0.30: Start Here + this clinic's slice of the daily NextGen list (the NG Appointments query, else the Import sheet).
+      const ngAppts = await X.readQueryTable('appts').catch(() => null);
+      const pack = R.clinicPack(loc, { eligibility: false, ngAppts, importGrid: ngAppts ? null : state.rows || await X.readImportRows().catch(() => null),
+        links: (state.cfg && state.cfg.startLinks) || [], contact: (state.cfg && state.cfg.startContact) || '', runAt: new Date(), version: VERSION });
+      return { name: pack.name, bytes: XL.buildWorkbook(pack), counts: pack.counts };
+    }
     const flow = await readFlowRows();
     const pack = R.clinicPack(loc, {
       patients: inScopePatients(), results: state.results || [], review: state.review || [],
@@ -1520,8 +1578,12 @@
   async function saveCttFile(loc) {
     if (!state.clinic) throw new Error('Upload the NextGen report first.');
     const pw = $('cttLock') ? $('cttLock').value : '';
-    if (!pw && !state.demo) throw new Error('Type the lock password (Admin tab, above the clinic list) first. The clinic file is locked with it so the hidden sheets stay hidden.');
+    if (CLINIC_ELIGIBILITY && !pw && !state.demo) throw new Error('Type the lock password (Admin tab, above the clinic list) first. The clinic file is locked with it so the hidden sheets stay hidden.');
     const f = await cttWorkbook(loc, pw || null), c = f.counts;
+    if (!CLINIC_ELIGIBILITY) {
+      await saveBinary(f.name, f.bytes, XL.MIME, 'clinicFilesNote', `Start Here and ${c.appointments} visit${c.appointments === 1 ? '' : 's'} for ${c.patients} patient${c.patients === 1 ? '' : 's'}, LASFIR only, for the Clinic Template Tool's appointment and access views; PHI: save it in the clinic's folder only`);
+      return;
+    }
     await saveBinary(f.name, f.bytes, XL.MIME, 'clinicFilesNote', `${c.patients} patient${c.patients === 1 ? '' : 's'}, ${c.results} Sohar result${c.results === 1 ? '' : 's'}, for the Clinic Template Tool; PHI: share through MHS OneDrive or Teams only`);
   }
 
@@ -2268,6 +2330,8 @@
       // v0.27 IVN export: clinic -> kept/expected events per Per Nbr, and secondary payers, so full screen saves the same file.
       ivn: { visits: [...C.ivnIndex(state.patients || []).entries()], secondary: [...secondaryByPer().entries()] },
       visits: await patientVisits(), notes: await patientNotesByKey(), audits: await currentAudits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
+      // v0.30: open billing tickets, the account balance and financial notes per patient, and the Power Query refresh.
+      billing: await billingByKey(), data: await queryStatus(), ticketRows: await ticketRowsForView(),
       // v0.28: who picked their name in the pane (ticks, notes, code rules and audits record it) and the list to switch to.
       who: { name: who.name, users: whoList(), here: whoRead().used },
     };
@@ -2361,6 +2425,39 @@
     return out;
   }
   /** Patient key (MRN) -> the patient's notes (record.patientNotes, one list per patient), for patients with a Sohar result. */
+  /** Per patient key: {tickets, balance, notes} from the Power Query tables and the Financial Notes sheet. */
+  async function billingByKey() {
+    const read = async (kind) => (state.demo ? (state.demoQuery && state.demoQuery[kind]) || [] : (await X.readQueryTable(kind).catch(() => null)) || []);
+    const tickets = await read('tickets'), balances = await read('balances'), fnotes = await currentFinancialNotes();
+    const out = {}, today = new Date();
+    for (const r of state.results || []) {
+      const k = C.keyOf(r), mrn = String(r.MRN ?? '').trim();
+      if (!k || out[k] || !mrn) continue;
+      const t = REC.openTicketsOf(tickets, mrn, today), b = REC.balanceOf(balances, mrn, r['Per Nbr']), n = REC.financialNotesOf(fnotes, mrn);
+      if (t.length || b || n.length) out[k] = { mrn, tickets: t, balance: b, notes: n };
+    }
+    return out;
+  }
+  /** The open tickets for the Billing tickets tab: only the columns it shows. */
+  async function ticketRowsForView() {
+    const rows = state.demo ? (state.demoQuery && state.demoQuery.tickets) || [] : (await X.readQueryTable('tickets').catch(() => null)) || [];
+    const keep = ['Ticket Id', 'Submitted', 'Clinic', 'LASFIR', 'MRN', 'Status', 'Task Type', 'Confirmation Due', 'Resolution Due', 'Last Reply At'];
+    return rows.map((r) => Object.fromEntries(keep.map((c) => [c, r[c] == null ? '' : r[c]])));
+  }
+  async function currentFinancialNotes(fresh) {
+    if (state.demo) return state.financialNotes || [];
+    if (fresh || !state.financialNotes) state.financialNotes = await X.readFinancialNotes().catch((e) => { if (fresh) throw e; console.warn(e); return []; });
+    return state.financialNotes || [];
+  }
+  /** A financial note from full screen, saved in order on the hidden Financial Notes sheet (read fresh first). */
+  function saveFinancialNote(m) {
+    state.fnoteQueue = (state.fnoteQueue || Promise.resolve()).catch(() => {}).then(async () => {
+      const next = REC.addFinancialNote(await currentFinancialNotes(true), { mrn: m.mrn, lasfir: m.lasfir, note: m.note, category: m.category, ticket: m.ticket, by: m.by, when: fmtStamp(new Date()) });
+      if (!state.demo) await X.writeFinancialNotes(REC.FINANCIAL_NOTE_COLS, next);
+      state.financialNotes = next;
+    });
+    return state.fnoteQueue;
+  }
   async function patientNotesByKey() {
     const saved = await currentPrecheck(), out = {};
     for (const r of state.results || []) { const k = C.keyOf(r); if (k && !out[k]) { const n = REC.patientNotes(k, saved); if (n.length) out[k] = n; } }
@@ -2483,6 +2580,8 @@
         const when = await saveAudit(m);
         await sendToDialog({ type: 'audits', audits: state.audits, notice: { ok: true, text: `Audit for ${m.record.summary.LASFIR} saved ${when}. It replaces this patient's earlier saved audit.` } });
       } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Audit not saved: ${e.message}` }); throw e; }
+    } else if (m.type === 'financial-note') {
+      try { await saveFinancialNote(m); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Financial note not saved: ${e.message}` }); throw e; }
     } else if (m.type === 'precheck' || m.type === 'precheck-note') {
       try { await savePrecheck(m); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `${m.type === 'precheck' ? 'Pre-check' : 'Note'} not saved: ${e.message}` }); throw e; }
     } else if (m.type === 'fee-upload' && feesOn()) {
@@ -2870,6 +2969,8 @@
       async readClinicConsents() { return demoConsents; }, async writeClinicConsents(c, r) { demoConsents = r; },
       async readDeskCollections() { return demoDesk; }, async writeDeskCollections(c, r) { demoDesk = r; },
       async readFeeScheduleLog() { return demoFeeLog; }, async writeFeeScheduleLog(c, r) { demoFeeLog = r; },
+      async readFinancialNotes() { return state.financialNotes || []; }, async writeFinancialNotes(c, r) { state.financialNotes = r; },
+      QUERY_TABLES: {}, async readQueryTable() { return null; }, async readQueryStatus() { return null; },
       FLOW_TABLES: { ledger: { sheet: 'Eligibility Checks' }, history: { sheet: 'Patient History' }, copay: { sheet: 'Copay Activity' }, cards: { sheet: 'Card On File' }, needs: { sheet: 'Needs Check' } },
       async readFlowTable(k) { return demoFlow ? demoFlow[k] || [] : null; },
       async createFlowTables(cols) { if (demoFlow) return []; demoFlow = Object.fromEntries(Object.keys(cols).map((k) => [k, []])); return Object.keys(cols); },

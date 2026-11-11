@@ -6,9 +6,9 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none';">
   <title>Sohar eligibility, full screen</title>
-  <link rel="stylesheet" href="style.css?v=0.29.0">
-  <script src="theme.js?v=0.29.0"></script>
-  <link rel="stylesheet" href="dev-updates.css?v=0.29.0">
+  <link rel="stylesheet" href="style.css?v=0.30.0">
+  <script src="theme.js?v=0.30.0"></script>
+  <link rel="stylesheet" href="dev-updates.css?v=0.30.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
@@ -36,6 +36,7 @@
     <button role="tab" data-tab="benefits">Benefits &amp; OOP</button>
     <button role="tab" data-tab="worklist">Worklist</button>
     <button role="tab" data-tab="tasks">NextGen tasks <span id="taskCount" class="badge"></span></button>
+    <button role="tab" data-tab="tickets">Billing tickets <span class="badge"></span></button>
     <button role="tab" data-tab="clinic">Clinic lists</button>
     <button role="tab" data-tab="learning">Payer learning</button>
     <button role="tab" data-tab="messages">Messages</button>
@@ -222,6 +223,10 @@
     </section>
 
     <!-- Messages -->
+    <section class="panel" data-panel="tickets" hidden>
+      <p class="hint">Open billing tickets from the billing team's BillingMaster, through the master's Power Query (Data &gt; Refresh All). The billing add-in stays the place to work a ticket.</p>
+      <div id="ticketBox"></div>
+    </section>
     <section class="panel" data-panel="messages" hidden>
       <div class="actions">
         <label class="inline">Message
@@ -282,15 +287,15 @@
     <section id="detail" class="detail" hidden></section>
   </main>
 
-  <script src="payer-rules.js?v=0.29.0"></script>
-  <script src="core.js?v=0.29.0"></script>
-  <script src="rules.js?v=0.29.0"></script>
-  <script src="fees.js?v=0.29.0"></script>
-  <script src="record.js?v=0.29.0"></script>
-  <script src="xlsx.js?v=0.29.0"></script>
-  <script src="audit.js?v=0.29.0"></script>
-  <script src="who.js?v=0.29.0"></script>
-  <script src="dev-updates.js?v=0.29.0"></script>
-  <script src="dashboard.js?v=0.29.0"></script>
+  <script src="payer-rules.js?v=0.30.0"></script>
+  <script src="core.js?v=0.30.0"></script>
+  <script src="rules.js?v=0.30.0"></script>
+  <script src="fees.js?v=0.30.0"></script>
+  <script src="record.js?v=0.30.0"></script>
+  <script src="xlsx.js?v=0.30.0"></script>
+  <script src="audit.js?v=0.30.0"></script>
+  <script src="who.js?v=0.30.0"></script>
+  <script src="dev-updates.js?v=0.30.0"></script>
+  <script src="dashboard.js?v=0.30.0"></script>
 </body>
 </html>

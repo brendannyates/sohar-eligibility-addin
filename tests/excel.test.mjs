@@ -904,20 +904,26 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
   m.seedTable('Patients', 'tblPatients', ['Per Nbr', 'Zip'], [{ 'Per Nbr': '1', Zip: '02134' }]);
   m.seedTable('Payer Map', 'tblPayerMap', ['NextGen Payer Name', 'Sohar payerId', 'Sohar payerName', 'Confidence', 'Action', 'Notes', 'Last reviewed'], [], { text: false });
   m.registerXlsx('b64-report', [{ name: 'Report', rows: [['Per Nbr', 'Zip'], ['001', '02134']] }]);
+  const two = (cols) => [Object.fromEntries(cols.map((c) => [c, `${c} 1`])), Object.fromEntries(cols.map((c) => [c, `${c} 2`]))];
   await X.createClinicInbox(RL.INBOX_COLS);
   await flowAppends(m, inboxRows(4, 'Synthetic'));
-  // v0.29: the rotation's flow-owned tables hold rows too, and must come through every write path unchanged.
-  const FLOW_COLS = { ledger: RL.LEDGER_COLS, history: RL.PATIENT_HISTORY_COLS, copay: RL.COPAY_ACTIVITY_COLS, cards: RL.CARD_ON_FILE_COLS, needs: RL.NEEDS_CHECK_COLS };
+  // v0.29: the flow-owned Needs Check holds rows too, and must come through every write path unchanged.
+  const FLOW_COLS = { needs: RL.NEEDS_CHECK_COLS };
+  // v0.30: so do the Power Query tables (the refresh owns them). Synthetic rows only.
+  const QCOLS = { appts: ['Pat Name', 'Appt Date', 'Beg Tm', 'MRN', 'Per Nbr'], ledger: RL.LEDGER_COLS, history: RL.PATIENT_HISTORY_COLS, copay: RL.COPAY_ACTIVITY_COLS,
+    cards: RL.CARD_ON_FILE_COLS, tickets: ['Ticket Id', 'MRN', 'LASFIR', 'Status'], balances: ['MRN', 'Per Nbr', 'Balance', 'As Of'] };
+  for (const [k, cols] of Object.entries(QCOLS)) m.seedTable(X.QUERY_TABLES[k].sheet, X.QUERY_TABLES[k].table, cols, two(cols));
+  const querySnap = () => Object.values(X.QUERY_TABLES).map((t) => ({ info: m.tableInfo(t.table), rows: m.tableRows(t.table, true) }));
   assert.deepEqual(await X.createFlowTables(FLOW_COLS), Object.keys(FLOW_COLS));
   await m.Excel.run(async (ctx) => {
     for (const [k, cols] of Object.entries(FLOW_COLS)) ctx.workbook.tables.getItem(X.FLOW_TABLES[k].table).rows.add(null, [cols.map((c) => `${k} ${c}`), cols.map((c) => `${k} ${c} 2`)]);
     await ctx.sync();
   });
   const flowSnap = () => Object.values(X.FLOW_TABLES).map((t) => ({ info: m.tableInfo(t.table), rows: m.tableRows(t.table, true), vis: m.sheetVisibility(t.sheet) }));
-  const before = { inbox: inboxSnapshot(m), flow: flowSnap() };
+  const before = { inbox: inboxSnapshot(m), flow: flowSnap(), query: querySnap() };
   assert.ok(before.flow.every((t) => t.vis === 'Hidden' && t.rows.length === 3), 'flow tables are hidden and hold the flow\'s rows');
-  const snapshot = () => ({ inbox: inboxSnapshot(m), flow: flowSnap() });
-  const two = (cols) => [Object.fromEntries(cols.map((c) => [c, `${c} 1`])), Object.fromEntries(cols.map((c) => [c, `${c} 2`]))];
+  assert.ok(before.query.every((t) => t.rows.length >= 2), 'query tables hold the refresh\'s rows');
+  const snapshot = () => ({ inbox: inboxSnapshot(m), flow: flowSnap(), query: querySnap() });
   const calls = {
     upsertPayerMap: () => X.upsertPayerMap({ nextgenPayerName: 'Plan Z', payerId: '01111', payerName: 'Z', confidence: 'Exact' }),
     upsertPayerMapMany: () => X.upsertPayerMapMany([{ nextgenPayerName: 'Plan Y', payerId: '02222', payerName: 'Y', confidence: 'Exact' }]),
@@ -949,7 +955,7 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
   const bad = [];
   for (const [k, f] of Object.entries(calls)) {
     try { await f(); } catch (e) { bad.push(`${k} threw ${e.message}`); continue; }
-    if (!isDeepStrictEqual(snapshot(), before)) { bad.push(`${k} changed the inbox or a flow table`); break; }
+    if (!isDeepStrictEqual(snapshot(), before)) { bad.push(`${k} changed the inbox, a flow table or a query table`); break; }
   }
   assert.deepEqual(bad, []);
   assert.deepEqual(await X.readClinicInbox(), expected(RL.INBOX_COLS, inboxRows(4, 'Synthetic')));
@@ -957,10 +963,12 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
   const src = readFileSync(new URL('../excel.js', import.meta.url), 'utf8');
   const owned = src.slice(src.indexOf('const OWNED = {'), src.indexOf('};', src.indexOf('const OWNED = {')));
   assert.doesNotMatch(owned, /Inbox/);
-  for (const t of Object.values(X.FLOW_TABLES)) {
+  for (const t of Object.values(X.FLOW_TABLES).concat(Object.values(X.QUERY_TABLES))) {
     assert.ok(!owned.includes(t.table), `${t.table} is not OWNED`);
-    assert.equal(src.split(t.table).length - 1, 1, `${t.table} is named once, in FLOW_TABLES`);
+    assert.equal(src.split(t.table).length - 1, 1, `${t.table} is named once, in FLOW_TABLES or QUERY_TABLES`);
   }
+  assert.equal(m.sheetVisibility('NG Appointments'), 'VeryHidden', 'lockNameSheets made the NextGen list very hidden (names)');
+  assert.deepEqual((await X.readQueryTable('tickets')).map((r) => r.Status), ['Status 1', 'Status 2']);
   assert.deepEqual(src.match(/tblClinicWorkInbox/g), ['tblClinicWorkInbox'], 'the table name appears once, in INBOX');
   const uses = [...src.matchAll(/INBOX\.(table|sheet)/g)].map((x) => src.lastIndexOf('async function', x.index)).map((i) => src.slice(i, src.indexOf('(', i)));
   assert.deepEqual([...new Set(uses)], ['async function readClinicInbox', 'async function createClinicInbox']);

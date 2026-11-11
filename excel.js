@@ -99,6 +99,8 @@
     // each rate the calculator changed (fees.FEE_SCHEDULE_LOG_COLS). MRNs or rates: hidden.
     tblClinicConsent: { sheet: 'Clinic Consent', hidden: true }, tblDeskCollections: { sheet: 'Desk Collections', hidden: true },
     tblFeeScheduleLog: { sheet: 'Fee Schedule Log', hidden: true },
+    // v0.30: financial notes staff write in the patient view (record.FINANCIAL_NOTE_COLS). MRNs: hidden.
+    tblFinancialNotes: { sheet: 'Financial Notes', hidden: true },
   };
   // Fee estimate tables by short name (app.js uses readFee / writeFee with these).
   const FEE_TABLES = { schedule: 'tblFeeSchedule', meta: 'tblFeeMeta', locations: 'tblFeeLocations', homes: 'tblProviderHome',
@@ -200,6 +202,9 @@
       defaultState: String(cfg['Default state'] || '').trim(),
       reportUploaded: String(cfg['Report uploaded'] ?? '').trim(), // v0.20: when the NextGen report was last uploaded (UTC stamp)
       adminNames: String(cfg['Admin names'] ?? '').trim(), // v0.20: names admins pick for pre-check ticks and notes (record.adminNames)
+      // v0.30: the clinic workbook's Start Here page (links "Label | https://..." separated by ;, and who to ask).
+      startLinks: String(cfg['Start Here links'] ?? '').split(';').map((x) => x.split('|').map((y) => y.trim())).filter((x) => x[0] && /^https:\/\//i.test(x[1] || '')).map(([label, url]) => ({ label, url })),
+      startContact: String(cfg['Start Here contact'] ?? '').trim(),
       tin: String(cfg['TIN'] ?? '').trim(), providerGroup: String(cfg['Sohar provider group'] ?? '').trim(), // v0.21: Sohar Flow import
       teleKeywords: String(cfg['Telehealth keywords'] || 'Tele').split(/[;,]/).map((s) => s.trim()).filter(Boolean),
       posTele: String(cfg['POS code: telehealth'] || '10').trim(),
@@ -413,7 +418,8 @@
    * Unhide menu lists them, and the Export sheet (a one-off CSV download with names) is removed. Hides only, never
    * writes cells. Returns a warning, or ''. Not access control: anyone who can open the workbook can still script them.
    */
-  const NAME_SHEETS = [SHEETS.import, 'Sohar Uploads', 'IR Uploads'];
+  // v0.30: NG Appointments, the Power Query load of the daily NextGen list, keeps names too.
+  const NAME_SHEETS = [SHEETS.import, 'Sohar Uploads', 'IR Uploads', 'NG Appointments'];
   async function lockNameSheets() {
     return run(async (ctx) => {
       const wb = ctx.workbook;
@@ -700,17 +706,49 @@
    */
   async function createClinicInbox(cols) { return createHeaderTable({ sheet: INBOX.sheet, table: INBOX.table }, cols, 'the clinic inbox', 'set up the inbox again'); }
 
-  // ---------- v0.29: the rotation's tables, also flow-owned ----------
-  // The "Rotation to master" flow upserts the eligibility-check rotation's rows here (rules.LEDGER_COLS and the others), and
-  // the lookup flow appends to Needs Check. Same rule as the inbox: not in OWNED, never swapped, sorted, cleared or trimmed;
-  // the add-in creates each once (header only, hidden: they carry MRNs) and reads it.
+  // ---------- v0.29: Needs Check, flow-owned ----------
+  // The lookup flow appends to Needs Check. Same rule as the inbox: not in OWNED, never swapped, sorted, cleared or
+  // trimmed; the add-in creates it once (header only, hidden: it carries MRNs) and reads it.
   const FLOW_TABLES = {
-    ledger: { sheet: 'Eligibility Checks', table: 'tblEligibilityChecks', hidden: true },
-    history: { sheet: 'Patient History', table: 'tblPatientHistory', hidden: true },
-    copay: { sheet: 'Copay Activity', table: 'tblCopayActivity', hidden: true },
-    cards: { sheet: 'Card On File', table: 'tblCardOnFile', hidden: true },
     needs: { sheet: 'Needs Check', table: 'tblNeedsCheck', hidden: true },
   };
+
+  // ---------- v0.30: Power Query tables (docs/powerquery/*.pq) ----------
+  // Power Query in the master loads these on Data > Refresh All (or the 7:30 AM desktop refresh, scripts/refresh-master.ps1).
+  // The refresh owns them: the add-in never creates, writes, swaps or deletes them, and only reads them (lockNameSheets only
+  // makes NG Appointments very hidden; that changes no cell). The ledger
+  // group came from the v0.29 "Rotation to master" flow; Power Query now reads the rotation's CSVs instead (Brendan, 11/10).
+  // NG Appointments keeps names and DOBs (the Sohar import CSVs need them), so lockNameSheets makes it very hidden.
+  const QUERY_TABLES = {
+    appts: { sheet: 'NG Appointments', table: 'tblNGAppts' },
+    ledger: { sheet: 'Eligibility Checks', table: 'tblEligibilityChecks' },
+    history: { sheet: 'Patient History', table: 'tblPatientHistory' },
+    copay: { sheet: 'Copay Activity', table: 'tblCopayActivity' },
+    cards: { sheet: 'Card On File', table: 'tblCardOnFile' },
+    tickets: { sheet: 'Open Tickets', table: 'tblOpenTickets' },
+    balances: { sheet: 'Patient Balances', table: 'tblPatientBalances' },
+  };
+  /** A Power Query table's rows as objects, or null when the query has not been set up (or not loaded yet). */
+  async function readQueryTable(kind) {
+    const t = QUERY_TABLES[kind];
+    if (!t) throw new Error(`Unknown query table ${kind}`);
+    if (!(await tableExists(t.table))) return null;
+    return readTable(t.table);
+  }
+  /**
+   * The workbook's Power Query queries: [{name, refreshDate (ISO or ''), error, rows}] (ExcelApi 1.14, read-only; an add-in
+   * cannot start a refresh). [] when there are none; null when this Excel cannot say.
+   */
+  async function readQueryStatus() {
+    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.14')) return null;
+    return run(async (ctx) => {
+      const qs = ctx.workbook.queries;
+      qs.load('items/name,items/refreshDate,items/error,items/rowsLoadedCount');
+      await ctx.sync();
+      return qs.items.map((q) => ({ name: q.name, refreshDate: q.refreshDate ? new Date(q.refreshDate).toISOString() : '',
+        error: q.error && q.error !== 'None' ? String(q.error) : '', rows: q.rowsLoadedCount == null ? null : q.rowsLoadedCount }));
+    }).catch(() => null);
+  }
   function flowTable(kind) {
     const t = FLOW_TABLES[kind];
     if (!t) throw new Error(`Unknown flow table ${kind}`);
@@ -737,6 +775,8 @@
   const writeDeskCollections = (cols, rows) => writeAddinTable('Desk Collections', 'tblDeskCollections', cols, rows, false); // hidden: OWNED
   const readFeeScheduleLog = () => readOwned('tblFeeScheduleLog');
   const writeFeeScheduleLog = (cols, rows) => writeAddinTable('Fee Schedule Log', 'tblFeeScheduleLog', cols, rows, false); // hidden: OWNED
+  const readFinancialNotes = () => readOwned('tblFinancialNotes');
+  const writeFinancialNotes = (cols, rows) => writeAddinTable('Financial Notes', 'tblFinancialNotes', cols, rows, false); // hidden: OWNED
 
   // Header-only table creation (the clinic inbox, and the Payer Map in a workbook that starts without one), fail-safe
   // as described above. spec: {sheet, table}. label / retry word the errors.
@@ -1041,7 +1081,8 @@
     readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, readFlowResults, writeFlowResults, readPreCheck, writePreCheck, readAccountAudits, readAccountAuditLines, writeAccountAudits, writeAccountAuditLines, dropAccountAuditLines, writePayerMetrics,
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
-    INBOX, readClinicInbox, createClinicInbox, FLOW_TABLES, readFlowTable, createFlowTables,
+    INBOX, readClinicInbox, createClinicInbox, FLOW_TABLES, readFlowTable, createFlowTables, QUERY_TABLES, readQueryTable, readQueryStatus,
+    readFinancialNotes, writeFinancialNotes,
     readClinicConsents, writeClinicConsents, readDeskCollections, writeDeskCollections, readFeeScheduleLog, writeFeeScheduleLog, writeImportRows, importXlsx, lockNameSheets, tidyTabs, TIDY_SHEETS, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

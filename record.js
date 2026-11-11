@@ -600,7 +600,107 @@
     return { tone: 'green', text: 'Coverage looks good. Nothing to fix before the next visit.' };
   }
 
+  // ---------- v0.30: billing tickets, balances and financial notes (the master as the central workbook) ----------
+  // tblOpenTickets and tblPatientBalances are Power Query loads (docs/powerquery); the add-in reads them. Financial notes are
+  // the add-in's own hidden table. Patients match on the MRN without leading zeros (Excel and the billing form drop them).
+  const FINANCIAL_NOTE_COLS = ['MRN', 'LASFIR', 'Note', 'Category', 'Ticket Id', 'By', 'When'];
+  const FINANCIAL_CATEGORIES = ['Balance', 'Copay', 'Ticket', 'Other'];
+  const mrnOf = (v) => str(v).replace(/\.0+$/, '').replace(/^0+(?=\d)/, ''); // a numeric MRN cell reads back as 1234.0 sometimes
+  const sameMrn = (a, b) => !!mrnOf(a) && mrnOf(a) === mrnOf(b);
+  // Card numbers (12-19 digits, with spaces or dashes) never go in a note.
+  const scrubCards = (s) => str(s).replace(/\b(?:\d[ -]?){11,18}\d\b/g, '[card number removed]');
+  const dayOfAny = (v) => (v == null || v === '' ? null : C.parseDate(v));
+  /** Business days from a to b (Mon-Fri; a's day not counted), negative when b is before a. Days are parseDate values. */
+  function businessDays(a, b) {
+    if (!a || !b) return null;
+    const sign = b < a ? -1 : 1, [lo, hi] = sign > 0 ? [a, b] : [b, a];
+    let n = 0;
+    for (let t = lo.getTime() + 864e5; t <= hi.getTime(); t += 864e5) { const w = new Date(t).getUTCDay(); if (w !== 0 && w !== 6) n++; }
+    return sign * n;
+  }
+  /**
+   * The patient's open billing tickets (tblOpenTickets rows), oldest first, each with age (business days since Submitted)
+   * and sla: 'Past due' (after Resolution Due), 'Due soon' (Resolution Due within 1 business day), 'Waiting on Arietis'
+   * (Confirmation Due passed with no reply), else 'On time'. today: a Date.
+   */
+  function openTicketsOf(rows, mrn, today) {
+    return ticketList((rows || []).filter((r) => r && sameMrn(r.MRN, mrn)), today);
+  }
+  /** Every open ticket row with its age and SLA (openTicketsOf without the patient filter), oldest first. */
+  function ticketList(rows, today) {
+    const day = C.parseDate(today instanceof Date ? today : new Date());
+    return (rows || []).filter((r) => r && str(r['Ticket Id'])).map((r) => {
+      const sub = dayOfAny(r.Submitted), res = dayOfAny(r['Resolution Due']), conf = dayOfAny(r['Confirmation Due']);
+      const toRes = res ? businessDays(day, res) : null;
+      const sla = res && day > res ? 'Past due' : toRes != null && toRes <= 1 ? 'Due soon' : conf && day > conf && !str(r['Last Reply At']) ? 'Waiting on Arietis' : 'On time';
+      return { id: str(r['Ticket Id']), clinic: str(r.Clinic), status: str(r.Status), task: str(r['Task Type']), urgency: str(r.Urgency), amount: str(r.Amount),
+        submitted: sub ? shortDate(sub) : '', resolutionDue: res ? shortDate(res) : '', confirmationDue: conf ? shortDate(conf) : '',
+        age: sub ? businessDays(sub, day) : null, sla, escalation: str(r['Escalation Flag']), lastReply: str(r['Last Reply At']) };
+    }).sort((a, b) => (b.age || 0) - (a.age || 0));
+  }
+  /** The patient's account balance (tblPatientBalances: MRN, Per Nbr, Balance, As Of): {balance, asOf} or null. */
+  function balanceOf(rows, mrn, perNbr) {
+    const r = (rows || []).find((x) => x && (sameMrn(x.MRN, mrn) || (!str(x.MRN) && str(perNbr) && str(x['Per Nbr']) === str(perNbr))));
+    if (!r) return null;
+    const n = Number(str(r.Balance).replace(/[$,\s]/g, ''));
+    const asOf = dayOfAny(r['As Of']);
+    return { balance: isFinite(n) ? n : null, asOf: asOf ? shortDate(asOf) : str(r['As Of']) };
+  }
+  /** The patient's financial notes, newest first. */
+  function financialNotesOf(rows, mrn) {
+    return (rows || []).filter((r) => r && sameMrn(r.MRN, mrn)).map((r) => ({ note: str(r.Note), category: str(r.Category), ticket: str(r['Ticket Id']), by: str(r.By), when: str(r.When) }))
+      .sort((a, b) => (a.when < b.when ? 1 : -1));
+  }
+  /**
+   * Add one financial note (kept with every earlier note). t: {mrn, lasfir, note, category, ticket, by, when}. Trimmed to
+   * NOTE_MAX characters, card numbers taken out, the category one of FINANCIAL_CATEGORIES (else Other).
+   */
+  function addFinancialNote(saved, t) {
+    needBy(t);
+    if (!mrnOf(t.mrn)) throw new Error('This patient has no MRN, so the note has nowhere to go.');
+    const note = scrubCards(str(t.note).replace(/\s+/g, ' ')).slice(0, NOTE_MAX);
+    if (!note) throw new Error('The note is empty.');
+    const category = FINANCIAL_CATEGORIES.includes(str(t.category)) ? str(t.category) : 'Other';
+    return (saved || []).map((r) => Object.fromEntries(FINANCIAL_NOTE_COLS.map((c) => [c, str(r[c])])))
+      .concat({ MRN: str(t.mrn), LASFIR: str(t.lasfir), Note: note, Category: category, 'Ticket Id': str(t.ticket), By: str(t.by), When: str(t.when) || new Date().toISOString() });
+  }
+  /**
+   * The Power Query data's freshness (queryStatus: {at (ISO, the oldest query's refresh), errors, count}) -> {level, text}:
+   * fresh within a day, aging up to 3 days, stale after that or on any query error; none when there are no queries.
+   */
+  function dataFreshness(st, now) {
+    if (!st || !st.count) return { level: 'none', text: '' };
+    if (st.errors && st.errors.length) return { level: 'stale', text: `A query failed (${st.errors[0]}). Press Data > Refresh All and check the source file.` };
+    const t = Date.parse(st.at || '');
+    if (isNaN(t)) return { level: 'stale', text: 'Never refreshed. Press Data > Refresh All.' };
+    const days = ((now ? now.getTime() : Date.now()) - t) / 864e5;
+    if (days <= 1) return { level: 'fresh', text: 'Up to date.' };
+    const d = Math.floor(days);
+    return { level: days <= 3 ? 'aging' : 'stale', text: `${d} day${d === 1 ? '' : 's'} old. Press Data > Refresh All.` };
+  }
+  /**
+   * Dashboard counts for the open tickets: {total, byClinic, byStatus, byAge (0-2, 3-5, 6-10, 11+ business days), pastDue,
+   * noMrn}. Rows are tblOpenTickets as Power Query loads them.
+   */
+  function ticketCounts(rows, today) {
+    const day = C.parseDate(today instanceof Date ? today : new Date());
+    const out = { total: 0, byClinic: {}, byStatus: {}, byAge: { '0-2': 0, '3-5': 0, '6-10': 0, '11+': 0 }, pastDue: 0, noMrn: 0 };
+    for (const r of rows || []) {
+      if (!r || !str(r['Ticket Id'])) continue;
+      out.total++;
+      const c = str(r.Clinic) || '(no clinic)', s = str(r.Status) || '(no status)';
+      out.byClinic[c] = (out.byClinic[c] || 0) + 1; out.byStatus[s] = (out.byStatus[s] || 0) + 1;
+      const sub = dayOfAny(r.Submitted), age = sub ? businessDays(sub, day) : null;
+      if (age != null) out.byAge[age <= 2 ? '0-2' : age <= 5 ? '3-5' : age <= 10 ? '6-10' : '11+']++;
+      const res = dayOfAny(r['Resolution Due']);
+      if (res && day > res) out.pastDue++;
+      if (!mrnOf(r.MRN)) out.noMrn++;
+    }
+    return out;
+  }
+
   return { FLOW_COLS, FLOW_SHEET_COLS, isFlowFile, flowRecords, mergeFlow, flowFor, flowAmount, isSandbox, patientRecord, byPatient, upcomingOf, leadOf,
+    FINANCIAL_NOTE_COLS, FINANCIAL_CATEGORIES, businessDays, dataFreshness, openTicketsOf, ticketList, balanceOf, financialNotesOf, addFinancialNote, ticketCounts, scrubCards,
     shortDate, plansOf, milestones, sinceLast, projection, actionItems, leadLine,
     PROFILE_HEADERS, profiles, samePerson, guarantorCheck, subscriberOf,
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,

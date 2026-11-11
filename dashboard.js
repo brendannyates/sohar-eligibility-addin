@@ -23,6 +23,9 @@
   // Per Nbr -> upcoming visits with the report's Pre-Check Complete and the checklist; when each source last came in.
   let visits = {}, lastUpdated = null, admins = []; // admins: Config "Admin names"
   let notes = {}; // patient key (MRN) -> the patient's notes, newest first (record.patientNotes)
+  // v0.30: patient key -> {mrn, tickets (record.openTicketsOf), balance (record.balanceOf), notes (record.financialNotesOf)};
+  // dataSt: the Power Query refresh ({at, errors, count}), for the "Data" pill.
+  let billing = {}, dataSt = null, ticketRows = [];
   let ivn = { visits: [], secondary: [] }; // v0.27 IVN export: [Per Nbr, {clinic: events}] and [Per Nbr, secondary payer] from the pane
   let savedAudits = { summary: [], lines: [] }; // v0.23.1: the last saved account audit per patient (audit.AUDIT_COLS rows)
   const take = C.messageAssembler();
@@ -79,6 +82,7 @@
     asOf = m.asOf ? new Date(m.asOf) : null;
     flow = m.flow || []; outcomes = m.outcomes || []; profiles = m.profiles || {};
     visits = m.visits || {}; lastUpdated = m.lastUpdated || null; admins = m.admins || []; notes = m.notes || {};
+    billing = m.billing || {}; dataSt = m.data || null; ticketRows = m.ticketRows || []; // v0.30
     savedAudits = m.audits || savedAudits;
     if (m.who) setWhoFrom(m.who);
     fees = F && m.fees && m.fees.on ? m.fees : null;
@@ -182,7 +186,32 @@
   // ---------- render ----------
   function render() {
     $('taskCount').textContent = tasks.filter(open).length || '';
-    renderPrep(); renderBenefits(); renderWorklist(); renderTasks(); renderMessage(); renderClinicLists(); renderLearning(); renderGuarantorCall();
+    renderPrep(); renderBenefits(); renderWorklist(); renderTasks(); renderMessage(); renderClinicLists(); renderLearning(); renderGuarantorCall(); renderTickets();
+  }
+  /** v0.30 Billing tickets tab: open tickets (Power Query from BillingMaster) by clinic, status and age, and the list. */
+  function renderTickets() {
+    const box = $('ticketBox');
+    if (!box) return;
+    const tab = document.querySelector('[data-tab="tickets"]');
+    if (!ticketRows.length) {
+      box.innerHTML = `<p class="hint">${dataSt && dataSt.count ? 'No open billing tickets.' : 'The open-tickets query is not set up in this workbook yet (docs/powerquery/qOpenTickets.pq).'}</p>`;
+      if (tab) tab.querySelector('.badge') && (tab.querySelector('.badge').textContent = '');
+      return;
+    }
+    const n = REC.ticketCounts(ticketRows, new Date());
+    if (tab && tab.querySelector('.badge')) tab.querySelector('.badge').textContent = n.total;
+    const bars = (title, obj) => {
+      const ent = Object.entries(obj).filter(([, v]) => v).sort((a, b) => b[1] - a[1]);
+      const max = Math.max(1, ...ent.map(([, v]) => v));
+      return `<div class="tk-group"><h4>${esc(title)}</h4><table class="watch"><tbody>${ent.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="tk-bar"><span class="meter" data-pct="${v / max}"><span></span></span></td><td>${v}</td></tr>`).join('')}</tbody></table></div>`;
+    };
+    const list = REC.ticketList(ticketRows, new Date());
+    const byId = new Map(ticketRows.map((r) => [String(r['Ticket Id'] ?? ''), r]));
+    box.innerHTML = `<div class="tk-kpis"><span><b>${n.total}</b> open</span><span class="${n.pastDue ? 'bad' : ''}"><b>${n.pastDue}</b> past resolution due</span><span><b>${n.noMrn}</b> with no MRN</span>${dataSt && dataSt.at ? `<span class="hint">Refreshed ${esc(new Date(dataSt.at).toLocaleString('en-US', { month: 'numeric', day: 'numeric', hour: 'numeric', minute: '2-digit' }))}</span>` : ''}</div>
+      <div class="tk-groups">${bars('By clinic', n.byClinic)}${bars('By status', n.byStatus)}${bars('Age (business days)', n.byAge)}</div>
+      <table class="watch"><thead><tr><th>Ticket</th><th>Clinic</th><th>Patient</th><th>Status</th><th>Age</th><th>Resolution due</th><th>SLA</th></tr></thead><tbody>${list.map((t) => { const r = byId.get(t.id) || {};
+        return `<tr><td>${esc(t.id)}</td><td>${esc(t.clinic)}</td><td>${esc([r.LASFIR, r.MRN].filter(Boolean).join(' · '))}</td><td>${esc(t.status)}</td><td>${t.age == null ? '' : t.age}</td><td>${esc(t.resolutionDue)}</td><td>${esc(t.sla)}</td></tr>`; }).join('')}</tbody></table>`;
+    box.querySelectorAll('.meter').forEach((m) => { m.firstElementChild.style.width = `${Math.round(Math.min(1, +m.dataset.pct) * 100)}%`; });
   }
 
   const usd = (v) => { const n = parseFloat(String(v ?? '').replace(/[$,]/g, '')); return isNaN(n) ? '' : `$${n.toLocaleString('en-US', { maximumFractionDigits: 0 })}`; };
@@ -287,7 +316,7 @@
   // admin's name and previous / next patient; the main area shows one section. The derivations are in record.js
   // (plansOf, milestones, sinceLast, projection, actionItems, leadLine); this lays them out.
   const SECTIONS = [['overview', 'Overview'], ['visits', 'Visits and pre-check'], ['benefits', 'Benefits projection'], ['activity', 'Activity and plans'],
-    ['guarantor', 'Guarantor'], ['calc', 'Calculator'], ['audit', 'Account audit'], ['tasks', 'NextGen tasks']];
+    ['guarantor', 'Guarantor'], ['calc', 'Calculator'], ['audit', 'Account audit'], ['billing', 'Billing and balance'], ['tasks', 'NextGen tasks']];
   let detailKey = '', detailDk = '', sec = 'overview', order = [], animKey = '';
   const ui = {}; // patient key -> {open: visit row open on Visits, sel: timeline row open, todoOpen: all action items shown}
   const uiOf = (k) => (ui[k] = ui[k] || { open: 0, sel: '', todoOpen: false });
@@ -370,6 +399,13 @@
     const title = f.parts.map((p) => `${p.label}: ${p.time == null ? 'never' : whenOf(p.time)}`).join(' · ');
     return `<span class="tag lg t-${{ fresh: 'blue', aging: 'amber', stale: 'red' }[f.level]}" title="${esc(title)}" aria-label="${esc(`${label}. ${title}`)}"><i class="dot" aria-hidden="true"></i>${esc(label)}</span>`;
   }
+  /** v0.30: "Data" pill for the Power Query refresh (tickets, balances, ledger, NextGen list); nothing when there are no queries. */
+  function dataPill() {
+    const f = REC.dataFreshness(dataSt, new Date());
+    if (f.level === 'none') return '';
+    const label = f.level === 'fresh' ? 'Data up to date' : f.level === 'aging' ? 'Data aging' : 'Data stale';
+    return `<span class="tag lg t-${{ fresh: 'blue', aging: 'amber', stale: 'red' }[f.level]}" title="${esc(f.text)}" aria-label="${esc(`${label}. ${f.text}`)}"><i class="dot" aria-hidden="true"></i>${esc(label)}</span>`;
+  }
   /** [tone, label] for the patient's guarantor check: the worst of the per-result checks. */
   function guarState(cs) {
     if (cs.some((x) => x.severity === 'high')) return ['red', 'Different people'];
@@ -408,7 +444,9 @@
     const ids = [p.pronouns, p.currentGender, p.genderIdentity ? `Identity: ${p.genderIdentity}` : ''].filter(Boolean);
     const [gt, gl] = guarState(c.checks);
     const openPre = c.vs.filter((v) => !preDone(v)).length, openTasks = c.its.filter(open).length;
-    const badge = { visits: openPre ? tag('amber', String(openPre)) : '', guarantor: gt === 'red' ? tag('red', 'Fix') : gt === 'amber' ? tag('amber', 'Check') : '', tasks: openTasks ? tag('grey', String(openTasks)) : '' };
+    const bt = (billing[c.k] && billing[c.k].tickets) || [];
+    const badge = { visits: openPre ? tag('amber', String(openPre)) : '', guarantor: gt === 'red' ? tag('red', 'Fix') : gt === 'amber' ? tag('amber', 'Check') : '', tasks: openTasks ? tag('grey', String(openTasks)) : '',
+      billing: bt.length ? tag(bt.some((t) => t.sla === 'Past due') ? 'red' : 'amber', String(bt.length)) : '' };
     const at = order.indexOf(detailDk);
     const step = (d) => {
       if (order.length < 2 || at < 0) return '';
@@ -424,7 +462,7 @@
           <div class="pv-name"><h2 id="pvTitle">${esc(name(r))}</h2><span class="pv-mrn">${esc(idText(r))}</span></div>
           ${ids.length ? `<div class="pv-ids">${ids.map((x) => `<span>${esc(x)}</span>`).join('')}</div>` : ''}
           ${planTitle(r) ? `<div class="pv-plan">${esc(planTitle(r))}</div>` : ''}
-          <div class="pv-pills">${freshPill(c.fresh)}${tag(gt, `Guarantor: ${gl}`)}</div>
+          <div class="pv-pills">${freshPill(c.fresh)}${dataPill()}${tag(gt, `Guarantor: ${gl}`)}</div>
         </div>
         <nav class="pv-nav" aria-label="Record sections">${SECTIONS.map(([k, l]) => `<button type="button" data-sec="${k}"${sec === k ? ' aria-current="page"' : ''}><span>${esc(l)}</span>${badge[k] || ''}</button>`).join('')}</nav>
         <div class="pv-foot">${whoHtml()}<div class="pv-steps">${step(-1)}${step(1)}</div></div>
@@ -450,6 +488,7 @@
       case 'calc': return calcSection(c);
       case 'tasks': return tasksSection(c);
       case 'audit': return auditSection(c);
+      case 'billing': return billingSection(c);
       default: return overviewSection(c, anim);
     }
   }
@@ -757,6 +796,44 @@
   const auTone = { high: 'red', medium: 'amber', low: 'grey', info: 'grey' };
   const auMoney = (n) => (n == null || n === '' ? '—' : money(n));
   const auCodes = (cs) => cs.map((x) => `${x.code}${x.mods.length ? `-${x.mods.join('-')}` : ''}`).join(', ');
+  // ----- v0.30 Billing and balance: open billing tickets, the account balance, financial notes (saved by the pane) -----
+  const SLA_TONE = { 'Past due': 'red', 'Due soon': 'amber', 'Waiting on Arietis': 'amber', 'On time': 'green' };
+  const fnoteLine = (n) => `<div class="pv-note"><div class="hint">${esc([n.category, n.ticket ? `ticket ${n.ticket}` : '', n.by, niceStamp(n.when)].filter(Boolean).join(' · '))}</div><div>${esc(n.note)}</div></div>`;
+  function billingSection(c) {
+    const b = billing[c.k] || { tickets: [], balance: null, notes: [] };
+    const mrn = b.mrn || String(c.r.MRN ?? '').trim();
+    const f = REC.dataFreshness(dataSt, new Date());
+    const tickets = b.tickets.length ? `<table class="watch"><thead><tr><th>Ticket</th><th>Status</th><th>Age</th><th>Resolution due</th><th>SLA</th></tr></thead><tbody>${b.tickets.map((t) => `<tr>
+        <td><b>${esc(t.id)}</b>${t.task ? `<div class="hint">${esc(t.task)}${t.amount ? ` · ${esc(money(num(t.amount) || 0))}` : ''}</div>` : ''}</td><td>${esc(t.status)}</td>
+        <td>${t.age == null ? '—' : `${t.age} business day${t.age === 1 ? '' : 's'}`}</td><td>${esc(t.resolutionDue || '—')}</td><td>${tag(SLA_TONE[t.sla] || 'grey', t.sla)}</td></tr>`).join('')}</tbody></table>`
+      : '<p class="hint">No open billing tickets for this patient.</p>';
+    const bal = b.balance ? `<p><b>${b.balance.balance == null ? 'Unknown' : esc(money(b.balance.balance))}</b> <span class="hint">as of ${esc(b.balance.asOf || '?')} (NextGen)</span></p>` : '<p class="hint">No balance on the NextGen balances report for this patient.</p>';
+    const ticketOpts = b.tickets.map((t) => `<option value="${esc(t.id)}">Ticket ${esc(t.id)}</option>`).join('');
+    return `<div class="pv-hrow"><h3 class="pv-h">Billing and balance</h3><span class="hint">${esc(f.level === 'none' ? 'Power Query is not set up in this workbook yet.' : `From the master's Power Query data. ${f.text}`)}</span></div>
+      <section class="pv-card"><div class="pv-card-h"><h3>Open billing tickets · ${b.tickets.length}</h3></div>${tickets}</section>
+      <section class="pv-card"><div class="pv-card-h"><h3>Account balance</h3></div>${bal}</section>
+      <section class="pv-card pv-notes"><h4>Financial notes</h4>
+        ${mrn ? `<div class="pv-note-add fn-add"><textarea id="fnText" rows="2" maxlength="${REC.NOTE_MAX}" placeholder="Add a financial note (no card numbers)" aria-label="Financial note"></textarea>
+          <select id="fnCat" aria-label="Category">${REC.FINANCIAL_CATEGORIES.map((x) => `<option>${esc(x)}</option>`).join('')}</select>
+          ${ticketOpts ? `<select id="fnTicket" aria-label="Ticket"><option value="">No ticket</option>${ticketOpts}</select>` : ''}
+          <button type="button" class="pv-btn" id="fnAdd">Add note</button></div>` : '<p class="hint">This patient has no MRN, so financial notes can’t be saved.</p>'}
+        <div id="fnList">${b.notes.map(fnoteLine).join('') || '<p class="hint" id="fnNone">No financial notes yet.</p>'}</div></section>`;
+  }
+  function addFinancialNote() {
+    const r = detailRow(), input = $('fnText');
+    const k = r && keyOf(r), text = input ? input.value.replace(/\s+/g, ' ').trim() : '';
+    if (!k || !text) return;
+    const by = byOrAsk();
+    if (!by) return;
+    const mrn = (billing[k] && billing[k].mrn) || String(r.MRN ?? '').trim();
+    const n = { note: REC.scrubCards(text).slice(0, REC.NOTE_MAX), category: $('fnCat') ? $('fnCat').value : 'Other', ticket: $('fnTicket') ? $('fnTicket').value : '', by, when: stamp() };
+    billing[k] = billing[k] || { mrn, tickets: [], balance: null, notes: [] };
+    billing[k].notes = [n, ...billing[k].notes];
+    input.value = '';
+    const none = $('fnNone'); if (none) none.remove();
+    $('fnList').insertAdjacentHTML('afterbegin', fnoteLine(n));
+    toPane({ type: 'financial-note', key: k, mrn, lasfir: name(r), note: n.note, category: n.category, ticket: n.ticket, by });
+  }
   function auditSection(c) {
     const s = auditOf(c.k), f = s.files, a = auditRun(c);
     const chip = ([k, label, what]) => {
@@ -1078,6 +1155,7 @@
   }
   $('detail').addEventListener('click', (e) => {
     if (e.target.closest('#pnAdd')) { addNote(); return; }
+    if (e.target.closest('#fnAdd')) { addFinancialNote(); return; }
     if (e.target.closest('#btnHide')) { hideDetail(); return; }
     const b = e.target.closest('[data-sec],[data-step],[data-vopen],[data-tl],[data-todo]');
     if (!b || !detailKey) return;
@@ -1405,7 +1483,7 @@
     $('vSub').hidden = name !== 'prep';
     $('vNote').textContent = name === 'prep' || name === 'worklist' || name === 'benefits'
       ? `${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} · select a patient to open their record` : '';
-    $('sharedFilters').hidden = name === 'upload' || name === 'clinic' || name === 'learning';
+    $('sharedFilters').hidden = name === 'upload' || name === 'clinic' || name === 'learning' || name === 'tickets';
     hideDetail();
   }
 
@@ -1652,12 +1730,25 @@
         .map(([id, nm, st], i) => ({ 'Test Id': `8${i}-T1`, MRN: `8${i}`, 'NextGen Payer': 'Blue Shield CA Blue Card', 'Candidate payerId': id, 'Candidate Payer': nm, Status: st })),
       themes: [{ Theme: 'Guarantor only', 'NextGen Payer': 'None on file', 'Found for patient': '—', 'Found for guarantor': 'Blue Shield of California', Patients: '1' }],
       rows: [], mapping: [{ id: '80101-M' }], payerTestRows: [] };
+    function demoBilling() {
+      const day = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return `${d.getMonth() + 1}/${d.getDate()}/${d.getFullYear()}`; };
+      const t = (id, mrn, lasfir, clinic, status, sub, conf, resd, extra) => ({ 'Ticket Id': id, Submitted: day(sub), Clinic: clinic, LASFIR: lasfir, MRN: mrn, Status: status, 'Task Type': 'Refund request',
+        'Confirmation Due': day(conf), 'Resolution Due': day(resd), 'Last Reply At': '', ...(extra || {}) });
+      const ticketRows = [t('301', '80100', 'RIVANA', 'San Rafael', 'MHS - Submitted to Arietis', -9, -7, -2), t('302', '80100', 'RIVANA', 'San Rafael', 'Arietis - Confirmed Receipt', -2, 0, 1, { 'Last Reply At': day(-1) }),
+        t('303', '80101', 'DEMPAT', 'Newport Beach', 'MHS - Submitted to Arietis', -4, -2, 3), t('304', '', '', 'Mission Viejo', 'Arietis - Confirmed Receipt', -15, -13, -8)];
+      const k = '80100';
+      return { ticketRows, data: { at: new Date(Date.now() - 3 * 36e5).toISOString(), errors: [], count: 7 },
+        billing: { [k]: { mrn: k, tickets: REC.openTicketsOf(ticketRows, k, new Date()), balance: { balance: 145.5, asOf: REC.shortDate(day(-1)) },
+          notes: [{ note: 'Payment plan agreed: $50 a month', category: 'Balance', ticket: '', by: 'Sam Ortiz', when: `${day(-3)} 2:10 PM` }] } } };
+    }
     // One task the clinic ticked done with a note (Clinic Template Tool file or the clinic inbox), made up.
     const demoTasks = C.buildTasks(res).map((t, i) => (i === 0 ? { ...t, Done: `Yes (clinic ${t['Next Location']})`, 'Clinic Note': `Called the patient, new card scanned (Front desk, ${t['Next Location']}, 10/19)` } : t));
     load({ results: res, tasks: demoTasks, ivn: { visits: res.filter((r) => r['Per Nbr'] && r['Next Location']).map((r) => [r['Per Nbr'], { [r['Next Location']]: r['Next Event'] || '' }]), secondary: [] }, exports: { verification: [], discovery: [] }, asOf: '2026-10-13T00:00:00.000Z', fees: demoFees,
       clinic: demoClinic, skipped: demoSkipped, skipCols: ['Location', 'Next Appt', 'MRN', 'Per Nbr', 'Last Name', 'First Name', 'Verified', 'Next Check', 'Other Insurance Sent'], learning: demoLearning, guarantor: { count: 2, noDob: 1 },
       flow: demoFlow, outcomes: demoOutcomes, profiles: demoProfiles, visits: demoVisits, admins: ['Jordan Lee', 'Sam Ortiz'],
       notes: { 80100: [{ note: 'Called the patient; new card scanned, plan unchanged', by: 'Jordan Lee', when: '10/19/2026 4:12 PM', visit: '' }] },
+      // v0.30: made-up billing tickets, a balance and a financial note (Power Query in a real workbook).
+      ...demoBilling(),
       lastUpdated: { report: new Date(Date.now() - 2 * 36e5).toISOString(), sohar: new Date(Date.now() - 3 * 864e5).toISOString(), flow: new Date().toISOString() } });
     // #patient opens the first demo patient's record (for checking the layout), #patient/<section> a section of it;
     // other hashes pick a tab.

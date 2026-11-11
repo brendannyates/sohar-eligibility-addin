@@ -16,6 +16,16 @@ Hard rules:
   sheet (`CLINIC_DAY_COLS`, no MRN) is derived by `clinicDay` and CTT rewrites it. The structure lock is a hash only
   (`XL.protectionHash`); the password is typed in the pane each export and never stored, logged or sent. Clinic Work kinds
   `OK to collect` and `Collected` apply to the add-in-owned `Clinic Consent` and `Desk Collections` tables.
+- v0.30 (Brendan, 11/10): this workbook is the central eligibility workbook. Power Query (`docs/powerquery/*.pq`) loads
+  `excel.js` `QUERY_TABLES`: `tblNGAppts` (the daily NextGen list, names kept, very hidden by `lockNameSheets`),
+  `tblEligibilityChecks`, `tblPatientHistory`, `tblCopayActivity`, `tblCardOnFile` (from the rotation's CSVs; these left
+  `FLOW_TABLES`), `tblOpenTickets` (BillingMaster) and `tblPatientBalances`. The refresh owns them: the add-in only reads
+  them (`readQueryTable`), never creates, writes, swaps or deletes them, and the write-path sweep covers them. An add-in
+  cannot start a refresh: `readQueryStatus` (ExcelApi 1.14) gives the refresh time and errors for the Data pill
+  (`record.dataFreshness`); `scripts/refresh-master.ps1` refreshes at 7:30 AM in desktop Excel. Financial notes are the
+  add-in-owned hidden `Financial Notes` (`record.FINANCIAL_NOTE_COLS`, cards scrubbed). Clinic files are Start Here + the
+  clinic's appointment list for now (`rules.clinicStartPack`, `CLINIC_APPT_KEEP`, LASFIR, no lock); `CLINIC_ELIGIBILITY`
+  in `app.js` turns the v0.29 Clinic Day file back on.
 - Synthetic data only in tests, fixtures, demo mode, and commits. No real names, MRNs, member IDs, or exports.
   The one exception is the generated block in `payer-knowledge.js` (Brendan, 10/28): real payer names and Sohar payer
   IDs, no patient data, notes or contracted rates. Regenerate it with `node scripts/build-payer-knowledge.mjs <master

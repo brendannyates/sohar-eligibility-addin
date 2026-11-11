@@ -998,6 +998,8 @@
     const s = src || {};
     const location = str(loc);
     if (allLocations(location)) throw new Error('Choose one location: a Clinic Template Tool file is for one clinic.');
+    // v0.30 (Brendan, 11/10): eligibility stays in the master for now; the clinic file is Start Here + the appointment list.
+    if (s.eligibility === false) return clinicStartPack(location, s);
     const runAt = s.runAt instanceof Date && !isNaN(s.runAt) ? s.runAt : new Date();
     const runDay = dayOf(runAt), runDate = fmtDate(runDay);
     const set = clinicSet(location, s.patients, s.results, runAt, { anyVisit: true });
@@ -1127,6 +1129,76 @@
       name: `Clinic Eligibility - ${location.replace(/[\\/:*?"<>|]/g, '-')} ${localDate(runAt)}.xlsx`,
       counts: { patients: patients.length, results: results.length, review: review.length, payers: payers.size, done: done.length, rules: ruleRows.length,
         appointments: appts.length, estimates: estimates.length, history: history.length, fees: feeRows.length, day: day.length },
+    };
+  }
+
+  // ---------- v0.30: the clinic workbook as Start Here + the Clinic Template Tool's appointment and access views ----------
+  // The appointment list keeps only what CTT's templates, access (3NA), cadence and recall need. Names, DOBs, guarantors,
+  // member and policy numbers, auth codes, free-text Details and staff names never go in; LASFIR replaces Pat Name.
+  const CLINIC_APPT_KEEP = ['Appt Date', 'Appt Dt', 'Beg Tm', 'Dur', 'Event', 'Loc Name', 'Location', 'Res Name', 'Rendering', 'Status', 'Sts', 'Pat Sts',
+    'MRN', 'Md Rc', 'Payer Name (Cht Guar)', 'Payer Name (Lst Enc)', 'Fin Class (Cht Guar)', 'Crt Dt', 'Mod Dt', 'Cancel Date', 'Cancel Time', 'Cancel Reason',
+    'Appointment Pre-Check Complete'];
+  const START_SHEETS = { start: 'Start Here', appts: 'Appointment List' };
+  /** "Last, First M" -> LASFIR; '' when there is no comma (one-word names get the letters there are). */
+  function lasfirOfName(v) {
+    const s = str(v), i = s.indexOf(',');
+    if (i < 0) return lasfir(s, '');
+    return lasfir(s.slice(0, i), s.slice(i + 1).trim().split(/\s+/)[0] || '');
+  }
+  /**
+   * This clinic's rows of the NextGen appointment list -> {columns, rows}: LASFIR first, then the CLINIC_APPT_KEEP columns
+   * the report has, in its order. src.ngAppts: the NG Appointments query rows (objects); else src.importGrid: the Import
+   * sheet grid (title rows and the "Total appointments" footer are skipped with core.detectHeader).
+   */
+  function clinicApptRows(location, src) {
+    let head = [], body = [];
+    if (Array.isArray(src.ngAppts) && src.ngAppts.length) {
+      head = Object.keys(src.ngAppts[0]); body = src.ngAppts.map((r) => head.map((h) => (r[h] == null ? '' : r[h])));
+    } else if (Array.isArray(src.importGrid) && src.importGrid.length) {
+      const det = C.detectHeader(src.importGrid);
+      if (det) { head = src.importGrid[det.headerRow].map(str); body = src.importGrid.slice(det.headerRow + 1, det.dataEnd == null ? undefined : det.dataEnd); }
+    }
+    const idx = (names) => head.findIndex((h) => names.some((n) => low(n) === low(h)));
+    const iName = idx(['Pat Name', 'Patient Name', 'Patient']), iLoc = idx(['Loc Name', 'Location', 'Location Name']);
+    const keep = head.map((h, i) => [h, i]).filter(([h]) => CLINIC_APPT_KEEP.some((k) => low(k) === low(h)));
+    const columns = ['LASFIR'].concat(keep.map(([h]) => h));
+    const rows = [];
+    for (const r of body) {
+      if (!Array.isArray(r) || !r.some((v) => str(v) !== '')) continue;
+      if (iLoc >= 0 && !sameLoc(r[iLoc], location)) continue;
+      const o = { LASFIR: iName >= 0 ? lasfirOfName(r[iName]) : '' };
+      for (const [h, i] of keep) o[h] = r[i] == null ? '' : r[i];
+      rows.push(o);
+    }
+    return { columns, rows };
+  }
+  /**
+   * The v0.30 clinic workbook for one location: a Start Here sheet and the Appointment List, plus CTT's add-in part. No
+   * eligibility tables, no hidden sheets and no structure lock (CTT adds template and report tabs). src: {ngAppts or
+   * importGrid, links: [{label, url}], contact, runAt, version}.
+   */
+  function clinicStartPack(location, s) {
+    const runAt = s.runAt instanceof Date && !isNaN(s.runAt) ? s.runAt : new Date();
+    const runDate = fmtDate(dayOf(runAt));
+    const ap = clinicApptRows(location, s);
+    const links = (s.links || []).filter((l) => l && str(l.label) && /^https:\/\//i.test(str(l.url)));
+    const start = [
+      { Item: `${location}: clinic workbook`, Link: '' },
+      { Item: `Made ${runDate} from the central eligibility workbook. ${ap.rows.length.toLocaleString('en-US')} visits on the Appointment List.`, Link: '' },
+      { Item: 'Appointment List: this clinic\'s visits from NextGen. Patients show as LASFIR (first three letters of the last and first name); no names or dates of birth.', Link: '' },
+      { Item: 'Templates, access (3NA), cadence and recall: open Home > Clinic Template Tool.', Link: '' },
+      { Item: `Eligibility, benefits and billing tickets are worked centrally for now.${str(s.contact) ? ` Questions: ${str(s.contact)}.` : ''}`, Link: '' },
+      { Item: 'This file has PHI (MRNs and visits). Keep it in your clinic\'s folder only.', Link: '' },
+    ].concat(links.map((l) => ({ Item: str(l.label), Link: str(l.url) })));
+    const sheets = [
+      { name: START_SHEETS.start, table: 'tblStartHere', columns: ['Item', 'Link'], rows: start, linkColumns: ['Link'], colWidths: [100, 60] },
+      { name: START_SHEETS.appts, table: 'tblClinicAppts', columns: ap.columns, rows: ap.rows, textColumns: ['LASFIR', 'MRN', 'Md Rc'] },
+    ];
+    return {
+      meta: { Kind: 'Clinic Workbook', Location: location, 'Run Date': runDate, 'Sohar Version': str(s.version) }, sheets,
+      webExtension: Object.assign({}, CTT_EXTENSION), now: runAt, protection: null,
+      name: `Clinic Eligibility - ${location.replace(/[\\/:*?"<>|]/g, '-')} ${localDate(runAt)}.xlsx`,
+      counts: { appointments: ap.rows.length, links: links.length, patients: new Set(ap.rows.map((r) => str(r.MRN || r['Md Rc']))).size },
     };
   }
 
@@ -1538,5 +1610,7 @@
     LEDGER_COLS, PATIENT_HISTORY_COLS, COPAY_ACTIVITY_COLS, CARD_ON_FILE_COLS, NEEDS_CHECK_COLS, LOOKUP_LOG_COLS, CLINIC_CONSENT_COLS, DESK_COLLECTION_COLS,
     SE2_SHEETS, SE_APPT_COLS, SE_EST_COLS, SE_HISTORY_COLS, SE_COPAY_COLS, SE_FEE_RULE_COLS, CLINIC_DAY_COLS, HISTORY_DEFAULTS, WORK_KINDS,
     clinicDay, feeTables, coverageWord, mrnKey, money,
+    // v0.30 clinic workbook (Start Here + appointment list)
+    CLINIC_APPT_KEEP, START_SHEETS, clinicApptRows, clinicStartPack, lasfirOfName,
   };
 });

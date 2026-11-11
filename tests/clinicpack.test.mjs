@@ -344,8 +344,8 @@ test('app.js cttWorkbook: SE Done takes Done and Clinic Note from the NextGen Ta
   const X = { async readTasks() { return sheet; }, async readClinicConsents() { return []; }, async readDeskCollections() { return []; } };
   // cttWorkbook runs at new Date(): pin it to the fixture's day, or the 10/26 visit drops out once that date passes.
   class FixedDate extends Date { constructor(...a) { super(...(a.length ? a : [TODAY.getTime()])); } static now() { return TODAY.getTime(); } }
-  const make = new Function('R', 'C', 'XL', 'X', 'state', 'inScopePatients', 'VERSION', 'Date', 'readFlowRows', 'feesOn', `${body}\nreturn { cttWorkbook };`);
-  const { cttWorkbook } = make(R, C, XL, X, state, () => src.patients, '0.14.0', FixedDate, async () => ({}), () => false);
+  const make = new Function('R', 'C', 'XL', 'X', 'state', 'inScopePatients', 'VERSION', 'Date', 'readFlowRows', 'feesOn', 'CLINIC_ELIGIBILITY', `${body}\nreturn { cttWorkbook };`);
+  const { cttWorkbook } = make(R, C, XL, X, state, () => src.patients, '0.14.0', FixedDate, async () => ({}), () => false, true); // the v0.29 eligibility file
   const f = await cttWorkbook(LOC);
   const wb = await XL.readWorkbook(f.bytes);
   const done = R.tableObjects(wb.sheets.find((s) => s.name === 'SE Done').rows);
