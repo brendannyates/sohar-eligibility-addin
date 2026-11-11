@@ -26,12 +26,17 @@ So this script opens the master in **desktop Excel** on Brendan's PC, refreshes 
 
 ## Schedule it (Windows Task Scheduler)
 ```powershell
-$a = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "<add-in repo>\scripts\refresh-master.ps1"'
+$pw = (Get-Command pwsh).Source   # PowerShell 7
+$a = New-ScheduledTaskAction -Execute $pw -Argument '-NoProfile -WindowStyle Hidden -File "<add-in repo>\scripts\refresh-master.ps1"'
 $t = New-ScheduledTaskTrigger -Daily -At 7:30am
-Register-ScheduledTask -TaskName 'Sohar master refresh' -Action $a -Trigger $t -Description 'Refresh the master workbook Power Query at 7:30 AM'
+$p = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive
+$s = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -MultipleInstances IgnoreNew; $s.StartWhenAvailable = $false
+Register-ScheduledTask -TaskName 'Sohar master refresh' -Action $a -Trigger $t -Principal $p -Settings $s -Description 'Refresh the master workbook Power Query at 7:30 AM'
 ```
+- Use PowerShell 7 (`pwsh`). On MHS PCs, Windows PowerShell 5.1 refuses scripts ("running scripts is disabled on this system") unless they're launched with `-ExecutionPolicy Bypass`, and that flag isn't needed with PowerShell 7, which allows local scripts. Check with `Get-ExecutionPolicy -List` in each.
 - The task runs as you, only when you're signed in, because desktop Excel needs your session and your Microsoft 365 sign-in.
-- The PC has to be on.
+- The PC has to be on. The task doesn't start late if the PC was off at 7:30: by then you may have the master open on the web, which the script can't see.
+- A console window flashes for a moment when it runs. That's expected.
 - The Claude scheduled-tasks tool can run the same command instead.
 
 ## When it skips or fails
