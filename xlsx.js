@@ -287,7 +287,7 @@
     return {
       names, src, nCols, ref, links, widths, rowsXml: xml,
       table: sanitizeTableName(sheet.table || ('Table' + (idx + 1)), usedTables),
-      hidden: !!sheet.hidden,
+      hidden: sheet.hidden === 'veryHidden' ? 'veryHidden' : !!sheet.hidden,
       textColIdx: isText.map((t, i) => t ? i : -1).filter(i => i >= 0),
     };
   }
@@ -363,8 +363,9 @@
     ];
   }
 
-  // spec: { sheets: [{ name, columns, rows, table, hidden, colWidths, linkColumns, linkText, pctColumns, textColumns, autoTextColumns }],
-  //         webExtension?: { id, version, store, storeType, autoShow, width, properties }, creator?, now? }
+  // spec: { sheets: [{ name, columns, rows, table, hidden (true or 'veryHidden'), colWidths, linkColumns, linkText, pctColumns, textColumns, autoTextColumns }],
+  //         webExtension?: { id, version, store, storeType, autoShow, width, properties }, creator?, now?,
+  //         protection?: protectionHash() output: the workbook structure is locked (no unhide, add, rename or delete) }
   // Returns { files: [{ name, data }] } — the package parts before zipping.
   function buildParts(spec) {
     spec = spec || {};
@@ -421,10 +422,13 @@
       '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties" ' +
       'xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><Application>Microsoft Excel</Application></Properties>' });
 
+    const pr = spec.protection && spec.protection.hashValue ? spec.protection : null;
     let wb = XML_DECL + '<workbook xmlns="' + NS_MAIN + '" xmlns:r="' + NS_R + '"><workbookPr/>' +
+      (pr ? '<workbookProtection workbookAlgorithmName="' + escapeXml(pr.algorithmName || 'SHA-512') + '" workbookHashValue="' + escapeXml(pr.hashValue) +
+        '" workbookSaltValue="' + escapeXml(pr.saltValue) + '" workbookSpinCount="' + (Number(pr.spinCount) | 0) + '" lockStructure="1"/>' : '') +
       '<bookViews><workbookView xWindow="0" yWindow="0" windowWidth="28800" windowHeight="12300" activeTab="' + active + '"/></bookViews><sheets>';
     sheets.forEach((s, i) => {
-      wb += '<sheet name="' + escapeXml(s.name) + '" sheetId="' + (i + 1) + '"' + (s.hidden ? ' state="hidden"' : '') + ' r:id="rId' + (i + 1) + '"/>';
+      wb += '<sheet name="' + escapeXml(s.name) + '" sheetId="' + (i + 1) + '"' + (s.hidden === 'veryHidden' ? ' state="veryHidden"' : s.hidden ? ' state="hidden"' : '') + ' r:id="rId' + (i + 1) + '"/>';
     });
     wb += '</sheets></workbook>';
     files.push({ name: 'xl/workbook.xml', data: wb });
@@ -443,6 +447,32 @@
     });
     if (we) webExtensionParts(we).forEach(f => files.push(f));
     return { files, sheets: sheets.map(s => ({ name: s.name, table: s.table, ref: s.ref, columns: s.names })) };
+  }
+
+  /**
+   * Workbook structure protection (v0.29), ECMA-376 / Excel's SHA-512 password hash: H0 = SHA-512(salt + password as
+   * UTF-16LE), then spinCount rounds of H = SHA-512(H + round number as 4-byte little-endian). Only the hash and salt go in
+   * the file; the password is never stored. Async (Web Crypto, in the browser and in Node). opts: {salt (Uint8Array, else
+   * 16 random bytes), spinCount (100000)}. Returns {algorithmName, hashValue, saltValue, spinCount} for spec.protection.
+   */
+  async function protectionHash(password, opts) {
+    const pw = String(password == null ? '' : password);
+    if (!pw) throw new Error('Type a password to lock the workbook structure.');
+    const o = opts || {};
+    const cr = (typeof globalThis !== 'undefined' && globalThis.crypto) || null;
+    if (!cr || !cr.subtle) throw new Error('This browser cannot hash the password (no Web Crypto).');
+    const salt = o.salt instanceof Uint8Array ? o.salt : cr.getRandomValues(new Uint8Array(16));
+    const spin = o.spinCount != null ? Number(o.spinCount) : 100000;
+    const pwBytes = new Uint8Array(pw.length * 2);
+    for (let i = 0; i < pw.length; i++) { const c = pw.charCodeAt(i); pwBytes[2 * i] = c & 255; pwBytes[2 * i + 1] = c >> 8; }
+    const cat = (a, b) => { const r = new Uint8Array(a.length + b.length); r.set(a, 0); r.set(b, a.length); return r; };
+    let h = new Uint8Array(await cr.subtle.digest('SHA-512', cat(salt, pwBytes)));
+    const buf = new Uint8Array(h.length + 4);
+    for (let i = 0; i < spin; i++) {
+      buf.set(h, 0); buf[h.length] = i & 255; buf[h.length + 1] = (i >>> 8) & 255; buf[h.length + 2] = (i >>> 16) & 255; buf[h.length + 3] = (i >>> 24) & 255;
+      h = new Uint8Array(await cr.subtle.digest('SHA-512', buf));
+    }
+    return { algorithmName: 'SHA-512', hashValue: toBase64(h), saltValue: toBase64(salt), spinCount: spin };
   }
 
   function buildWorkbook(spec) {
@@ -590,7 +620,7 @@
       path = path.split('/').reduce((acc, seg) => { if (seg === '..') acc.pop(); else if (seg && seg !== '.') acc.push(seg); return acc; }, []).join('/');
       const xml = await text(path);
       const grid = xml ? sheetGrid(xml, strings) : { rows: [], merges: [] };
-      sheets.push({ name: a.name || '', hidden: /hidden/i.test(a.state || ''), rows: grid.rows, merges: grid.merges });
+      sheets.push({ name: a.name || '', hidden: /hidden/i.test(a.state || ''), veryHidden: /^veryhidden$/i.test(a.state || ''), rows: grid.rows, merges: grid.merges });
     }
     return { sheets };
   }
@@ -744,7 +774,7 @@
   return {
     MIME, ID_COL_RE,
     readWorkbook, readXls, readAnyWorkbook, isCfb, zipEntries, unescapeXml, parseRef,
-    buildWorkbook, buildParts, toBase64,
+    buildWorkbook, buildParts, toBase64, protectionHash,
     zip, unzipStored, crc32, utf8,
     escapeXml, stripControl, colLetter, cellRef, tableRef, uniqueNames, sanitizeSheetName, sanitizeTableName,
   };

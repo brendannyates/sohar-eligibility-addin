@@ -234,7 +234,7 @@ table.prep tr.q-clr td:first-child { box-shadow: inset 3px 0 var(--ok); }
 .drop:hover, .drop.over, .drop:focus-visible { border-color: var(--pine); color: var(--ink); }
 .savelist { display: grid; gap: 6px; }
 .savelist button { text-align: left; }
-/* v0.27 IVN export clinic picker (pane step 4 and the full-screen Save files list) */
+/* v0.29 IVN export clinic picker (pane step 4 and the full-screen Save files list) */
 .ivnpick { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-weight: 600; }
 .ivnpick select { min-width: 0; flex: 1 1 140px; }
 .ivnrow { display: grid; gap: 4px; padding: 6px 0; }
@@ -827,3 +827,6 @@ body:has(> .boot:not([hidden])) { overflow: hidden; }
 @keyframes soharswapL { from { transform: translateX(12px) rotate(-90deg); opacity: 1; } }
 @keyframes soharswapR { from { transform: translateX(-12px) rotate(90deg); opacity: .6; } }
 @media (prefers-reduced-motion: reduce) { .ibtn.theme.swap .tcur, .ibtn.theme.swap .tgo { animation: none; } }
+/* v0.29: the clinic-file lock password (Admin > Clinic files), typed each export and never saved */
+.lockpw { display: flex; flex-direction: column; gap: 4px; margin: 0 0 4px; font-weight: 600; }
+.lockpw input { max-width: 260px; font-weight: 400; }

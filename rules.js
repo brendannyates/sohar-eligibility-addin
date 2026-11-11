@@ -502,15 +502,30 @@
   const allLocations = (loc) => !str(loc) || /^all$/i.test(str(loc));
   function inScope(p) { return !p || p['In Scope'] == null || p['In Scope'] === '' || p['In Scope'] === 'Yes'; }
 
-  function clinicSet(location, patients, results, runDate) {
+  /** The next upcoming visit at `location` (v0.29 clinic file: guest patients whose next visit is elsewhere). */
+  function nextVisitAt(p, rows, runDay, location) {
+    const x = xOf(p);
+    const up = upcoming(p, runDay).filter((a) => sameLoc(str(a.loc) || str(x.location), location));
+    if (!up.length) { const nv = nextVisit(p, rows, runDay); return nv && sameLoc(nv.loc, location) ? nv : null; }
+    const a = up[0];
+    return { d: a._d, date: fmtDate(a._d), time: str(a.time), event: str(a.event), provider: str(a.rendering) || str(x.rendering), loc: str(a.loc) || str(x.location), count: up.length };
+  }
+
+  /**
+   * In-scope patients for a location, soonest first. Default: the next visit is there. opts.anyVisit (v0.29, the Clinic
+   * Eligibility file): any upcoming visit is there, so a patient from another clinic seen here comes along; nv is then the
+   * next visit here.
+   */
+  function clinicSet(location, patients, results, runDate, opts) {
     const runDay = dayOf(runDate);
     const byPer = groupResults(results);
+    const any = !!(opts && opts.anyVisit) && !allLocations(location);
     const set = [];
     for (const p of patients || []) {
       if (!p || !inScope(p)) continue;
       const per = keyOf(p);
       const rows = (byPer.get(per) || []).filter(Boolean);
-      const nv = nextVisit(p, rows, runDay);
+      const nv = any ? nextVisitAt(p, rows, runDay, location) : nextVisit(p, rows, runDay);
       if (!nv) continue;
       if (!allLocations(location) && !sameLoc(nv.loc, location)) continue;
       set.push({ p, per, rows, nv });
@@ -520,11 +535,11 @@
   }
 
   /** One row per in-scope patient whose next visit is at `location` ('' or 'All' = every location), soonest first. */
-  function clinicRows(location, patients, results, flagsMap, runDate) {
+  function clinicRows(location, patients, results, flagsMap, runDate, opts) {
     const run = fmtDate(dayOf(runDate));
     const runDay = dayOf(runDate);
     const fm = flagsMap instanceof Map ? flagsMap : new Map(Object.entries(flagsMap || {}));
-    return clinicSet(location, patients, results, runDate).map(({ p, per, rows, nv }) => {
+    return clinicSet(location, patients, results, runDate, opts).map(({ p, per, rows, nv }) => {
       const best = bestResult(rows.filter((r) => r['Searched As'] !== 'Guarantor')) || bestResult(rows) || {};
       const x = xOf(p), skip = x.reverifySkip || x.reverifySkipped || null;
       const ver = rows.filter(isVerification).map((r) => parseDate(r['Sohar Date'])).filter(Boolean).sort((a, b) => b - a)[0] || null;
@@ -557,11 +572,11 @@
   }
 
   /** One row per flag for patients in clinicRows(location, ...). */
-  function clinicReviewRows(location, patients, results, flagsMap, runDate) {
+  function clinicReviewRows(location, patients, results, flagsMap, runDate, opts) {
     const run = fmtDate(dayOf(runDate));
     const fm = flagsMap instanceof Map ? flagsMap : new Map(Object.entries(flagsMap || {}));
     const out = [];
-    for (const { p, per, nv } of clinicSet(location, patients, results, runDate)) {
+    for (const { p, per, nv } of clinicSet(location, patients, results, runDate, opts)) {
       for (const f of fm.get(per) || []) {
         const a = f.appt || {};
         out.push({
@@ -715,7 +730,9 @@
   const SE_SHEETS = { readMe: 'Read Me', work: 'Clinic Work', info: 'SE Info', patients: 'SE Patients', results: 'SE Results', review: 'SE Review',
     payers: 'SE Payers', done: 'SE Done', rules: 'Payer Credential Rules' };
   const CLINIC_WORK_COLS = ['Kind', 'Key', 'MRN', 'LASFIR', 'Value', 'Note', 'By', 'When'];
-  const WORK_KINDS = { reverify: 'Re-verify anyway', done: 'Task done', note: 'Note', payer: 'Payer note' };
+  // v0.29: OK to collect (verbal copay consent: Value Yes / No, Key = MRN) and Collected (a desk collection: Value = the amount,
+  // Note = "<method>" or "<method> · <note>", Key = "<MRN>|<ISO time>" so each one is its own row; a blank Value withdraws it).
+  const WORK_KINDS = { reverify: 'Re-verify anyway', done: 'Task done', note: 'Note', payer: 'Payer note', consent: 'OK to collect', collected: 'Collected' };
   // Admin-side tables filled from returned files (newest per MRN or payer + Location wins).
   const CLINIC_NOTE_COLS = ['MRN', 'Location', 'Note', 'By', 'When'];
   const CLINIC_PAYER_NOTE_COLS = ['NextGen Payer', 'Location', 'Card Says', 'Note', 'By', 'When'];
@@ -832,11 +849,150 @@
     return out;
   }
 
+  // ---------- Clinic Eligibility file v2 (v0.29): the clinic file replaces the template for front-desk work ----------
+  // Master tables the rotation fills through a Power Automate flow (flow-owned, like the Clinic Work Inbox: the add-in only
+  // creates them once and reads them). LASFIR + MRN only. Row Key is the flow's upsert key.
+  const LEDGER_COLS = ['Row Key', 'LASFIR', 'MRN', 'Appt Date', 'Time', 'Event', 'Location', 'Provider', 'Route', 'Sent As', 'Sohar Status', 'Action',
+    'Verification ID', 'Sohar Link', 'Discovery ID', 'Discovery Link', 'Plan', 'Sohar Payer', 'Deductible', 'Deductible Remaining', 'Deductible Status',
+    'OOP Max', 'OOP Remaining', 'OOP Status', 'Copay', 'Coinsurance', 'Benefit Flag', 'Medi-Cal', 'Flags', 'Luma Match', 'Insurance Change', 'Checklist',
+    'Checklist Items', 'Zoom Link', 'Zoom Link At', 'Sohar Date', 'Fee Tab', 'Region', 'Fee Payer', 'Est Codes', 'Allowed', 'Est Patient', 'Sohar Est Patient',
+    'Sohar Est Plan Pays', 'Estimate Note', 'Patient Balance', 'Balance As Of', 'Source', 'Last Checked', 'Note', 'Insurance Change Ref', 'Visit Kind',
+    'Luma Copay', 'Expected Copay', 'Expected Basis', 'Collected', 'LumaPay Link', 'Card On File', 'Verbal Consent', 'Copay Check', 'DED Remaining (tracker)',
+    'OOPM Remaining (tracker)', 'Checklist Name', 'Checklist Check', 'Issues', 'IVN Tracker', 'Card+Consent Checked', 'Cost Estimate',
+    'Projected Patient Responsibility', 'Coverage Level', 'Coverage Start', 'Coverage End', 'Network', 'Related Sohar IDs', 'Coverage Note'];
+  const PATIENT_HISTORY_COLS = ['Row Key', 'MRN', 'LASFIR', 'When', 'Kind', 'Location', 'Detail', 'Amount', 'Source', 'Ref'];
+  const COPAY_ACTIVITY_COLS = ['Row Key', 'MRN', 'LASFIR', 'Date', 'Location', 'Kind', 'Amount', 'Method', 'Source', 'Ref'];
+  const CARD_ON_FILE_COLS = ['MRN', 'LASFIR', 'Card On File', 'Source', 'As Of'];
+  const NEEDS_CHECK_COLS = ['Row Key', 'MRN', 'LASFIR', 'Location', 'Tier', 'Reason', 'Note', 'Requested By', 'Requested At', 'Status', 'Done At', 'Result'];
+  // The lookup flow's audit log (its own admin-only workbook): one row per call, never a result value.
+  const LOOKUP_LOG_COLS = ['When', 'Clinic', 'Staff', 'MRN', 'Tier', 'Reason', 'Outcome', 'Fields', 'Request Id'];
+  // Add-in owned, filled by Apply clinic changes from OK to collect and Collected rows.
+  const CLINIC_CONSENT_COLS = ['MRN', 'Location', 'OK to Collect', 'By', 'When'];
+  const DESK_COLLECTION_COLS = ['Ref', 'MRN', 'LASFIR', 'Location', 'Date', 'Amount', 'Method', 'Note', 'By', 'When'];
+  // The clinic file's v2 tables (very hidden) and the one visible sheet CTT writes.
+  const SE2_SHEETS = { day: 'Clinic Day', appts: 'SE Appointments', estimates: 'SE Estimates', history: 'SE History', copay: 'SE Copay', fees: 'SE Fees', feeRules: 'SE Fee Rules' };
+  const SE_APPT_COLS = ['Key', 'Per Nbr', 'LASFIR', 'Date', 'Time', 'Event', 'Provider', 'Location', 'Status'];
+  const SE_EST_COLS = ['Key', 'Appt Date', 'Time', 'Event', 'Visit Kind', 'Fee Tab', 'Fee Payer', 'Est Codes', 'Est Patient', 'Sohar Est Patient',
+    'Projected Patient Responsibility', 'Expected Copay', 'Estimate Note', 'Last Checked'];
+  const SE_HISTORY_COLS = ['Key', 'When', 'Kind', 'Location', 'Detail', 'Amount', 'Source', 'Ref'];
+  const SE_COPAY_COLS = ['Key', 'Card On File', 'Card Source', 'Card As Of', 'OK to Collect', 'Consent By', 'Consent When', 'Consent Location'];
+  const SE_FEE_RULE_COLS = ['Kind', 'Record'];
+  const CLINIC_DAY_COLS = ['Date', 'Time', 'LASFIR', 'Event', 'Provider', 'Coverage', 'Copay', 'Ded left', 'OOP left', 'Est. owes', 'Card on file',
+    'OK to collect', 'Copay activity', 'To do'];
+  const HISTORY_DEFAULTS = { days: 90, max: 5 };
+  const VERY_HIDDEN = 'veryHidden';
+
+  const mrnKey = (v) => str(v).replace(/^0+(?=\d)/, ''); // MRNs compare without leading zeros (Excel may drop them)
+  /** A When / Date cell (ISO, M/D/YYYY, a Date or an Excel serial) as ms; NaN when unreadable. */
+  function atMs(v) {
+    if (v instanceof Date) return v.getTime();
+    if (typeof v === 'number') return C.excelSerialToDate(v).getTime();
+    const s = str(v);
+    if (!s) return NaN;
+    if (/^\d{4}-\d{2}-\d{2}T/.test(s)) return Date.parse(s);
+    const d = parseDate(s);
+    return d ? d.getTime() : Date.parse(s);
+  }
+  function money(v) {
+    const s = str(v);
+    if (!s) return '';
+    const n = Number(s.replace(/[$,\s]/g, ''));
+    if (!isFinite(n)) return s;
+    return `$${n.toLocaleString('en-US', { minimumFractionDigits: n % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
+  }
+  const pick = (cols, r) => Object.fromEntries(cols.map((c) => [c, r && r[c] != null ? (typeof r[c] === 'number' ? r[c] : str(r[c])) : '']));
+  const resultRef = (r) => str(r['Sohar Ref']) || (str(r['Sohar Link']).match(/[^/]+$/) || [''])[0];
+  const resultKind = (r) => (isVerification(r) ? 'Verification' : 'Discovery');
+
+  /**
+   * SE History for the clinic's patients: Sohar results, the rotation's events (tblPatientHistory), copays (Luma and
+   * tracker lines, desk collections), OK to collect changes and past visits. Per patient newest first, only the last
+   * opts.days (90) and at most opts.max (5) events. Free text is scrubbed of the patient's and guarantor's names and DOBs.
+   */
+  function seHistory(set, s, scrubs, runAt, opts) {
+    const o = Object.assign({}, HISTORY_DEFAULTS, opts || {});
+    const from = runAt.getTime() - o.days * 864e5;
+    const per = new Map(set.map((e) => [mrnKey(e.per), e.per]));
+    const out = new Map(set.map((e) => [e.per, new Map()]));
+    const add = (mrn, ev) => {
+      const k = per.get(mrnKey(mrn));
+      if (!k) return;
+      const at = atMs(ev.When);
+      if (isNaN(at) || at < from || at > runAt.getTime() + 864e5 * 366) return;
+      const id = ev.Ref ? `${low(ev.Kind)}|${ev.Ref}` : `${low(ev.Kind)}|${at}|${low(ev.Detail)}`;
+      const m = out.get(k);
+      if (!m.has(id)) m.set(id, Object.assign(pick(SE_HISTORY_COLS, ev), { Key: k, _at: at }));
+    };
+    for (const e of set) {
+      for (const r of e.rows) add(e.per, { When: r['Sohar Date'], Kind: resultKind(r), Detail: [r['Sohar Status'], r['Sohar Payer']].map(str).filter(Boolean).join(' · '), Source: 'Sohar', Ref: resultRef(r) });
+      for (const a of e.allAppts) {
+        const d = parseDate(a && a.date);
+        if (!d || d >= dayOf(runAt) || INACTIVE.test(str(a.status))) continue;
+        add(e.per, { When: fmtDate(d), Kind: 'Visit', Location: str(a.loc), Detail: str(a.event), Source: 'NextGen' });
+      }
+    }
+    // Past visits: the patient records keep upcoming visits only, so the ledger's past rows (any clinic) stand for them.
+    for (const r of tableObjects(s.ledger)) {
+      const d = parseDate(r['Appt Date']);
+      if (!d || d >= dayOf(runAt) || /not on the latest report|cancel/i.test(str(r.Note))) continue;
+      add(r.MRN, { When: fmtDate(d), Kind: 'Visit', Location: r.Location, Detail: [r.Event, r.Time].map(str).filter(Boolean).join(' · '), Source: 'Ledger', Ref: `visit|${fmtDate(d)}|${str(r.Time)}` });
+    }
+    for (const r of tableObjects(s.history)) add(r.MRN, { When: r.When, Kind: str(r.Kind) || 'Event', Location: r.Location, Detail: r.Detail, Amount: r.Amount, Source: r.Source, Ref: str(r.Ref) || str(r['Row Key']) });
+    for (const r of tableObjects(s.copayActivity)) {
+      add(r.MRN, { When: r.Date, Kind: 'Copay', Location: r.Location, Detail: [r.Kind, r.Method].map(str).filter(Boolean).join(' · '), Amount: r.Amount, Source: str(r.Source) || 'Luma', Ref: str(r.Ref) || str(r['Row Key']) });
+    }
+    for (const r of tableObjects(s.desk)) {
+      add(r.MRN, { When: str(r.When) || r.Date, Kind: 'Copay', Location: r.Location, Detail: ['Collected at the desk', r.Method].map(str).filter(Boolean).join(' · '), Amount: r.Amount, Source: 'Desk', Ref: r.Ref });
+    }
+    for (const r of tableObjects(s.consents)) {
+      add(r.MRN, { When: r.When, Kind: 'OK to collect', Location: r.Location, Detail: `${isOn(r['OK to Collect']) ? 'Yes' : 'No'}${str(r.By) ? ` (${str(r.By)})` : ''}`, Source: 'Clinic', Ref: `${mrnKey(r.MRN)}|${low(r.Location)}|${str(r.When)}` });
+    }
+    const rows = [];
+    for (const [k, m] of out) {
+      const sc = scrubs.get(k);
+      const list = [...m.values()].sort((a, b) => b._at - a._at).slice(0, o.max);
+      for (const r of list) { delete r._at; if (sc) r.Detail = scrubText(str(r.Detail), sc.noteRes); rows.push(r); }
+    }
+    return rows;
+  }
+
+  /** SE Copay: one row per patient, card on file (rotation) and the newest OK to collect (any clinic). */
+  function seCopay(set, s) {
+    const cards = new Map(tableObjects(s.cards).map((r) => [mrnKey(r.MRN), r]));
+    const consent = new Map();
+    for (const r of tableObjects(s.consents)) {
+      const k = mrnKey(r.MRN), prev = consent.get(k);
+      if (!prev || str(prev.When) < str(r.When)) consent.set(k, r);
+    }
+    return set.map((e) => {
+      const c = cards.get(mrnKey(e.per)) || {}, k = consent.get(mrnKey(e.per)) || {};
+      return { Key: e.per, 'Card On File': str(c['Card On File']), 'Card Source': str(c.Source), 'Card As Of': str(c['As Of']),
+        'OK to Collect': str(k['OK to Collect']), 'Consent By': str(k.By), 'Consent When': str(k.When), 'Consent Location': str(k.Location) };
+    });
+  }
+
+  /** SE Estimates: the ledger's rows for this clinic's upcoming visits (no contracted Allowed amounts). */
+  function seEstimates(set, ledger, location, runDay) {
+    const per = new Map(set.map((e) => [mrnKey(e.per), e.per]));
+    const out = [];
+    for (const r of tableObjects(ledger)) {
+      const k = per.get(mrnKey(r.MRN)), d = parseDate(r['Appt Date']);
+      if (!k || !d || d < runDay || !sameLoc(r.Location, location)) continue;
+      out.push(Object.assign(pick(SE_EST_COLS, r), { Key: k, 'Appt Date': fmtDate(d) }));
+    }
+    return out;
+  }
+
   /**
    * The Clinic Eligibility workbook for one location, as an XL.buildWorkbook spec plus {meta, name, counts}.
    * src: {patients (in-scope, after the skip window), results (merged Sohar Results), review (build review), learningRows,
    * metricRows, tasks (NextGen Tasks rows with Done), cfg, payerRuleRows, runAt, version}. Clinic = clinicSet membership
-   * (next visit at loc on runAt); unmatched and no-identifier results stay with the admin.
+   * (v0.29: any upcoming visit at loc on runAt, so guest patients come along; only this clinic's appointments go in);
+   * unmatched and no-identifier results stay with the admin.
+   * v0.29 adds: ledger (tblEligibilityChecks rows), history (tblPatientHistory), copayActivity, cards (tblCardOnFile),
+   * consents (Clinic Consent), desk (Desk Collections), fees ({columns, rows} of this clinic's fee tabs, and rules:
+   * [{Kind, Record}] for Fee Locations, Fee Payer Map, Estimate Codes ...), historyOpts ({days, max}) and protection
+   * (XL.protectionHash output: the file's structure is locked with it). Every back-room sheet is very hidden.
    */
   function clinicPack(loc, src) {
     const s = src || {};
@@ -844,7 +1000,8 @@
     if (allLocations(location)) throw new Error('Choose one location: a Clinic Template Tool file is for one clinic.');
     const runAt = s.runAt instanceof Date && !isNaN(s.runAt) ? s.runAt : new Date();
     const runDay = dayOf(runAt), runDate = fmtDate(runDay);
-    const set = clinicSet(location, s.patients, s.results, runAt);
+    const set = clinicSet(location, s.patients, s.results, runAt, { anyVisit: true });
+    for (const e of set) e.allAppts = Array.isArray(xOf(e.p).appointments) ? xOf(e.p).appointments.filter(Boolean) : [];
     const keys = new Set(set.map((e) => e.per));
     const patients = [], results = [], carried = new Set();
     const scrubs = new Map();
@@ -858,6 +1015,8 @@
       const rec = stripRecord(p, res, tag);
       const xs = Object.assign({}, x);
       delete xs.guarantor; delete xs.guarZip;
+      // Only this clinic's appointments: a guest patient's visits at other clinics stay with the admin.
+      if (Array.isArray(xs.appointments)) xs.appointments = xs.appointments.filter((a) => a && sameLoc(str(a.loc) || str(x.location), location));
       rec.x = xs;
       patients.push({ Key: per, Record: recordCell(rec, location, runDay) });
       for (const r of rows) {
@@ -894,32 +1053,80 @@
     const settings = seSettings(s.cfg);
     const meta = { Kind: SE_KIND, Location: location, 'Run Date': runDate, 'Run At': runAt.toISOString(), 'Sohar Version': str(s.version), Format: SE_FORMAT,
       Settings: JSON.stringify(settings) };
+    const appts = [];
+    for (const e of set) {
+      for (const a of upcoming({ x: { appointments: e.allAppts } }, runDay)) {
+        if (!sameLoc(str(a.loc) || str(xOf(e.p).location), location)) continue;
+        appts.push({ Key: e.per, 'Per Nbr': str(e.p['Per Nbr']), LASFIR: scrubs.get(e.per).tag, Date: fmtDate(a._d), Time: str(a.time), Event: str(a.event),
+          Provider: str(a.rendering) || str(xOf(e.p).rendering), Location: str(a.loc) || location, Status: str(a.status) });
+      }
+    }
+    const estimates = seEstimates(set, s.ledger, location, runDay);
+    const history = seHistory(set, s, scrubs, runAt, s.historyOpts);
+    const copay = seCopay(set, s);
+    const fees = s.fees || {};
+    const feeCols = Array.isArray(fees.columns) && fees.columns.length ? fees.columns : ['Tab', 'Code', 'Payer', 'Level', 'Rate'];
+    const feeRows = (fees.rows || []).filter(Boolean).map((r) => pick(feeCols, r));
+    // A list too long for one cell goes in several rows of the same Kind (feeTables joins them back).
+    const feeRules = [];
+    for (const r of (fees.rules || []).filter((x) => x && str(x.Kind))) {
+      const kind = str(r.Kind), v = r.Record;
+      if (!Array.isArray(v)) {
+        const s1 = JSON.stringify(v == null ? null : v);
+        if (s1.length >= CELL_MAX) throw new Error(`Clinic file for ${location}: the ${kind} fee setting is too big for one Excel cell. The file was not made.`);
+        feeRules.push({ Kind: kind, Record: s1 });
+        continue;
+      }
+      let part = [];
+      const flush = () => { feeRules.push({ Kind: kind, Record: JSON.stringify(part) }); part = []; };
+      for (const item of v) {
+        if (JSON.stringify([item]).length >= CELL_MAX) throw new Error(`Clinic file for ${location}: a ${kind} row is too big for one Excel cell. The file was not made.`);
+        if (part.length && JSON.stringify(part.concat([item])).length >= CELL_MAX) flush();
+        part.push(item);
+      }
+      flush();
+    }
     const readMe = [
       `Clinic Eligibility file for ${location}, made ${runDate} by the central Sohar Eligibility admin.`,
-      'It lists the patients whose next visit is at this clinic: their Sohar insurance results, benefits and what to do before the visit.',
-      'To work the list, open Home > Clinic Template Tool. The pane shows Eligibility, Benefits and Payers.',
+      'It lists every patient with a visit booked at this clinic, including patients from other clinics: their Sohar insurance results, benefits, cost estimates and what to do before the visit.',
+      'Clinic Day shows each visit. The Clinic Template Tool writes it, so do not type on it. Open Home > Clinic Template Tool to work the list.',
       'Patients show as LASFIR (first three letters of the last name, then of the first name) and MRN. The file has no patient names or dates of birth.',
       'Tick tasks done (with a short note if it helps), ask for a re-verify, or add a note in the pane. Your changes are saved on the Clinic Work sheet. Do not edit the hidden sheets.',
       'This file has PHI (MRNs, insurance and appointments). Keep it in your clinic\'s folder in the Clinic Eligibility library, MHS OneDrive or Teams only.',
       'Save the file in your clinic\'s folder in the Clinic Eligibility library. Excel on the web saves your changes on its own and the admin picks them up from there: you do not need to send the file back.',
       'If the file is not in the library, or the admin asks for it, save it and send it back to the admin through OneDrive or Teams. The admin brings your changes into Sohar.',
     ];
-    const sheets = [
-      { name: SE_SHEETS.readMe, table: 'tblSERead', columns: ['Read Me'], rows: readMe.map((t) => ({ 'Read Me': t })), colWidths: [110] },
-      { name: SE_SHEETS.work, table: 'tblClinicWork', columns: CLINIC_WORK_COLS, rows: [], textColumns: CLINIC_WORK_COLS },
-      { name: SE_SHEETS.info, table: 'tblSEInfo', columns: ['Setting', 'Value'], rows: Object.entries(meta).map(([k, v]) => ({ Setting: k, Value: v })), hidden: true },
-      { name: SE_SHEETS.patients, table: 'tblSEPatients', columns: ['Key', 'Record'], rows: patients, hidden: true },
-      { name: SE_SHEETS.results, table: 'tblSEResults', columns: ['Key', 'Record'], rows: results, hidden: true },
-      { name: SE_SHEETS.review, table: 'tblSEReview', columns: ['Key', 'Record'], rows: review, hidden: true },
+    const H = VERY_HIDDEN;
+    const back = [
+      { name: SE_SHEETS.info, table: 'tblSEInfo', columns: ['Setting', 'Value'], rows: Object.entries(meta).map(([k, v]) => ({ Setting: k, Value: v })), hidden: H },
+      { name: SE_SHEETS.patients, table: 'tblSEPatients', columns: ['Key', 'Record'], rows: patients, hidden: H },
+      { name: SE_SHEETS.results, table: 'tblSEResults', columns: ['Key', 'Record'], rows: results, hidden: H },
+      { name: SE_SHEETS.review, table: 'tblSEReview', columns: ['Key', 'Record'], rows: review, hidden: H },
       { name: SE_SHEETS.payers, table: 'tblSEPayers', columns: ['Key', 'Record'],
-        rows: [...payers].map(([k, v]) => ({ Key: k, Record: recordCell(v, location, runDay) })), hidden: true },
-      { name: SE_SHEETS.done, table: 'tblSEDone', columns: ['Task Key', 'Done', 'Clinic Note'], rows: done, hidden: true },
+        rows: [...payers].map(([k, v]) => ({ Key: k, Record: recordCell(v, location, runDay) })), hidden: H },
+      { name: SE_SHEETS.done, table: 'tblSEDone', columns: ['Task Key', 'Done', 'Clinic Note'], rows: done, hidden: H },
+      { name: SE2_SHEETS.appts, table: 'tblSEAppts', columns: SE_APPT_COLS, rows: appts, textColumns: ['Key', 'Per Nbr'], hidden: H },
+      { name: SE2_SHEETS.estimates, table: 'tblSEEstimates', columns: SE_EST_COLS, rows: estimates, textColumns: ['Key'], hidden: H },
+      { name: SE2_SHEETS.history, table: 'tblSEHistory', columns: SE_HISTORY_COLS, rows: history, textColumns: ['Key', 'When'], hidden: H },
+      { name: SE2_SHEETS.copay, table: 'tblSECopay', columns: SE_COPAY_COLS, rows: copay, textColumns: ['Key'], hidden: H },
+      { name: SE2_SHEETS.fees, table: 'tblSEFees', columns: feeCols, rows: feeRows, hidden: H },
+      { name: SE2_SHEETS.feeRules, table: 'tblSEFeeRules', columns: SE_FEE_RULE_COLS, rows: feeRules, hidden: H },
     ];
-    if (ruleRows.length) sheets.push({ name: SE_SHEETS.rules, table: 'tblPayerCredRules', columns: PR ? PR.HEADERS : Object.keys(ruleRows[0]), rows: ruleRows, hidden: true });
+    if (ruleRows.length) back.push({ name: SE_SHEETS.rules, table: 'tblPayerCredRules', columns: PR ? PR.HEADERS : Object.keys(ruleRows[0]), rows: ruleRows, hidden: H });
+    // Clinic Day as the clinic first sees it: the same derivation CTT runs (CTT adds its own visit prices when it opens).
+    const day = clinicDay(clinicDerive(clinicUnpack(Object.fromEntries(back.map((sh) => [sh.name, sh.rows]))), [], runAt));
+    const sheets = [
+      { name: SE2_SHEETS.day, table: 'tblClinicDay', columns: CLINIC_DAY_COLS, rows: day, textColumns: CLINIC_DAY_COLS,
+        colWidths: [11, 9, 10, 22, 20, 22, 9, 10, 10, 14, 12, 18, 20, 28] },
+      { name: SE_SHEETS.work, table: 'tblClinicWork', columns: CLINIC_WORK_COLS, rows: [], textColumns: CLINIC_WORK_COLS },
+      { name: SE_SHEETS.readMe, table: 'tblSERead', columns: ['Read Me'], rows: readMe.map((t) => ({ 'Read Me': t })), colWidths: [110] },
+    ].concat(back);
     return {
       meta, sheets, webExtension: Object.assign({}, CTT_EXTENSION), now: runAt,
+      protection: s.protection && s.protection.hashValue ? Object.assign({}, s.protection) : null,
       name: `Clinic Eligibility - ${location.replace(/[\\/:*?"<>|]/g, '-')} ${localDate(runAt)}.xlsx`,
-      counts: { patients: patients.length, results: results.length, review: review.length, payers: payers.size, done: done.length, rules: ruleRows.length },
+      counts: { patients: patients.length, results: results.length, review: review.length, payers: payers.size, done: done.length, rules: ruleRows.length,
+        appointments: appts.length, estimates: estimates.length, history: history.length, fees: feeRows.length, day: day.length },
     };
   }
 
@@ -954,6 +1161,13 @@
       // Clinic Note: files made before it was added have no such column (still Format 1), so it reads blank.
       done: find(SE_SHEETS.done).map((r) => ({ 'Task Key': str(r['Task Key']), 'Done': str(r.Done), 'Clinic Note': str(r['Clinic Note']) })).filter((r) => r['Task Key']),
       payerRules: payerRulesFrom(find(SE_SHEETS.rules)),
+      // v0.29 (files made before have none of these sheets: empty lists, and CTT works as before).
+      appts: find(SE2_SHEETS.appts).map((r) => pick(SE_APPT_COLS, r)).filter((r) => r.Key),
+      estimates: find(SE2_SHEETS.estimates).map((r) => pick(SE_EST_COLS, r)).filter((r) => r.Key),
+      history: find(SE2_SHEETS.history).map((r) => pick(SE_HISTORY_COLS, r)).filter((r) => r.Key),
+      copay: find(SE2_SHEETS.copay).map((r) => pick(SE_COPAY_COLS, r)).filter((r) => r.Key),
+      fees: find(SE2_SHEETS.fees),
+      feeRules: find(SE2_SHEETS.feeRules).filter((r) => str(r.Kind) && str(r.Record)).map((r, i) => ({ Kind: str(r.Kind), Record: json(SE2_SHEETS.feeRules, str(r.Record), i) })),
     };
   }
 
@@ -993,12 +1207,12 @@
     const cfg = { today, sfhpProviders: st.sfhpProviders, reverifyDays: st.reverifyDays, reverifyNewMonth: !!st.reverifyNewMonth,
       payerRules: pk.payerRules || [], locationState: st.locationState };
     const all = allFlags(patients, results, cfg);
-    const rows = clinicRows(loc, patients, results, all, today);
+    const rows = clinicRows(loc, patients, results, all, today, { anyVisit: true });
     const byKey = new Map();
     for (const r of rows) { r.LASFIR = tags.get(r.key) || ''; byKey.set(r.key, r); }
     // A patient whose visits here have all passed since the export drops out of everything.
     const flags = new Map([...all].filter(([k]) => byKey.has(k)));
-    const review = clinicReviewRows(loc, patients, results, flags, today).map((r) => Object.assign(r, { LASFIR: tags.get(r.MRN) || '', Source: 'Flag' }))
+    const review = clinicReviewRows(loc, patients, results, flags, today, { anyVisit: true }).map((r) => Object.assign(r, { LASFIR: tags.get(r.MRN) || '', Source: 'Flag' }))
       .concat((pk.review || []).filter((r) => byKey.has(str(r.MRN))).map((r) => {
         const c = byKey.get(str(r.MRN));
         return { 'Appt Date': c['Next Appt'], 'Severity': str(r.Severity), 'Pill': '', 'Issue': str(r.Issue), 'MRN': str(r.MRN), 'Last Name': '', 'First Name': '',
@@ -1023,7 +1237,9 @@
       // sentNote: the Clinic Note the admin had when the file was made ('note (By, Location, M/D)'), whatever the clinic edits.
       const sentNote = sentNotes.get(k) || '';
       return Object.assign(t, { Done: admin || (clinicDone ? was || 'Yes' : ''), 'Clinic Note': sentNote, doneBy: admin ? 'admin' : clinicDone ? 'clinic' : '',
-        clinic: CLINIC_TASK_TYPES.includes(t.Task), LASFIR: tags.get(who(t)) || '', clinicNote: cw ? cw.Note : '', sentNote });
+        // v0.29: a guest patient's task belongs to the clinic of the next visit (the admin skips a tick from any other).
+        clinic: CLINIC_TASK_TYPES.includes(t.Task) && (!str(t['Next Location']) || allLocations(loc) || sameLoc(t['Next Location'], loc)),
+        LASFIR: tags.get(who(t)) || '', clinicNote: cw ? cw.Note : '', sentNote });
     });
     const notes = new Map();
     for (const r of w.values()) if (r.kind === 'note' && r.Note && byKey.has(r.Key)) notes.set(r.Key, { Note: r.Note, By: r.By, When: r.When });
@@ -1049,7 +1265,112 @@
       tasks: tasks.length, openTasks: open.length, clinicTasks: open.filter((t) => t.clinic).length,
       reverifyAnyway: rows.filter((r) => r['Re-verify Anyway']).length, notes: notes.size, taskNotes: tasks.filter((t) => t.clinicNote).length, sentNotes: tasks.filter((t) => t.sentNote).length, payerNotes: payers.filter((p) => p.note).length, benefits: benefits.rows.length,
     };
-    return { rows, review, flags, benefits, tasks, payers, notes, counts };
+    // v0.29: appointments here, estimates, bounded history, card on file and OK to collect (Clinic Work wins on the file's).
+    const day0 = dayOf(today);
+    const appts = (pk.appts || []).filter((a) => byKey.has(str(a.Key)) && (parseDate(a.Date) || 0) >= day0 && !INACTIVE.test(str(a.Status)))
+      .sort((a, b) => parseDate(a.Date) - parseDate(b.Date) || minutes(a.Time) - minutes(b.Time) || str(a.LASFIR).localeCompare(str(b.LASFIR)));
+    const estimates = new Map();
+    for (const e of pk.estimates || []) {
+      estimates.set(`${str(e.Key)}|${str(e['Appt Date'])}|${minutes(e.Time)}`, e);
+      if (!estimates.has(`${str(e.Key)}|${str(e['Appt Date'])}`)) estimates.set(`${str(e.Key)}|${str(e['Appt Date'])}`, e);
+    }
+    const history = new Map();
+    for (const h of pk.history || []) {
+      if (!byKey.has(str(h.Key))) continue;
+      if (!history.has(h.Key)) history.set(h.Key, []);
+      history.get(h.Key).push(Object.assign({}, h));
+    }
+    const refs = new Set((pk.history || []).map((h) => str(h.Ref)).filter(Boolean));
+    const collected = [];
+    for (const r of w.values()) {
+      if (r.kind !== 'collected' || !str(r.Value)) continue;
+      const mrn = str(r.MRN) || str(r.Key).split('|')[0];
+      if (!byKey.has(mrn) || refs.has(`${loc}|${r.Key}`)) continue;
+      const [method, ...rest] = str(r.Note).split(' · ');
+      const c = { Key: mrn, When: r.When, Kind: 'Copay', Location: loc, Detail: ['Collected at the desk', method].filter(Boolean).join(' · '), Amount: str(r.Value),
+        Source: 'Desk', Ref: `${loc}|${r.Key}`, pending: true, by: r.By, note: rest.join(' · '), workKey: r.Key };
+      collected.push(c);
+      if (!history.has(mrn)) history.set(mrn, []);
+      history.get(mrn).push(c);
+    }
+    for (const list of history.values()) list.sort((a, b) => (atMs(b.When) || 0) - (atMs(a.When) || 0));
+    const copay = new Map((pk.copay || []).filter((c) => byKey.has(str(c.Key))).map((c) => [str(c.Key), Object.assign({}, c, { consentFrom: c['OK to Collect'] ? 'admin' : '' })]));
+    for (const k of byKey.keys()) {
+      const cw = get('consent', k);
+      if (!cw || !str(cw.Value)) continue;
+      const c = copay.get(k) || Object.assign(pick(SE_COPAY_COLS, {}), { Key: k });
+      copay.set(k, Object.assign(c, { 'OK to Collect': isOn(cw.Value) ? 'Yes' : 'No', 'Consent By': cw.By, 'Consent When': cw.When, 'Consent Location': loc, consentFrom: 'clinic' }));
+    }
+    Object.assign(counts, { appointments: appts.length, estimates: (pk.estimates || []).length, collected: collected.length,
+      consent: [...copay.values()].filter((c) => isOn(c['OK to Collect'])).length });
+    return { rows, review, flags, benefits, tasks, payers, notes, counts, loc, appts, estimates, history, collected, copay, byKey, now: today };
+  }
+
+  /** SE Fee Rules rows ({Kind, Record}) -> {kind: value}; list rows of one Kind are joined in order. */
+  function feeTables(rules) {
+    const out = {};
+    for (const r of rules || []) {
+      const k = str(r && r.Kind);
+      if (!k) continue;
+      if (Array.isArray(r.Record)) out[k] = (Array.isArray(out[k]) ? out[k] : []).concat(r.Record);
+      else out[k] = r.Record;
+    }
+    return out;
+  }
+
+  const COVERAGE_WORDS = [[/^complete\.eligible/i, 'Eligible'], [/^complete\.ineligible/i, 'Not eligible'], [/^error/i, 'Check failed'],
+    [/pending/i, 'Pending'], [/no coverage/i, 'No coverage found']];
+  const coverageWord = (status) => { const s = str(status); if (!s) return 'Not checked'; const m = COVERAGE_WORDS.find(([re]) => re.test(s)); return m ? m[1] : s; };
+  // M/D: an ISO time on the local calendar (when it happened here); a plain date as written (parseDate keeps it at UTC midnight).
+  const shortDay = (v) => {
+    if (/^\d{4}-\d{2}-\d{2}T/.test(str(v))) { const d = new Date(Date.parse(str(v))); return isNaN(d) ? '' : `${d.getMonth() + 1}/${d.getDate()}`; }
+    const d = typeof v === 'number' || str(v) ? parseDate(v) : null;
+    return d ? `${d.getUTCMonth() + 1}/${d.getUTCDate()}` : '';
+  };
+  const left = (amt, status) => (/^met$/i.test(str(status)) ? 'Met' : money(amt));
+
+  /**
+   * The visible Clinic Day sheet (CLINIC_DAY_COLS): one row per upcoming visit at the clinic, from clinicDerive's output d.
+   * No MRN (the patient view shows it). opts.priceOf(appt, row) -> {amount, note} prices a visit the ledger has no estimate
+   * for (CTT, from the SE Fees tables). Files made before v0.29 have no appointments table: one row per patient instead.
+   */
+  function clinicDay(d, opts) {
+    const o = opts || {};
+    if (!d || !d.rows) return [];
+    const list = d.appts && d.appts.length ? d.appts
+      : d.rows.map((r) => ({ Key: r.key, LASFIR: r.LASFIR, Date: r['Next Appt'], Time: r['Next Time'], Event: r['Next Event'], Provider: r['Next Provider'], Location: r.Location }));
+    const open = new Map();
+    for (const t of d.tasks || []) if (!t.Done && t.clinic) { const k = str(t['Task Key']).split('|')[0]; open.set(k, (open.get(k) || 0) + 1); }
+    return list.map((a) => {
+      const r = d.byKey ? d.byKey.get(str(a.Key)) || {} : d.rows.find((x) => x.key === a.Key) || {};
+      const est = d.estimates ? d.estimates.get(`${str(a.Key)}|${str(a.Date)}|${minutes(a.Time)}`) || d.estimates.get(`${str(a.Key)}|${str(a.Date)}`) : null;
+      let owes = '';
+      if (est) owes = money(est['Projected Patient Responsibility'] || est['Sohar Est Patient'] || est['Est Patient']) || str(est['Estimate Note']);
+      if (!owes && typeof o.priceOf === 'function') {
+        const p = o.priceOf(a, r) || {};
+        owes = p.amount != null && p.amount !== '' ? `${money(p.amount)} (est.)` : str(p.note);
+      }
+      const c = d.copay ? d.copay.get(str(a.Key)) || {} : {};
+      const card = str(c['Card On File']);
+      const ok = str(c['OK to Collect']);
+      const pays = ((d.history && d.history.get(str(a.Key))) || []).filter((h) => h.Kind === 'Copay' && str(h.Amount));
+      const today = pays.filter((h) => shortDay(h.When) === shortDay(a.Date));
+      const act = today.length ? today.map((h) => `${money(h.Amount)} ${h.Source === 'Desk' ? 'desk' : low(h.Source)}${h.pending ? ', pending' : ''}`).join('; ')
+        : pays.length ? `Last ${money(pays[0].Amount)} on ${shortDay(pays[0].When)}` : '';
+      const n = open.get(str(a.Key)) || 0;
+      const pills = str(r.Pills).split(';').map((x) => x.trim()).filter(Boolean);
+      const copayText = money(r.Copay) || (str(r.Coinsurance) ? `${str(r.Coinsurance).replace(/%?$/, '%')} coins.` : '');
+      return {
+        'Date': str(a.Date), 'Time': str(a.Time), 'LASFIR': str(a.LASFIR) || str(r.LASFIR), 'Event': str(a.Event), 'Provider': str(a.Provider),
+        'Coverage': [coverageWord(r['Sohar Status']), str(r['Sohar Payer'])].filter(Boolean).join(' · '),
+        'Copay': copayText, 'Ded left': left(r['Deductible Remaining'], r['Deductible Status']), 'OOP left': left(r['OOP Remaining'], r['OOP Status']),
+        'Est. owes': owes,
+        'Card on file': /^y/i.test(card) ? `Yes${str(c['Card As Of']) ? ` (${shortDay(c['Card As Of'])})` : ''}` : /^n/i.test(card) ? 'No' : '',
+        'OK to collect': ok ? `${isOn(ok) ? 'Yes' : 'No'}${str(c['Consent By']) ? ` · ${str(c['Consent By'])}` : ''}${str(c['Consent When']) ? ` ${shortDay(c['Consent When'])}` : ''}` : '',
+        'Copay activity': act,
+        'To do': [n ? `${n} task${n === 1 ? '' : 's'}` : '', pills.join(', ')].filter(Boolean).join(' · '),
+      };
+    });
   }
 
   /**
@@ -1094,7 +1415,7 @@
     const c = ctx || {};
     const loc = str(c.location);
     const now = c.now instanceof Date && !isNaN(c.now) ? c.now : new Date();
-    const counts = { reverifyAdded: 0, reverifyRemoved: 0, doneSet: 0, doneCleared: 0, doneNotes: 0, tasksChanged: 0, notes: 0, payerNotes: 0, skipped: 0, otherClinic: 0, old: 0, applied: 0 };
+    const counts = { reverifyAdded: 0, reverifyRemoved: 0, doneSet: 0, doneCleared: 0, doneNotes: 0, tasksChanged: 0, notes: 0, payerNotes: 0, consents: 0, collected: 0, skipped: 0, otherClinic: 0, old: 0, applied: 0 };
     const seenId = (l, kind, key) => `${low(l)}|${workId(kind, key)}`;
     const tick = (v) => (isOn(v) ? 'Yes' : str(v) ? 'No' : '');
     const seen = new Map();
@@ -1152,10 +1473,30 @@
     const payerNotes = upsert(c.payerNotes, CLINIC_PAYER_NOTE_COLS, of('payer'), (o) => `${low(o['NextGen Payer'])}|${low(o.Location)}`,
       (r) => ({ 'NextGen Payer': r.Key, 'Location': loc, 'Card Says': r.Value, 'Note': r.Note, 'By': r.By, 'When': r.When }));
     counts.notes = notes.n; counts.payerNotes = payerNotes.n;
-    return { requests: m.rows, done, doneNotes, notes: notes.rows, payerNotes: payerNotes.rows, applied, counts };
+    // v0.29 OK to collect: newest per MRN + Location wins; a blank Value removes the clinic's row.
+    const consents = new Map(tableObjects(c.consents).map((r) => pick(CLINIC_CONSENT_COLS, r)).map((o) => [`${mrnKey(o.MRN)}|${low(o.Location)}`, o]));
+    for (const r of of('consent')) {
+      const id = `${mrnKey(r.Key)}|${low(loc)}`, old = consents.get(id);
+      if (old && str(old.When) > r.When) continue;
+      if (str(r.Value)) { consents.set(id, { 'MRN': r.Key, 'Location': loc, 'OK to Collect': isOn(r.Value) ? 'Yes' : 'No', 'By': r.By, 'When': r.When }); counts.consents++; }
+      else if (consents.delete(id)) counts.consents++;
+    }
+    // Collected: one Desk Collections row per Location + Key (Ref); a blank Value withdraws it, a new amount replaces it.
+    const desk = new Map(tableObjects(c.desk).map((r) => pick(DESK_COLLECTION_COLS, r)).map((o) => [o.Ref, o]));
+    for (const r of of('collected')) {
+      const ref = `${loc}|${r.Key}`, amt = Number(str(r.Value).replace(/[$,\s]/g, ''));
+      if (!str(r.Value)) { if (desk.delete(ref)) counts.collected++; continue; }
+      if (!isFinite(amt) || amt <= 0) { counts.skipped++; continue; }
+      const [method, ...rest] = str(r.Note).split(' · ');
+      const t = new Date(whenAt(r.When));
+      desk.set(ref, { 'Ref': ref, 'MRN': str(r.MRN) || str(r.Key).split('|')[0], 'LASFIR': r.LASFIR, 'Location': loc, 'Date': isNaN(t) ? '' : localDate(t),
+        'Amount': amt.toFixed(2), 'Method': method, 'Note': rest.join(' · '), 'By': r.By, 'When': r.When });
+      counts.collected++;
+    }
+    return { requests: m.rows, done, doneNotes, notes: notes.rows, payerNotes: payerNotes.rows, consents: [...consents.values()], desk: [...desk.values()], applied, counts };
   }
   /** How many Clinic Work rows changed something in mergeClinicWork's counts (a tick already acted on, or a blank note over none, did not). */
-  const clinicChanges = (n) => ['reverifyAdded', 'reverifyRemoved', 'tasksChanged', 'notes', 'payerNotes']
+  const clinicChanges = (n) => ['reverifyAdded', 'reverifyRemoved', 'tasksChanged', 'notes', 'payerNotes', 'consents', 'collected']
     .reduce((k, c) => k + (Number(n && n[c]) || 0), 0);
 
   /**
@@ -1193,5 +1534,9 @@
     bestResult, lasfir, collapseFlags,
     CTT_EXTENSION, SE_SHEETS, CLINIC_WORK_COLS, CLINIC_NOTE_COLS, CLINIC_PAYER_NOTE_COLS, CLINIC_APPLIED_COLS, CLINIC_TASK_TYPES,
     clinicPack, clinicUnpack, clinicDerive, workRows, mergeClinicWork, clinicChanges, tableObjects, INBOX_COLS, inboxWork, APPLIED_DAYS,
+    // v0.29 clinic file v2
+    LEDGER_COLS, PATIENT_HISTORY_COLS, COPAY_ACTIVITY_COLS, CARD_ON_FILE_COLS, NEEDS_CHECK_COLS, LOOKUP_LOG_COLS, CLINIC_CONSENT_COLS, DESK_COLLECTION_COLS,
+    SE2_SHEETS, SE_APPT_COLS, SE_EST_COLS, SE_HISTORY_COLS, SE_COPAY_COLS, SE_FEE_RULE_COLS, CLINIC_DAY_COLS, HISTORY_DEFAULTS, WORK_KINDS,
+    clinicDay, feeTables, coverageWord, mrnKey, money,
   };
 });

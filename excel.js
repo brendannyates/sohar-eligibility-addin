@@ -95,6 +95,10 @@
     tblPreCheck: { sheet: 'Pre-Check', hidden: true },
     // v0.23.1: the last account audit per patient (audit.AUDIT_COLS / AUDIT_LINE_COLS). LASFIR and MRN, no names: hidden.
     tblAccountAudits: { sheet: 'Account Audits', hidden: true }, tblAccountAuditLines: { sheet: 'Account Audit Lines', hidden: true },
+    // v0.29: OK to collect and desk collections from the clinics (rules.CLINIC_CONSENT_COLS / DESK_COLLECTION_COLS), and
+    // each rate the calculator changed (fees.FEE_SCHEDULE_LOG_COLS). MRNs or rates: hidden.
+    tblClinicConsent: { sheet: 'Clinic Consent', hidden: true }, tblDeskCollections: { sheet: 'Desk Collections', hidden: true },
+    tblFeeScheduleLog: { sheet: 'Fee Schedule Log', hidden: true },
   };
   // Fee estimate tables by short name (app.js uses readFee / writeFee with these).
   const FEE_TABLES = { schedule: 'tblFeeSchedule', meta: 'tblFeeMeta', locations: 'tblFeeLocations', homes: 'tblProviderHome',
@@ -696,6 +700,44 @@
    */
   async function createClinicInbox(cols) { return createHeaderTable({ sheet: INBOX.sheet, table: INBOX.table }, cols, 'the clinic inbox', 'set up the inbox again'); }
 
+  // ---------- v0.29: the rotation's tables, also flow-owned ----------
+  // The "Rotation to master" flow upserts the eligibility-check rotation's rows here (rules.LEDGER_COLS and the others), and
+  // the lookup flow appends to Needs Check. Same rule as the inbox: not in OWNED, never swapped, sorted, cleared or trimmed;
+  // the add-in creates each once (header only, hidden: they carry MRNs) and reads it.
+  const FLOW_TABLES = {
+    ledger: { sheet: 'Eligibility Checks', table: 'tblEligibilityChecks', hidden: true },
+    history: { sheet: 'Patient History', table: 'tblPatientHistory', hidden: true },
+    copay: { sheet: 'Copay Activity', table: 'tblCopayActivity', hidden: true },
+    cards: { sheet: 'Card On File', table: 'tblCardOnFile', hidden: true },
+    needs: { sheet: 'Needs Check', table: 'tblNeedsCheck', hidden: true },
+  };
+  function flowTable(kind) {
+    const t = FLOW_TABLES[kind];
+    if (!t) throw new Error(`Unknown flow table ${kind}`);
+    return t;
+  }
+  /** A flow table's rows as objects, or null when it is not set up yet. */
+  async function readFlowTable(kind) {
+    const t = flowTable(kind);
+    if (!(await tableExists(t.table))) return null;
+    return readTable(t.table);
+  }
+  /** Create the flow tables that are missing ({kind: cols}), each fail-safe. Returns the kinds made. */
+  async function createFlowTables(colsByKind) {
+    const made = [];
+    for (const [kind, cols] of Object.entries(colsByKind || {})) {
+      const t = flowTable(kind);
+      if (await createHeaderTable(t, cols, `the ${t.sheet} table`, 'press Set up again')) made.push(kind);
+    }
+    return made;
+  }
+  const readClinicConsents = () => readOwned('tblClinicConsent');
+  const writeClinicConsents = (cols, rows) => writeAddinTable('Clinic Consent', 'tblClinicConsent', cols, rows, false); // hidden: OWNED
+  const readDeskCollections = () => readOwned('tblDeskCollections');
+  const writeDeskCollections = (cols, rows) => writeAddinTable('Desk Collections', 'tblDeskCollections', cols, rows, false); // hidden: OWNED
+  const readFeeScheduleLog = () => readOwned('tblFeeScheduleLog');
+  const writeFeeScheduleLog = (cols, rows) => writeAddinTable('Fee Schedule Log', 'tblFeeScheduleLog', cols, rows, false); // hidden: OWNED
+
   // Header-only table creation (the clinic inbox, and the Payer Map in a workbook that starts without one), fail-safe
   // as described above. spec: {sheet, table}. label / retry word the errors.
   async function createHeaderTable(spec, cols, label, retry) {
@@ -724,7 +766,7 @@
         await ctx.sync().catch(failed('making the table'));
         home = s;
       }
-      home.visibility = Excel.SheetVisibility.visible;
+      home.visibility = spec.hidden ? Excel.SheetVisibility.hidden : Excel.SheetVisibility.visible;
       home.name = spec.sheet;
       wb.tables.getItem(STG(spec.table)).name = spec.table; // last: a reader only ever sees a complete table
       await ctx.sync().catch(failed('naming the table'));
@@ -999,6 +1041,7 @@
     readGuarantorRequests, writeGuarantorRequests, readPayerTests, writePayerTests, writePayerMapping, readPayerMapping, readFlowResults, writeFlowResults, readPreCheck, writePreCheck, readAccountAudits, readAccountAuditLines, writeAccountAudits, writeAccountAuditLines, dropAccountAuditLines, writePayerMetrics,
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
-    INBOX, readClinicInbox, createClinicInbox, writeImportRows, importXlsx, lockNameSheets, tidyTabs, TIDY_SHEETS, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
+    INBOX, readClinicInbox, createClinicInbox, FLOW_TABLES, readFlowTable, createFlowTables,
+    readClinicConsents, writeClinicConsents, readDeskCollections, writeDeskCollections, readFeeScheduleLog, writeFeeScheduleLog, writeImportRows, importXlsx, lockNameSheets, tidyTabs, TIDY_SHEETS, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

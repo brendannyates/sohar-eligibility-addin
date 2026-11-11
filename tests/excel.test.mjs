@@ -906,7 +906,17 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
   m.registerXlsx('b64-report', [{ name: 'Report', rows: [['Per Nbr', 'Zip'], ['001', '02134']] }]);
   await X.createClinicInbox(RL.INBOX_COLS);
   await flowAppends(m, inboxRows(4, 'Synthetic'));
-  const before = inboxSnapshot(m);
+  // v0.29: the rotation's flow-owned tables hold rows too, and must come through every write path unchanged.
+  const FLOW_COLS = { ledger: RL.LEDGER_COLS, history: RL.PATIENT_HISTORY_COLS, copay: RL.COPAY_ACTIVITY_COLS, cards: RL.CARD_ON_FILE_COLS, needs: RL.NEEDS_CHECK_COLS };
+  assert.deepEqual(await X.createFlowTables(FLOW_COLS), Object.keys(FLOW_COLS));
+  await m.Excel.run(async (ctx) => {
+    for (const [k, cols] of Object.entries(FLOW_COLS)) ctx.workbook.tables.getItem(X.FLOW_TABLES[k].table).rows.add(null, [cols.map((c) => `${k} ${c}`), cols.map((c) => `${k} ${c} 2`)]);
+    await ctx.sync();
+  });
+  const flowSnap = () => Object.values(X.FLOW_TABLES).map((t) => ({ info: m.tableInfo(t.table), rows: m.tableRows(t.table, true), vis: m.sheetVisibility(t.sheet) }));
+  const before = { inbox: inboxSnapshot(m), flow: flowSnap() };
+  assert.ok(before.flow.every((t) => t.vis === 'Hidden' && t.rows.length === 3), 'flow tables are hidden and hold the flow\'s rows');
+  const snapshot = () => ({ inbox: inboxSnapshot(m), flow: flowSnap() });
   const two = (cols) => [Object.fromEntries(cols.map((c) => [c, `${c} 1`])), Object.fromEntries(cols.map((c) => [c, `${c} 2`]))];
   const calls = {
     upsertPayerMap: () => X.upsertPayerMap({ nextgenPayerName: 'Plan Z', payerId: '01111', payerName: 'Z', confidence: 'Exact' }),
@@ -924,6 +934,7 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
     recoverAll: () => X.recoverAll(),
     activate: () => X.activate('Clinic Work Inbox'),
     createClinicInbox: () => X.createClinicInbox(RL.INBOX_COLS),
+    createFlowTables: () => X.createFlowTables(FLOW_COLS),
     lockNameSheets: () => X.lockNameSheets(),
     tidyTabs: () => X.tidyTabs(),
     dropAccountAuditLines: () => X.dropAccountAuditLines(),
@@ -938,7 +949,7 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
   const bad = [];
   for (const [k, f] of Object.entries(calls)) {
     try { await f(); } catch (e) { bad.push(`${k} threw ${e.message}`); continue; }
-    if (!isDeepStrictEqual(inboxSnapshot(m), before)) { bad.push(`${k} changed the inbox`); break; }
+    if (!isDeepStrictEqual(snapshot(), before)) { bad.push(`${k} changed the inbox or a flow table`); break; }
   }
   assert.deepEqual(bad, []);
   assert.deepEqual(await X.readClinicInbox(), expected(RL.INBOX_COLS, inboxRows(4, 'Synthetic')));
@@ -946,6 +957,10 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
   const src = readFileSync(new URL('../excel.js', import.meta.url), 'utf8');
   const owned = src.slice(src.indexOf('const OWNED = {'), src.indexOf('};', src.indexOf('const OWNED = {')));
   assert.doesNotMatch(owned, /Inbox/);
+  for (const t of Object.values(X.FLOW_TABLES)) {
+    assert.ok(!owned.includes(t.table), `${t.table} is not OWNED`);
+    assert.equal(src.split(t.table).length - 1, 1, `${t.table} is named once, in FLOW_TABLES`);
+  }
   assert.deepEqual(src.match(/tblClinicWorkInbox/g), ['tblClinicWorkInbox'], 'the table name appears once, in INBOX');
   const uses = [...src.matchAll(/INBOX\.(table|sheet)/g)].map((x) => src.lastIndexOf('async function', x.index)).map((i) => src.slice(i, src.indexOf('(', i)));
   assert.deepEqual([...new Set(uses)], ['async function readClinicInbox', 'async function createClinicInbox']);

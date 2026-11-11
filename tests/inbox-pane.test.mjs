@@ -26,7 +26,7 @@ function paneCode(X, state) {
 }
 
 function memoryAdapter(inbox) {
-  const db = { requests: [], tasks: null, notes: [], payerNotes: [], applied: [] }, writes = [];
+  const db = { requests: [], tasks: null, notes: [], payerNotes: [], consents: [], desk: [], applied: [] }, writes = [];
   const w = (k) => async (cols, rows) => { writes.push(k); db[k] = rows; return rows.length; };
   return {
     db, writes,
@@ -35,6 +35,8 @@ function memoryAdapter(inbox) {
     async readClinicNotes() { return db.notes; }, writeClinicNotes: w('notes'),
     async readClinicPayerNotes() { return db.payerNotes; }, writeClinicPayerNotes: w('payerNotes'),
     async readClinicWorkApplied() { return db.applied; }, writeClinicWorkApplied: w('applied'),
+    async readClinicConsents() { return db.consents; }, writeClinicConsents: w('consents'),
+    async readDeskCollections() { return db.desk; }, writeDeskCollections: w('desk'),
     writeTasks: w('tasks'),
   };
 }

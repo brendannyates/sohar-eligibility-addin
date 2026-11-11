@@ -5,6 +5,17 @@ Hard rules:
 - Extra patient data travels on the non-column `x` property, never as new template columns.
 - Add-in sheets are written only through `writeAddinTable` (fail-safe stage-and-swap). A new add-in table goes in `OWNED` in `excel.js`. Never write an add-in table in place, and never let formulas reference those sheets (each save replaces the sheet). Changes to save/read code must keep `tests/excel.test.mjs` green, including the failure sweeps.
 - The one exception is a flow-owned table: `Clinic Work Inbox` (`tblClinicWorkInbox`, `excel.js` `INBOX`). A Power Automate flow appends to it, so the add-in never rewrites, swaps, sorts, clears or trims it (a stage-and-swap would race the flow and drop rows). It is not in `OWNED`. The add-in only creates it once (`createClinicInbox`, header only, fail-safe) and reads it (`readClinicInbox`). `tests/excel.test.mjs` runs every mutating export against a workbook holding it and fails if one touches it; keep new write paths in that list. Build guide: `docs/clinic-inbox-flow.md`.
+  v0.29: the rotation's tables are flow-owned the same way (`excel.js` `FLOW_TABLES`: `tblEligibilityChecks` (the ledger),
+  `tblPatientHistory`, `tblCopayActivity`, `tblCardOnFile`, `tblNeedsCheck`; columns in `rules.LEDGER_COLS` and friends).
+  Created once, hidden (`createFlowTables`), read with `readFlowTable`, never written by the add-in. The same sweep covers them.
+  Build sheets: `docs/flows/`.
+- v0.29 clinic file v2 (`rules.clinicPack`): every patient with ANY upcoming visit at the location (guests too), only that
+  clinic's appointments in the record; very hidden `SE Appointments`, `SE Estimates` (ledger rows, never `Allowed`),
+  `SE History` (90 days, at most 5 per patient, scrubbed), `SE Copay` (card on file, newest OK to collect), `SE Fees` /
+  `SE Fee Rules` (the clinic's fee tab and its rules, split across rows under the cell limit); the visible `Clinic Day`
+  sheet (`CLINIC_DAY_COLS`, no MRN) is derived by `clinicDay` and CTT rewrites it. The structure lock is a hash only
+  (`XL.protectionHash`); the password is typed in the pane each export and never stored, logged or sent. Clinic Work kinds
+  `OK to collect` and `Collected` apply to the add-in-owned `Clinic Consent` and `Desk Collections` tables.
 - Synthetic data only in tests, fixtures, demo mode, and commits. No real names, MRNs, member IDs, or exports.
   The one exception is the generated block in `payer-knowledge.js` (Brendan, 10/28): real payer names and Sohar payer
   IDs, no patient data, notes or contracted rates. Regenerate it with `node scripts/build-payer-knowledge.mjs <master
@@ -38,7 +49,9 @@ Hard rules:
   balance in the patient view opens to it. 90867 is the MT (motor threshold) visit, 90869 the MTR (MT redo).
 - The West Coast Patient Responsibility Calculator's code lives in `fees.js` (`calcEstimate`, `calcInputs`,
   `calcPatient`), but its built-in rates never go in this repo: staff drop the calculator .html once, and
-  `parseCalculatorHtml` + `mergeSchedules` put the rates on the hidden fee sheets (a saved rate is never changed).
+  `parseCalculatorHtml` + `calculatorWins` put the rates on the hidden fee sheets. v0.29 (Brendan, 11/10): the calculator
+  is the source of truth, so its rate replaces a saved one for the same tab + payer + level + code, each change goes on
+  the hidden `Fee Schedule Log`, and rows only the saved schedule has (Gross, Cash, codes the calculator lacks) stay.
 - Per-code rules (v0.24): an Estimate Defaults row with a `Code` says how that code counts for the fee payer and
   `Plan` (Sohar's plan name; Brendan: payer + plan). Most specific wins: payer + plan, then the payer with no Plan,
   then "All payers" (`CODE_CLASSES`: deductible applies or waived, coinsurance, copay). A row with no Code and no Plan
@@ -72,13 +85,14 @@ Hard rules:
   tokens are `:root[data-theme="dark"]` in `style.css`, never a `prefers-color-scheme` query. The pane passes its
   choice to full screen on the URL (`?theme=`) and both send `{ type: 'theme' }` when it changes. Toolbars are
   refresh, full screen, light / dark (full screen's ⟳ sends `refresh` to the pane).
+  (The v0.29 clinic lookup webhook is called by the Clinic Template Tool only, never by this add-in.)
 - `VERIFICATION_COLS`, `DISCOVERY_COLS` and `record.FLOW_IMPORT_COLS` (the "MHS Eligibility - Discovery vs NextGen" Flow's CSV
   template, v0.21) match the Sohar CSV templates exactly, in order. Do not rename or reorder. The Flow file has no
   rateTable column, so Flow runs from it never estimate cost.
 - Output table columns (`PATIENT_COLS`, `REVIEW_COLS`) must match the template workbook. Changing the column count means shipping a new `Sohar_Eligibility_Template.xlsx`; a rename of the same column is applied in place by `replaceTable` (v0.12 Review Per Nbr -> MRN).
 - The patient key is the MRN (`core.keyOf`, PER-<Per Nbr> fallback). Key on it, never on Per Nbr, in anything saved or sent to Sohar. `cfg.payerTests` is the Config settings; Payer Tests rows travel as `cfg.payerTestRows`.
 - `payer-rules.js` is shared byte-identical with the Clinic Template Tool and ESK Tracker repos: never edit it here alone. The real Payer Credential Rules table (OneDrive CSV, imported to the editable `Payer Credential Rules` sheet) never goes in this repo, a test, a fixture or the demo. Besse approval is a flag only.
-- `core.js` and `rules.js` are also copied byte-identical into the Clinic Template Tool (it re-derives Clinic Eligibility files with them). After changing either, copy both into CTT in the same change and check with `git hash-object`. The Clinic Eligibility file (`rules.clinicPack`) never carries patient or guarantor names or DOBs (LASFIR instead), only the one clinic's patients, and never a `tblClinicMeta` table.
+- `core.js`, `rules.js` and (v0.29) `fees.js` are also copied byte-identical into the Clinic Template Tool (it re-derives Clinic Eligibility files with them and prices visits from `SE Fees`). After changing any, copy all three into CTT in the same change and check with `git hash-object`. The Clinic Eligibility file (`rules.clinicPack`) never carries patient or guarantor names or DOBs (LASFIR instead), only the one clinic's patients, and never a `tblClinicMeta` table.
 - No sheet (or download built from a sheet's columns) carries a patient's or subscriber's name or DOB (Brendan, 10/28): use `LASFIR` and keep the MRN. Names live in memory and on the very hidden `Import`, `Sohar Uploads` and `IR Uploads` sheets (`lockNameSheets`); only the Sohar import CSVs (`VERIFICATION_COLS` / `DISCOVERY_COLS` / `FLOW_IMPORT_COLS`) carry them. Sheets use the `*_SHEET_COLS` lists and `core.cellOf`. `tests/names.test.mjs` checks every sheet column list.
 - Every file is LF (`core.autocrlf=false`, no `.gitattributes`). Never save CRLF: it rewrites whole files in the diff and breaks the byte-identical `git hash-object` check for the shared files.
 - Routing changes (what counts as verification vs discovery, scope, the POS rule) need Brendan's explicit OK on the exact rule before coding.

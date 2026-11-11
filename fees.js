@@ -1278,6 +1278,35 @@
    * different rate for the same cell keeps the saved one and is counted in conflicts. Tabs the saved schedule lacks
    * (tab summary) come from the calculator. Returns a parsed-shaped {rows, tabs, skipped, counts, added, conflicts}.
    */
+  // v0.29 (Brendan, 11/10): the calculator is the source of truth for the rates it carries. Each rate it changes is logged.
+  const FEE_SCHEDULE_LOG_COLS = ['When', 'Tab', 'Payer', 'Level', 'Code', 'Old Rate', 'New Rate', 'By', 'Source'];
+  /**
+   * The calculator's rates over the saved schedule: a cell the calculator prices (tab, payer, level, code) takes its rate,
+   * a cell only the saved schedule has (Gross, Cash, codes the calculator lacks) is kept, and a calculator rate the saved
+   * schedule lacks is added. Returns mergeSchedules' shape plus changed: [{Tab, Payer, Level, Code, Old Rate, New Rate}].
+   */
+  function calculatorWins(savedRows, savedTabs, calc) {
+    const k = (r) => `${keyOf(r.Tab)}|${keyOf(r.Payer)}|${str(r.Level)}|${str(r.Code).toUpperCase()}`;
+    const fresh = new Map();
+    for (const r of calc.rows || []) { const n = num(r.Rate); if (n != null && n > 0 && !fresh.has(k(r))) fresh.set(k(r), r); }
+    const used = new Set(), changed = [], rows = [];
+    for (const r of savedRows || []) {
+      const c = fresh.get(k(r));
+      if (!c || used.has(k(r))) { rows.push(r); continue; }
+      used.add(k(r));
+      const was = num(r.Rate), now = num(c.Rate);
+      if (was == null || Math.abs(was - now) >= 0.005) changed.push({ Tab: str(r.Tab), Payer: str(r.Payer), Level: str(r.Level), Code: str(r.Code).toUpperCase(), 'Old Rate': was == null ? '' : was, 'New Rate': now });
+      rows.push(Object.assign({}, r, { Rate: now }));
+    }
+    let added = 0;
+    for (const [key, c] of fresh) if (!used.has(key)) { rows.push(c); added++; }
+    const tabs = (savedTabs || []).slice();
+    for (const t of calc.tabs || []) if (!tabs.some((x) => keyOf(x.name) === keyOf(t.name))) tabs.push(t);
+    const tabNames = new Set(rows.map((r) => str(r.Tab)));
+    return { rows, tabs, skipped: calc.skipped || [], added, changed, conflicts: changed.filter((c) => c['Old Rate'] !== '').length,
+      counts: { tabs: tabNames.size, codes: new Set(rows.map((r) => str(r.Code).toUpperCase())).size, rows: rows.length, unparsed: 0 } };
+  }
+
   function mergeSchedules(savedRows, savedTabs, calc) {
     const k = (r) => `${keyOf(r.Tab)}|${keyOf(r.Payer)}|${str(r.Level)}|${str(r.Code).toUpperCase()}`;
     const have = new Map();
@@ -1534,7 +1563,7 @@
     ESTIMATE_DEFAULT_COLS, defaultsFor, rememberDefaults, CODE_CLASSES, codeClassOf, ruleLabel, countsTowardDeductible, codeRulesFor, rememberCodeRule,
     coinsRate, estimateMath, partialNote, benefitsMissing, estimateText, prepareEstimates, estimatePatient, usd,
     metaMatches, parseWarnings,
-    isCalculatorHtml, parseCalculatorHtml, mergeSchedules, CALC_PLANS, CALC_MODES, CALC_MODE_TOGGLES, calcPlanType, calcModeOf, calcEstimate, calcInputs, calcPatient, calcSeries, calcText,
+    isCalculatorHtml, parseCalculatorHtml, mergeSchedules, calculatorWins, FEE_SCHEDULE_LOG_COLS, CALC_PLANS, CALC_MODES, CALC_MODE_TOGGLES, calcPlanType, calcModeOf, calcEstimate, calcInputs, calcPatient, calcSeries, calcText,
     DEMO_WORKBOOK, demoSchedule,
   };
 });
