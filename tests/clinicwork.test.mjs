@@ -44,14 +44,14 @@ test('a returned Clinic Eligibility file: Clinic Work and SE Info read by sheet 
   assert.deepEqual([...m.done], [['900001|Fix member ID in NextGen', `Yes (clinic ${LOC})`]], 'the admin\'s own Done is not undone by the clinic');
   assert.deepEqual(m.notes, [{ MRN: '900002', Location: LOC, Note: 'Brings the new card Monday', By: 'Front desk', When: at(9).toISOString() }]);
   assert.deepEqual(m.payerNotes, [{ 'NextGen Payer': 'Zenith CA', Location: LOC, 'Card Says': 'Zenith CA PPO', Note: 'group 0012', By: 'Front desk', When: at(9).toISOString() }]);
-  assert.deepEqual(m.counts, { reverifyAdded: 1, reverifyRemoved: 0, doneSet: 1, doneCleared: 0, doneNotes: 0, tasksChanged: 1, notes: 1, payerNotes: 1, skipped: 0, otherClinic: 0, old: 0, applied: 5 });
+  assert.deepEqual(m.counts, { reverifyAdded: 1, reverifyRemoved: 0, doneSet: 1, doneCleared: 0, doneNotes: 0, tasksChanged: 1, notes: 1, payerNotes: 1, consents: 0, collected: 0, skipped: 0, otherClinic: 0, old: 0, applied: 5 });
   assert.deepEqual(R.mergeClinicWork(work, ctx), m, 'grid and object rows agree');
   // The same saved file brought back a second time changes nothing.
   const twice = R.mergeClinicWork(sheetOf(wb, R.SE_SHEETS.work).rows, { ...ctx, requests: m.requests, notes: m.notes, payerNotes: m.payerNotes, applied: m.applied });
   assert.deepEqual([twice.counts.old, twice.counts.applied, twice.done.size, twice.counts.reverifyAdded], [5, 0, 0, 0]);
   // A blank Clinic Work sheet (the file sent back untouched) changes nothing.
   const none = R.mergeClinicWork(sheetOf(await returnedFile([], []), R.SE_SHEETS.work).rows, ctx);
-  assert.deepEqual(none.counts, { reverifyAdded: 0, reverifyRemoved: 0, doneSet: 0, doneCleared: 0, doneNotes: 0, tasksChanged: 0, notes: 0, payerNotes: 0, skipped: 0, otherClinic: 0, old: 0, applied: 0 });
+  assert.deepEqual(none.counts, { reverifyAdded: 0, reverifyRemoved: 0, doneSet: 0, doneCleared: 0, doneNotes: 0, tasksChanged: 0, notes: 0, payerNotes: 0, consents: 0, collected: 0, skipped: 0, otherClinic: 0, old: 0, applied: 0 });
 });
 
 test('pane wiring: Clinic Template Tool file in the Admin tab and full screen, both note tables, the demo adapter', () => {
@@ -82,7 +82,7 @@ test('pane wiring: Clinic Template Tool file in the Admin tab and full screen, b
 
 test('release: VERSION, package.json and every ?v= agree', () => {
   const v = src('app.js').match(/const VERSION = '([\d.]+)';/)[1];
-  assert.equal(v, '0.28.2');
+  assert.equal(v, '0.29.0');
   assert.equal(JSON.parse(src('package.json')).version, v);
   for (const f of ['index.html', 'dashboard.html', 'save.html']) {
     const found = [...src(f).matchAll(/\?v=([\d.]+)/g)].map((x) => x[1]);

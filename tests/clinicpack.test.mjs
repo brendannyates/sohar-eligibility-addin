@@ -114,9 +114,12 @@ test('clinicPack: only the clinic\'s patients, sheets in order, hidden SE tables
   assert.equal(pack.name, `Clinic Eligibility - San Rafael ${C.localDate(TODAY)}.xlsx`);
   assert.deepEqual(pack.webExtension, { id: 'cf213823-6d83-43e7-b7c9-37666b4d7c3d', version: '1.0.0.1' });
   const { bytes, wb, tables } = await roundTrip(pack);
-  assert.deepEqual(wb.sheets.map((s) => [s.name, s.hidden]), [['Read Me', false], ['Clinic Work', false], ['SE Info', true], ['SE Patients', true],
-    ['SE Results', true], ['SE Review', true], ['SE Payers', true], ['SE Done', true], ['Payer Credential Rules', true]]);
-  assert.deepEqual(Object.values(R.SE_SHEETS), wb.sheets.map((s) => s.name));
+  // v0.29: Clinic Day first, then Clinic Work and Read Me; every back-room sheet very hidden.
+  assert.deepEqual(wb.sheets.map((s) => [s.name, s.hidden]), [['Clinic Day', false], ['Clinic Work', false], ['Read Me', false], ['SE Info', true], ['SE Patients', true],
+    ['SE Results', true], ['SE Review', true], ['SE Payers', true], ['SE Done', true], ['SE Appointments', true], ['SE Estimates', true], ['SE History', true],
+    ['SE Copay', true], ['SE Fees', true], ['SE Fee Rules', true], ['Payer Credential Rules', true]]);
+  assert.deepEqual([...Object.values(R.SE_SHEETS), ...Object.values(R.SE2_SHEETS)].sort(), wb.sheets.map((s) => s.name).sort());
+  assert.ok(pack.sheets.filter((s) => s.hidden).every((s) => s.hidden === 'veryHidden'), 'very hidden, not just hidden');
   assert.deepEqual(tables['Clinic Work'][0], R.CLINIC_WORK_COLS, 'Clinic Work: header only');
   assert.equal(tables['Clinic Work'].length, 1);
   assert.deepEqual(pack.sheets.find((s) => s.name === 'Clinic Work').textColumns, R.CLINIC_WORK_COLS, 'typed keys keep leading zeros');
@@ -338,11 +341,11 @@ test('app.js cttWorkbook: SE Done takes Done and Clinic Note from the NextGen Ta
     : t['Task Key'] === fixKey ? { ...t, Done: 'x', 'Clinic Note': 'billing has the new card' } : t));
   const state = { tasks: src.tasks.map((t) => ({ ...t, 'Clinic Note': '' })), demo: false, results: src.results, review: src.review, learning: [], metrics: null,
     cfg: src.cfg, payerRules: R.payerRulesFrom(src.payerRuleRows) };
-  const X = { async readTasks() { return sheet; } };
+  const X = { async readTasks() { return sheet; }, async readClinicConsents() { return []; }, async readDeskCollections() { return []; } };
   // cttWorkbook runs at new Date(): pin it to the fixture's day, or the 10/26 visit drops out once that date passes.
   class FixedDate extends Date { constructor(...a) { super(...(a.length ? a : [TODAY.getTime()])); } static now() { return TODAY.getTime(); } }
-  const make = new Function('R', 'C', 'XL', 'X', 'state', 'inScopePatients', 'VERSION', 'Date', `${body}\nreturn { cttWorkbook };`);
-  const { cttWorkbook } = make(R, C, XL, X, state, () => src.patients, '0.14.0', FixedDate);
+  const make = new Function('R', 'C', 'XL', 'X', 'state', 'inScopePatients', 'VERSION', 'Date', 'readFlowRows', 'feesOn', `${body}\nreturn { cttWorkbook };`);
+  const { cttWorkbook } = make(R, C, XL, X, state, () => src.patients, '0.14.0', FixedDate, async () => ({}), () => false);
   const f = await cttWorkbook(LOC);
   const wb = await XL.readWorkbook(f.bytes);
   const done = R.tableObjects(wb.sheets.find((s) => s.name === 'SE Done').rows);
@@ -390,7 +393,7 @@ test('mergeClinicWork: requests, Done (No only clears clinic-set Done), notes an
   assert.deepEqual(m.payerNotes, [{ 'NextGen Payer': 'Cigna', Location: 'San Rafael', 'Card Says': 'Cigna Open Access Plus', Note: 'New cards', By: 'Front desk', When: '2026-10-22T17:12:00Z' }]);
   assert.deepEqual(Object.keys(m.notes[0]), R.CLINIC_NOTE_COLS);
   assert.deepEqual(Object.keys(m.payerNotes[0]), R.CLINIC_PAYER_NOTE_COLS);
-  assert.deepEqual(m.counts, { reverifyAdded: 1, reverifyRemoved: 1, doneSet: 1, doneCleared: 1, doneNotes: 0, tasksChanged: 2, notes: 1, payerNotes: 1, skipped: 1, otherClinic: 0, old: 0, applied: 11 });
+  assert.deepEqual(m.counts, { reverifyAdded: 1, reverifyRemoved: 1, doneSet: 1, doneCleared: 1, doneNotes: 0, tasksChanged: 2, notes: 1, payerNotes: 1, consents: 0, collected: 0, skipped: 1, otherClinic: 0, old: 0, applied: 11 });
   assert.deepEqual(m.applied.find((r) => r.Kind === 'Payer note'), { Location: 'San Rafael', Kind: 'Payer note', Key: 'Cigna', When: '2026-10-22T17:12:00Z', Value: '' });
   assert.deepEqual(m.applied.filter((r) => r.Kind === 'Task done').map((r) => r.Value), ['Yes', 'No', 'No', 'No', 'No', 'Yes'], 'the tick acted on');
   assert.deepEqual(Object.keys(m.applied[0]), R.CLINIC_APPLIED_COLS);

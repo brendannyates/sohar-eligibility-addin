@@ -158,3 +158,14 @@ test('Sohar Results and NextGen Tasks sheets get LASFIR and MRN, no names', asyn
   assert.equal((await X.readTable('tblSoharResults'))[0].LASFIR, 'ZZABEN');
   assert.equal((await X.readTasks())[0].LASFIR, 'ZZABEN');
 });
+
+test('v0.29: the rotation, consent, desk, clinic file and Clinic Day column lists carry no name or DOB column', () => {
+  const R = createRequire(import.meta.url)('../rules.js');
+  const lists = ['LEDGER_COLS', 'PATIENT_HISTORY_COLS', 'COPAY_ACTIVITY_COLS', 'CARD_ON_FILE_COLS', 'NEEDS_CHECK_COLS', 'LOOKUP_LOG_COLS',
+    'CLINIC_CONSENT_COLS', 'DESK_COLLECTION_COLS', 'SE_APPT_COLS', 'SE_EST_COLS', 'SE_HISTORY_COLS', 'SE_COPAY_COLS', 'CLINIC_DAY_COLS'];
+  for (const k of lists) {
+    assert.ok(Array.isArray(R[k]), k);
+    assert.deepEqual(R[k].filter((c) => NAME_COLS.includes(c) || /name on file|dob|birth/i.test(c)), [], `${k} has no name or DOB columns`);
+  }
+  assert.ok(!R.CLINIC_DAY_COLS.includes('MRN'), 'Clinic Day shows no MRN (the patient view does)');
+});

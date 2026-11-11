@@ -1,6 +1,16 @@
 {
   "updates": [
     {
+      "id": "2026-11-10-clinic-files-v2",
+      "date": "2026-11-10",
+      "bullets": [
+        "New: Clinic Template Tool files now list every patient with a visit booked at the clinic, including patients from other clinics, and open on a Clinic Day tab with each visit's coverage, copay, estimate, card on file and OK to collect.",
+        "New: Type the lock password above the clinic list before you save a Clinic Template Tool file. It locks the file's tabs and is never saved.",
+        "New: Set up the rotation tables (Admin, under the clinic inbox) so the rotation can write its checks into this workbook.",
+        "Changed: A calculator upload now replaces saved rates it covers, and lists each change on the hidden Fee Schedule Log."
+      ]
+    },
+    {
       "id": "2026-11-08-bell-home",
       "date": "2026-11-08",
       "bullets": [
