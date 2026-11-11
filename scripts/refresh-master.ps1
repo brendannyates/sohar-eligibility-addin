@@ -50,25 +50,31 @@ try {
   $excel = New-Object -ComObject Excel.Application
   $excel.Visible = $false; $excel.DisplayAlerts = $false; $excel.AskToUpdateLinks = $false; $excel.EnableEvents = $false
   $wb = $excel.Workbooks.Open($Workbook, 0, $false)
-  # Wait for each query in turn, so RefreshAll returns only when the data is in.
-  foreach ($c in @($wb.Connections)) {
-    try { if ($c.Type -eq 1) { $c.OLEDBConnection.BackgroundQuery = $false } } catch { }
+  # Nothing to refresh yet: close without saving, so the master is never re-saved for no reason.
+  if (@($wb.Queries).Count -eq 0) {
+    Write-Line 'skipped' 'no Power Query in the workbook yet (docs/powerquery/README.md)'
+    $code = 2
+  } else {
+    # Wait for each query in turn, so RefreshAll returns only when the data is in.
+    foreach ($c in @($wb.Connections)) {
+      try { if ($c.Type -eq 1) { $c.OLEDBConnection.BackgroundQuery = $false } } catch { }
+    }
+    $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
+    $wb.RefreshAll()
+    $excel.CalculateUntilAsyncQueriesDone()
+    if ((Get-Date) -gt $deadline) { throw "the refresh took longer than $TimeoutMinutes minutes" }
+    $errors = @()
+    foreach ($q in @($wb.Queries)) { try { if ($q.Refreshing) { $errors += "$($q.Name) still refreshing" } } catch { } }
+    $counts = foreach ($t in $Tables) {
+      $n = $null
+      foreach ($s in @($wb.Worksheets)) { try { $lo = $s.ListObjects.Item($t); $n = $lo.ListRows.Count; break } catch { } }
+      if ($null -ne $n) { "$t=$n" } else { "$t=missing" }
+    }
+    if ($errors.Count) { throw ($errors -join '; ') }
+    $wb.Save()
+    Write-Line 'ok' ($counts -join ' ')
+    $code = 0
   }
-  $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
-  $wb.RefreshAll()
-  $excel.CalculateUntilAsyncQueriesDone()
-  if ((Get-Date) -gt $deadline) { throw "the refresh took longer than $TimeoutMinutes minutes" }
-  $errors = @()
-  foreach ($q in @($wb.Queries)) { try { if ($q.Refreshing) { $errors += "$($q.Name) still refreshing" } } catch { } }
-  $counts = foreach ($t in $Tables) {
-    $n = $null
-    foreach ($s in @($wb.Worksheets)) { try { $lo = $s.ListObjects.Item($t); $n = $lo.ListRows.Count; break } catch { } }
-    if ($null -ne $n) { "$t=$n" } else { "$t=missing" }
-  }
-  if ($errors.Count) { throw ($errors -join '; ') }
-  $wb.Save()
-  Write-Line 'ok' ($counts -join ' ')
-  $code = 0
 } catch {
   # Never save a half-refreshed workbook.
   Write-Line 'failed' ($_.Exception.Message -replace '\s+', ' ')
