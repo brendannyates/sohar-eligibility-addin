@@ -14,6 +14,9 @@ param(
   [switch]$WhatIf
 )
 $ErrorActionPreference = 'Stop'
+# Excel opens a relative path from its own folder, and the open-in-Excel check compares full names: use the full path.
+if (-not [IO.Path]::IsPathRooted($Workbook)) { $Workbook = Join-Path (Get-Location).Path $Workbook }
+$Workbook = [IO.Path]::GetFullPath($Workbook)
 $Tables = 'tblNGAppts', 'tblEligibilityChecks', 'tblPatientHistory', 'tblCardOnFile', 'tblCopayActivity', 'tblOpenTickets', 'tblPatientBalances'
 $started = Get-Date
 
