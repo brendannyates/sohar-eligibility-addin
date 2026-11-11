@@ -7,7 +7,7 @@ Microsoft has no unattended Power Query refresh for a workbook in Excel for the 
 So this script opens the master in **desktop Excel** on Brendan's PC, refreshes every query, saves and closes.
 
 ## What it does
-1. **Skips** (exit 2) when the workbook is open anywhere it can see: Excel's `~$` owner file, a file lock, or an Excel on this PC with the file open. It never closes or kills anyone's Excel.
+1. **Skips** (exit 2), and closes without saving, when the workbook has no Power Query yet. It also skips when the workbook is open anywhere it can see: Excel's `~$` owner file, a file lock, or an Excel on this PC with the file open. It never closes or kills anyone's Excel.
 2. **Refreshes.** It opens the workbook hidden, turns off background refresh for each connection, runs `RefreshAll`, then waits with `CalculateUntilAsyncQueriesDone` (timeout `-TimeoutMinutes`, default 10).
 3. **Saves** only when every query finished (exit 0). Otherwise it closes without saving (exit 1), so a failed refresh never leaves half-loaded tables.
 4. **Logs** one line to `Data Drop\refresh.log`:
@@ -26,7 +26,7 @@ So this script opens the master in **desktop Excel** on Brendan's PC, refreshes 
 
 ## Schedule it (Windows Task Scheduler)
 ```powershell
-$a = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File "<add-in repo>\scripts\refresh-master.ps1"'
+$a = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Argument '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "<add-in repo>\scripts\refresh-master.ps1"'
 $t = New-ScheduledTaskTrigger -Daily -At 7:30am
 Register-ScheduledTask -TaskName 'Sohar master refresh' -Action $a -Trigger $t -Description 'Refresh the master workbook Power Query at 7:30 AM'
 ```
