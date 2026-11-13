@@ -543,6 +543,31 @@
     }
     return out.sort((a, b) => pulledMs(b.rows[0]) - pulledMs(a.rows[0]));
   }
+  /**
+   * Is the plan-year estimate due for a patient's Flow import row (section 4)? p: a built patient; v: the chart policy
+   * sent (verifyRows entry) or null (discovery). ctx: {results (Sohar Results rows), history (Verification History),
+   * flow (Flow Results), today, planYear (fees.planYearEstimateDue)}. The policy is the patient's latest trusted
+   * verification of that policy (any policy for discovery). With none eligible on file, the Flow decides: due (the
+   * Flow estimates only an eligible picked policy), except a VA / TriWest / TRICARE chart payer.
+   * Returns {due, basis, policyKey, reason}.
+   */
+  function estimateDueFor(p, v, ctx) {
+    const c = ctx || {};
+    const key = C.keyOf(p);
+    const mine = (c.results || []).filter((r) => mrnSame(C.keyOf(r), key));
+    const pol = C.pickVerification(C.policyResults(mine, v || null));
+    const govt = /veterans?'?s*affairs|va|tris*-?west|tris*-?care|champva/i;
+    if (!pol || !/^complete.eligible/i.test(str(pol['Sohar Status']))) {
+      if (govt.test(str(p && p['Primary Payer']))) return { due: false, basis: '', policyKey: '', reason: 'VA, TriWest or TRICARE: $0 expected' };
+      return { due: true, basis: 'Unknown', policyKey: '', reason: 'no eligible verification on file: the Flow estimates the policy it picks if eligible' };
+    }
+    const pk = policyKey(pol['Sohar payerId'], pol['Sohar Member ID'] || (v && v.memberId));
+    const hist = (c.history || []).filter((h) => mrnSame(h.MRN, key) && str(h['Policy Key']) === pk)
+      .concat((c.flow || []).filter((f) => mrnSame(f.MRN, key) && (!str(f['Policy Key']) || str(f['Policy Key']) === pk)));
+    const basis = resetBasisFor(c.flow, pk);
+    const plan = typeof c.planYear === 'function' ? c.planYear({ ...pol, 'Reset Basis': basis || pol['Reset Basis'] }, hist, c.today || new Date()) : { due: true, basis: 'Unknown', reason: '' };
+    return { ...plan, policyKey: pk };
+  }
   /** The newest Reset Basis recorded for a policy in Flow Results rows ('' when none). */
   function resetBasisFor(flowRows, key) {
     const k = str(key);
@@ -848,5 +873,5 @@
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,
     addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName,
     // v0.31
-    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, mergeHistory, policyTimeline, resetBasisFor };
+    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor };
 });

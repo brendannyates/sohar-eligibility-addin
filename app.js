@@ -713,7 +713,7 @@
         // "MRN ids since": Sohar checks created before this time carry the Per Nbr as their id, later ones the MRN.
         const since = { setting: 'MRN ids since', value: utcStamp(new Date()), what: 'When this workbook started sending the MRN (not the Per Nbr) as the Sohar id. Sohar results created before then are matched by Per Nbr. Set by the add-in; do not change.' };
         // v0.31: the per-service-line re-verify rows, with the one-time migration from Re-verify days / Re-verify in new month.
-        const added = await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.reverifyConfigRows(state.cfg.raw), C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS, START_CONFIG_ROWS)).catch((e) => { console.warn('Config learning / re-verify rows not added', e); return []; });
+        const added = await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.reverifyConfigRows(state.cfg.raw), C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS, F ? F.PLAN_YEAR_CONFIG_ROWS : [], START_CONFIG_ROWS)).catch((e) => { console.warn('Config learning / re-verify rows not added', e); return []; });
         const reread = (added || []).some((a) => /^Re-verify|^Include in import|^Plan-year/.test(a));
         if (reread || !String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
       }
@@ -791,7 +791,8 @@
       const pt = state.cfg.payerTests || C.PAYER_TEST_DEFAULTS;
       state.exports = C.buildExports(res.patients, { ...state.cfg, guarantorRequests: state.guarantorActive, mappingDiscovery: pt.mappingDiscovery !== false });
       // v0.21: the Sohar Flow import (one row per patient, the Flow's own CSV template), from the same patients.
-      state.exports.flow = REC.flowImportRows(res.patients, state.cfg).rows;
+      state.flowCfg = await flowImportCfg();
+      state.exports.flow = REC.flowImportRows(res.patients, state.flowCfg).rows;
       await X.writePayerMapping(C.MAPPING_SHEET_COLS, state.exports.mapping).catch((e) => { console.error(e); sheetWarn.push(`Payer Mapping sheet not updated: ${e.message}`); });
       state.exports.payerTests = [];
       if (pt.on) {
@@ -832,9 +833,9 @@
       const nv = state.exports.verification.length, nd = state.exports.discovery.length;
       const nvp = new Set(state.exports.verification.map((r) => r.id)).size;
       $('btnDlVer').disabled = !nv; $('btnDlDisc').disabled = !nd;
-      const flowOut = REC.flowImportRows(state.patients || res.patients, state.cfg), nf = flowOut.rows.length;
+      const flowOut = REC.flowImportRows(state.patients || res.patients, state.flowCfg), nf = flowOut.rows.length;
       $('btnDlFlow').disabled = !nf;
-      $('fnFlow').textContent = `${nf} patient${nf === 1 ? '' : 's'}${flowOut.skipped.length ? `, ${flowOut.skipped.length} left out` : ''} · ${REC.flowImportFileName()}`;
+      $('fnFlow').textContent = `${nf} patient${nf === 1 ? '' : 's'}${flowOut.estimates ? `, ${flowOut.estimates} plan-year estimate${flowOut.estimates === 1 ? '' : 's'}` : ''}${flowOut.skipped.length ? `, ${flowOut.skipped.length} left out` : ''} · ${REC.flowImportFileName()}`;
       $('fnVer').textContent = `${nvp} patient${nvp === 1 ? '' : 's'}${nv > nvp ? ` (${nv} rows: ${nv - nvp} with two insurances)` : ''} · ${C.fileName('verification')}`;
       const ng = state.exports.discovery.filter((r) => /-G$/.test(r.id)).length;
       $('fnDisc').textContent = `${nd - ng} patient${nd - ng === 1 ? '' : 's'}${ng ? ` + ${ng} guarantor${ng === 1 ? '' : 's'}` : ''} · ${C.fileName('discovery')}`;
@@ -1668,16 +1669,64 @@
   /** The Sohar Flow import (v0.21): REC.FLOW_IMPORT_COLS, one row per patient; says who was left out and why. */
   async function downloadFlowImport() {
     if (!state.patients) throw new Error('Upload the NextGen report first (step 1).');
-    const out = REC.flowImportRows(state.patients, state.cfg);
-    if (!out.rows.length) throw new Error('No patients for the Sohar Flow file (none in scope, or all verified recently).');
+    const out = REC.flowImportRows(state.patients, state.flowCfg || await flowImportCfg());
+    if (!out.rows.length) throw new Error('No patients for the Sohar Flow file (none in scope, or all already covered).');
     await saveCSV(REC.flowImportFileName(), REC.FLOW_IMPORT_COLS, out.rows, 'preflight');
     const why = new Map();
     for (const s of out.skipped) why.set(s.why, (why.get(s.why) || 0) + 1);
     const parts = [`${out.rows.length} patient${out.rows.length === 1 ? '' : 's'} in the Sohar Flow file.`];
     if (why.size) parts.push(`Left out: ${[...why].map(([w, n]) => `${n} ${w}`).join('; ')}.`);
-    if (!String((state.cfg && state.cfg.tin) || '').trim()) parts.push('Config TIN is blank, so the tin column is empty.');
-    note('preflight', parts.join(' '), why.size || !(state.cfg && state.cfg.tin) ? 'warn' : 'ok');
+    if (out.estimates) {
+      const noRates = out.rows.filter((r) => r.estimate === 'yes' && !r.rateTable).length;
+      parts.push(`${out.estimates} plan-year cost estimate${out.estimates === 1 ? '' : 's'} asked for (90792, 99214, 99215)${noRates ? `; ${noRates} with no contracted rates (${feesOn() ? 'map the payer on Fee Payer Map' : 'Config Fee estimates is Off'}), so Sohar cannot price ${noRates === 1 ? 'it' : 'them'}` : ''}.`);
+    }
+    note('preflight', parts.join(' '), why.size ? 'warn' : 'ok');
     markDone(2); setCurrent(3);
+  }
+
+  /**
+   * v0.31: what the Flow import needs besides the patients: estimate (fees.planYearEstimateDue through
+   * record.estimateDueFor, from Sohar Results, Verification History and Flow Results) and rateTable (fees.rateTableFor:
+   * the visit's fee tab, MD/NP, the chart payer plus the payers discovery finds most for the patient's state, from Payer
+   * Outcomes). Rates only while Config Fee estimates is On (the fee sheets are read only then). A read error leaves that
+   * part out (estimate: the Flow decides; rates: blank), never a guess.
+   */
+  async function flowImportCfg() {
+    const cfg = state.cfg || {};
+    const results = (await currentResults().catch(() => null)) || [];
+    const history = await currentHistory().catch(() => []);
+    const flow = await currentFlow().catch(() => []);
+    const today = new Date();
+    const planYear = F ? F.planYearEstimateDue : null;
+    let rates = null;
+    if (F && feesOn()) {
+      try {
+        const f = await loadFeeData();
+        if (f.schedule.length) {
+          const outcomes = state.outcomes || await X.readPayerOutcomes().catch(() => []);
+          const stateOf = new Map((state.patients || []).map((p) => [C.keyOf(p), String(p.State || '').toUpperCase()]));
+          rates = {
+            index: F.feeIndex(f.schedule, F.metaMatches(f.meta, f.schedule.length) ? F.readMeta(f.meta).tabSummary : []),
+            locationRows: PK ? PK.mergeFeeLocations(f.locations) : f.locations, homeRows: f.homes,
+            payerMap: PK ? PK.mergeFeePayerMap(f.payerMap) : f.payerMap, teleKeywords: cfg.teleKeywords || ['Tele'],
+            codes: F.planYearCodes(cfg.raw), common: F.discoveryPayers(outcomes, (k) => stateOf.get(k) || '', 8),
+          };
+        }
+      } catch (e) { console.warn('Flow rate table not built', e); rates = null; }
+    }
+    const soharName = (id) => { const p = (state.soharPayers || []).find((x) => String(x.payerId) === String(id)); return p ? p.payerName : ''; };
+    return {
+      specialty: cfg.specialty,
+      estimateOf: (p, v) => (planYear ? REC.estimateDueFor(p, v, { results, history, flow, today, planYear }) : false),
+      rateTableOf: (p, v) => {
+        if (!rates) return null;
+        const chartId = (v && v.payerId) || p['Sohar payerId'];
+        const payers = [{ payerId: chartId, payerName: (v && v.payerName) || soharName(chartId) || p['Primary Payer'] }]
+          .concat(rates.common.get(String(p.State || '').toUpperCase()) || []);
+        const x = p.x || {};
+        return F.rateTableFor({ location: x.location, provider: x.rendering, event: p['Next Event'] }, { ...rates, payers }).rateTable;
+      },
+    };
   }
 
   // ---------- step 3: Sohar results ----------

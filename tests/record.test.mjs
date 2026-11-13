@@ -485,3 +485,19 @@ test('projection: a visit\'s code rules decide whether it counts toward the dedu
   assert.deepEqual(p.rows.map((r) => [r.toward, r.ruled]), [[false, true], [true, false]]);
   assert.deepEqual([p.ded.applied, p.oop.applied], [100, 200], 'copays and waived visits still count toward the OOP max');
 });
+
+test('estimateDueFor: the policy\'s latest verification and its Verification History / Flow estimates decide', () => {
+  const p = { MRN: '760001', 'Primary Payer': 'Synth Mutual' };
+  const r = { MRN: '760001', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Date': '2026-11-01T17:00:00Z', 'Sohar payerId': 'SM1',
+    'Sohar Payer': 'Synth Mutual', 'Sohar Member ID': 'SYN1234', 'Coverage Start': '01/01/2026', Match: 'MRN', sentPayerId: 'SM1' };
+  const v = { payerId: 'SM1', memberId: 'SYN1234', payerName: 'Synth Mutual' };
+  const ctx = { results: [r], history: [], flow: [], today: new Date(Date.UTC(2026, 10, 12)), planYear: F.planYearEstimateDue };
+  assert.deepEqual([REC.estimateDueFor(p, v, ctx).due, REC.estimateDueFor(p, v, ctx).policyKey], [true, 'SM1#1234']);
+  const done = { ...ctx, flow: [{ MRN: '760001', 'Policy Key': 'SM1#1234', 'Est 99214': '40.11', 'Last Updated': '2026-03-01T17:00:00Z' }] };
+  assert.equal(REC.estimateDueFor(p, v, done).due, false, 'estimated this plan year');
+  const other = { ...ctx, flow: [{ MRN: '760001', 'Policy Key': 'ZZ9#0000', 'Est 99214': '40.11', 'Last Updated': '2026-03-01T17:00:00Z' }] };
+  assert.equal(REC.estimateDueFor(p, v, other).due, true, 'another policy\'s estimate does not count');
+  assert.equal(REC.estimateDueFor(p, v, { ...ctx, results: [{ ...r, 'OOP Status': 'Met' }] }).due, false, 'OOP met');
+  assert.equal(REC.estimateDueFor({ MRN: '760009', 'Primary Payer': 'Synth Mutual' }, null, ctx).due, true, 'nothing on file: the Flow decides');
+  assert.equal(REC.estimateDueFor({ MRN: '760009', 'Primary Payer': 'TriWest Healthcare Alliance' }, null, ctx).due, false);
+});

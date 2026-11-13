@@ -110,7 +110,7 @@
           </div>
           <div class="extrafile">
             <button class="primary filebtn alt" id="btnDlFlow" disabled><span>Sohar Flow file (Discovery vs NextGen)</span><span class="fname" id="fnFlow"></span></button>
-            <p class="hint">For the MHS Eligibility - Discovery vs NextGen Flow in Sohar, in its CSV template: one row per patient, discovery checked against the NextGen policy. Use it instead of the two files above, not with them. Cost estimates do not run from a CSV (the Flow's rate table has no CSV column). Config <b>TIN</b> and <b>Sohar provider group</b> fill their columns.</p>
+            <p class="hint">For the MHS Eligibility - Discovery vs NextGen Flow in Sohar, in its CSV template: one row per patient, discovery checked against the NextGen policy. Use it instead of the two files above, not with them. Cost estimates run from this file too: a policy due its once-a-plan-year estimate gets <b>estimate</b> = yes and a rate table for 90792, 99214 and 99215 (Config <b>Plan-year estimate codes</b>; rates from the fee schedule, so Config <b>Fee estimates</b> must be On). The provider group follows the patient's state; the Flow looks up the TIN.</p>
           </div>
           <div id="mapFile" class="extrafile" hidden>
             <button class="primary filebtn alt" id="btnDlMap" disabled><span>Payer mapping discovery</span><span class="fname" id="fnMap"></span></button>

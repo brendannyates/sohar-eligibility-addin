@@ -209,7 +209,7 @@
       // v0.30: the clinic workbook's Start Here page (links "Label | https://..." separated by ;, and who to ask).
       startLinks: String(cfg['Start Here links'] ?? '').split(';').map((x) => x.split('|').map((y) => y.trim())).filter((x) => x[0] && /^https:\/\//i.test(x[1] || '')).map(([label, url]) => ({ label, url })),
       startContact: String(cfg['Start Here contact'] ?? '').trim(),
-      tin: String(cfg['TIN'] ?? '').trim(), providerGroup: String(cfg['Sohar provider group'] ?? '').trim(), // v0.21: Sohar Flow import
+      // v0.31: no TIN or provider group rows (the Flow template has the TINs; record.PROVIDER_GROUPS names the group by state).
       teleKeywords: String(cfg['Telehealth keywords'] || 'Tele').split(/[;,]/).map((s) => s.trim()).filter(Boolean),
       posTele: String(cfg['POS code: telehealth'] || '10').trim(),
       posOffice: String(cfg['POS code: office'] || '11').trim(),
