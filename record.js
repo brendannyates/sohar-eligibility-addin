@@ -446,6 +446,18 @@
    * file, or matched by name only / not at all are left out (they may be someone else). source: 'Import' or 'Dashboard';
    * blank = by match (an id match is Import, else Dashboard).
    */
+  /**
+   * The Sohar ids in a set of uploaded result files that the 7 AM rotation wrote ("… (rotation).csv", lib.js writeImports):
+   * their history rows are Source Rotation, not Import, even though they match by MRN. files: [{name, records}].
+   */
+  function rotationIds(files) {
+    const ids = new Set();
+    for (const f of files || []) { if (!/\(rotation\)/i.test(str(f && f.name))) continue;
+      for (const r of (f && f.records) || []) for (const k of ['verificationId', 'requestId', 'discoveryId']) if (str(r && r[k])) ids.add(str(r[k])); }
+    return ids;
+  }
+  /** History rows with Source set to `source` for the Sohar ids in `ids` (a Set); other rows unchanged. */
+  function withSource(rows, ids, source) { return (rows || []).map((r) => (ids && ids.has(str(r['Sohar ID'])) ? { ...r, Source: source } : r)); }
   function historyFromResults(results, source) {
     const out = [];
     for (const r of results || []) {
@@ -943,5 +955,5 @@ ${rows.map((r) => `<tr>${cols.map((k) => `<td${isNum(k) ? ' class="n"' : ''}>${c
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,
     addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName,
     // v0.31
-    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor, HTML_EXPORT_COLS, htmlReport, htmlReportFileName };
+    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, rotationIds, withSource, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor, HTML_EXPORT_COLS, htmlReport, htmlReportFileName };
 });

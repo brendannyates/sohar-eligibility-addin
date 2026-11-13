@@ -516,3 +516,11 @@ test('htmlReport: a self-contained page; no name, DOB or member ID column; Sohar
   assert.match(REC.htmlReportFileName('Sohar Results', new Date(2026, 10, 12)), /^Sohar Results 2026-11-12\.html$/);
   for (const k of ['patients', 'results']) assert.ok(!REC.HTML_EXPORT_COLS[k].some((c) => /member id|^last name|^first name|^dob/i.test(c)), k);
 });
+
+test("rotationIds / withSource: the rotation's own import files are Source Rotation (synthetic ids)", () => {
+  const ids = REC.rotationIds([{ name: 'Sohar API Results - Verification 2026-11-12 (rotation).csv', records: [{ verificationId: 'v-rot-1' }, { requestId: 'd-rot-2' }] },
+    { name: 'Sohar export.csv', records: [{ verificationId: 'v-imp-3' }] }]);
+  assert.deepEqual([...ids].sort(), ['d-rot-2', 'v-rot-1']);
+  const rows = REC.withSource([{ 'Sohar ID': 'v-rot-1', Source: 'Import' }, { 'Sohar ID': 'v-imp-3', Source: 'Import' }], ids, 'Rotation');
+  assert.equal(rows[0].Source, 'Rotation'); assert.equal(rows[1].Source, 'Import');
+});

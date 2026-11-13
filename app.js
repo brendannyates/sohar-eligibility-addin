@@ -2054,7 +2054,9 @@
       state.outcomes = ledger.rows;
     } catch (e) { console.error(e); note('resultsResult', `Payer Outcomes not updated (payer learning waits for the next upload): ${e.message}`, 'warn'); }
     // v0.31: Verification History, every check kept with its date and Source (Import or Dashboard), per policy.
-    await appendHistory(REC.historyFromResults(res.results), step);
+    // The rotation's own import files (… (rotation).csv) are Source Rotation, so the morning run never looks like the import.
+    const rotIds = REC.rotationIds(list.map((f) => ({ name: f.name, records: C.readResultRows(f.rows).records })));
+    await appendHistory(REC.withSource(REC.historyFromResults(res.results), rotIds, 'Rotation'), step);
     // New outcomes can promote, demote or suggest payers: rebuild so the Payer Map, Patients and imports follow.
     // (The Sohar Results sheet picks up a changed mapping on the next refresh.)
     if (newOutcomes && state.patients) await build({ deferRules: true });
