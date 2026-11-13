@@ -981,3 +981,137 @@ test('Clinic Work Inbox: no write path touches it (every mutating export run aga
   const uses = [...src.matchAll(/INBOX\.(table|sheet)/g)].map((x) => src.lastIndexOf('async function', x.index)).map((i) => src.slice(i, src.indexOf('(', i)));
   assert.deepEqual([...new Set(uses)], ['async function readClinicInbox', 'async function createClinicInbox']);
 });
+
+// ---------- v0.32: a save with the same rows leaves the sheet alone ----------
+// Each pane open rebuilds the same output; the sheet already holding it is kept instead of staged and swapped again.
+
+test('same rows: a second identical save adds, deletes and renames no sheet; a changed row still rewrites', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  await X.writeTasks(C.TASK_COLS, tasks(7, 'a'));
+  X.takeUnchanged();
+  const id = m.wb.sheet('NextGen Tasks').id, fits = m.autofits('NextGen Tasks');
+  await X.writeTasks(C.TASK_COLS, tasks(7, 'a'));
+  assert.equal(m.wb.sheet('NextGen Tasks').id, id, 'same sheet kept');
+  assert.equal(m.autofits('NextGen Tasks'), fits, 'no reformatting');
+  assert.deepEqual(m.sheetNames(), ['Import', 'NextGen Tasks']);
+  assert.deepEqual(X.takeUnchanged(), ['NextGen Tasks']);
+  assert.deepEqual(X.takeUnchanged(), [], 'cleared once taken');
+  const changed = tasks(7, 'a'); changed[3].Done = changed[3].Done ? '' : 'Yes';
+  await X.writeTasks(C.TASK_COLS, changed);
+  assert.notEqual(m.wb.sheet('NextGen Tasks').id, id, 'a changed row is saved the usual way');
+  assert.deepEqual(await X.readTasks(), expected(C.TASK_COLS, changed));
+  assert.deepEqual(X.takeUnchanged(), []);
+  const more = tasks(8, 'a');
+  await X.writeTasks(C.TASK_COLS, more);
+  assert.deepEqual(await X.readTasks(), expected(C.TASK_COLS, more), 'an added row is saved');
+  await X.writeTasks(C.TASK_COLS, []);
+  const empty = m.wb.sheet('NextGen Tasks').id;
+  await X.writeTasks(C.TASK_COLS, []);
+  assert.equal(m.wb.sheet('NextGen Tasks').id, empty, 'an empty save over an empty table is kept too');
+  assert.deepEqual(await X.readTasks(), []);
+});
+
+test('same rows: an edit on the sheet (a cell, a header, a blanked cell, an extra row) is put back by the next save', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  const rows = tasks(5, 'a');
+  const edits = {
+    cell: (s) => m.wb.setValue(s, 2, 1, 'typed by hand'),
+    header: (s) => m.wb.setValue(s, 0, 0, 'Renamed header'),
+    blanked: (s) => m.wb.setValue(s, 3, C.TASK_COLS.indexOf('MRN'), ''),
+    extraRow: () => m.wb.addRows(m.wb.table('tblNextGenTasks'), null, [C.TASK_COLS.map(() => 'extra')]),
+  };
+  for (const [name, edit] of Object.entries(edits)) {
+    await X.writeTasks(C.TASK_COLS, rows);
+    const s = m.wb.sheet('NextGen Tasks'), id = s.id;
+    edit(s);
+    await X.writeTasks(C.TASK_COLS, rows);
+    assert.notEqual(m.wb.sheet('NextGen Tasks').id, id, name);
+    assert.deepEqual(await X.readTasks(), expected(C.TASK_COLS, rows), name);
+  }
+});
+
+test('same rows: leading zeros lost on the sheet count as a change', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  m.seedTable('NextGen Tasks', 'tblNextGenTasks', C.TASK_COLS, tasks(2, 'a'), { text: false }); // General cells: "0000" became 0
+  await X.writeTasks(C.TASK_COLS, tasks(2, 'a'));
+  assert.equal((await X.readTasks())[0].MRN, '0000');
+  assert.deepEqual(X.takeUnchanged(), []);
+});
+
+test('same rows: Sohar Uploads is very hidden again, Sohar Results is activated, % columns match, all without a rewrite', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  await X.writeUploads(C.UPLOAD_COLS, uploads(3, 'a'));
+  const up = m.wb.sheet('Sohar Uploads');
+  m.wb.setVisibility(up, 'Visible');
+  await X.writeUploads(C.UPLOAD_COLS, uploads(3, 'a'));
+  assert.equal(m.wb.sheet('Sohar Uploads').id, up.id);
+  assert.equal(m.sheetVisibility('Sohar Uploads'), 'VeryHidden');
+  await X.writeResults(['Per Nbr'], [{ 'Per Nbr': '0042' }]);
+  const res = m.wb.sheet('Sohar Results').id;
+  m.wb.activate(m.wb.sheet('Import'));
+  await X.writeResults(['Per Nbr'], [{ 'Per Nbr': '0042' }]);
+  assert.equal(m.wb.sheet('Sohar Results').id, res);
+  assert.equal(m.activeSheet(), 'Sohar Results');
+  const cols = C.BENEFIT_SHEET_COLS;
+  const rows = [{ 'Per Nbr': '100', 'OOP % Met': 0.5, 'Deductible % Met': 1 }, { 'Per Nbr': '101', 'OOP % Met': '', 'Deductible % Met': 0.25 }];
+  await X.writeBenefits(cols, rows, C.BENEFIT_PCT_COLS);
+  const ben = m.wb.sheet('Benefits').id;
+  await X.writeBenefits(cols, rows, C.BENEFIT_PCT_COLS);
+  assert.equal(m.wb.sheet('Benefits').id, ben);
+  assert.equal(m.conditionalFormats('Benefits').length, 2, 'the data bars stay');
+  await X.writeBenefits(cols, [{ ...rows[0], 'OOP % Met': 0.6 }, rows[1]], C.BENEFIT_PCT_COLS);
+  assert.notEqual(m.wb.sheet('Benefits').id, ben, 'a changed percent is saved');
+});
+
+test('same rows: a big table is compared in chunks and kept; a different row count is a change without reading the rows', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  await X.writeUploads(C.UPLOAD_COLS, uploads(1234, 'big'));
+  const id = m.wb.sheet('Sohar Uploads').id;
+  m.inject();
+  await X.writeUploads(C.UPLOAD_COLS, uploads(1234, 'big'));
+  assert.equal(m.wb.sheet('Sohar Uploads').id, id);
+  const loads = m.valueLoads().filter((n) => n > 1);
+  assert.ok(loads.length >= 3 && Math.max(...loads) <= 500, `chunked compare: ${loads}`);
+  m.inject();
+  await X.writeUploads(C.UPLOAD_COLS, uploads(1235, 'big'));
+  assert.equal(m.valueLoads().filter((n) => n > 1).length, 0, `no body read: ${m.valueLoads()}`);
+  assert.deepEqual(await X.readUploads().then((r) => r.length), 1235);
+});
+
+test('same rows: replaceTable leaves a template table alone, rewrites a changed one, still renames an old header', async () => {
+  const m = createMock(), X = m.SoharExcel;
+  const rows = [{ 'Per Nbr': '0010', Zip: '01234' }, { 'Per Nbr': '0011', Zip: '' }];
+  m.seedTable('Patients', 'tblPatients', ['Per Nbr', 'Zip'], rows);
+  m.inject();
+  await X.replaceTable('tblPatients', ['Per Nbr', 'Zip'], rows);
+  assert.ok(m.opCount() <= 1, `only clearFilters, got ${m.opCount()} changes`);
+  assert.deepEqual(X.takeUnchanged(), ['Patients']);
+  const next = [{ 'Per Nbr': '0010', Zip: '01234' }];
+  await X.replaceTable('tblPatients', ['Per Nbr', 'Zip'], next);
+  assert.deepEqual(await X.readTable('tblPatients'), expected(['Per Nbr', 'Zip'], next));
+  assert.deepEqual(X.takeUnchanged(), []);
+  m.seedTable('Review', 'tblReview', ['Severity', 'Issue', 'Per Nbr', 'Detail', 'Fix'], [{ Severity: 'High', Issue: 'x', 'Per Nbr': 'PER-7', Detail: 'd', Fix: 'f' }]);
+  await X.replaceTable('tblReview', C.REVIEW_COLS, [{ Severity: 'High', Issue: 'x', MRN: 'PER-7', Detail: 'd', Fix: 'f' }]);
+  assert.deepEqual(m.values('Review', 'A1:E1'), [C.REVIEW_COLS], 'the old header name is still renamed');
+  assert.deepEqual(X.takeUnchanged(), []);
+  await X.replaceTable('tblPatients', ['Per Nbr', 'Zip'], []);
+  await X.replaceTable('tblPatients', ['Per Nbr', 'Zip'], []);
+  assert.deepEqual(await X.readTable('tblPatients'), []);
+  assert.deepEqual(X.takeUnchanged(), ['Patients']);
+});
+
+test('fail-safe: an identical save failing at any sync, op or Excel close keeps the rows', async () => {
+  const rows = tasks(600, 'same');
+  for (const mode of ['sync', 'op', 'kill']) {
+    const setup = async () => { const m = createMock(); await m.SoharExcel.writeTasks(C.TASK_COLS, rows); return m; };
+    const m0 = await setup(); m0.inject(); await m0.SoharExcel.writeTasks(C.TASK_COLS, rows);
+    const total = Math.max(1, mode === 'op' ? m0.opCount() : m0.syncCount());
+    for (let k = 1; k <= total; k++) {
+      const m = await setup(), X = m.SoharExcel;
+      m.inject({ [KNOBS[mode]]: k });
+      try { await X.writeTasks(C.TASK_COLS, rows); } catch (e) { /* refused: the old rows must stand */ }
+      m.inject();
+      assert.deepEqual(await X.readTasks(), expected(C.TASK_COLS, rows), `${KNOBS[mode]}=${k}`);
+    }
+  }
+});

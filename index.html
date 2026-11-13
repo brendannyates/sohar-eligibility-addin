@@ -6,9 +6,9 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.31.0">
-  <script src="theme.js?v=0.31.0"></script>
-  <link rel="stylesheet" href="dev-updates.css?v=0.31.0">
+  <link rel="stylesheet" href="style.css?v=0.32.0">
+  <script src="theme.js?v=0.32.0"></script>
+  <link rel="stylesheet" href="dev-updates.css?v=0.32.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -252,12 +252,11 @@
         <button class="link" id="btnDlWork" disabled>Save results worklist</button>
         <button class="link" id="btnDlBen" disabled>Save benefits (old TMS format)</button>
       </div>
-      <p class="hint">Interactive web pages (search, filters, sorting, light and dark, Sohar links), for OneDrive or SharePoint only:</p>
+      <p class="hint">One interactive web page with everything (appointments and estimates, Sohar results, cost estimates, verification history, patients, audits), for OneDrive or SharePoint only:</p>
       <div class="actions">
-        <button class="link" data-html="patients">Patients</button>
-        <button class="link" data-html="results">Sohar results</button>
-        <button class="link" data-html="history">Verification history</button>
-        <button class="link" data-html="audits">Account audits</button>
+        <label class="hint" for="htmlClinic">Clinic</label>
+        <select id="htmlClinic" data-html-clinic><option value="">All clinics</option></select>
+        <button class="link" data-html="all">Save web page</button>
       </div>
       <div id="htmlNote" class="result" hidden></div>
       <div class="actions">
@@ -282,18 +281,18 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.31.0"></script>
-  <script src="core.js?v=0.31.0"></script>
-  <script src="rules.js?v=0.31.0"></script>
-  <script src="fees.js?v=0.31.0"></script>
-  <script src="record.js?v=0.31.0"></script>
-  <script src="audit.js?v=0.31.0"></script>
-  <script src="xlsx.js?v=0.31.0"></script>
-  <script src="payer-knowledge.js?v=0.31.0"></script>
-  <script src="excel.js?v=0.31.0"></script>
-  <script src="who.js?v=0.31.0"></script>
-  <script src="dev-updates.js?v=0.31.0"></script>
-  <script src="config-ui.js?v=0.31.0"></script>
-  <script src="app.js?v=0.31.0"></script>
+  <script src="payer-rules.js?v=0.32.0"></script>
+  <script src="core.js?v=0.32.0"></script>
+  <script src="rules.js?v=0.32.0"></script>
+  <script src="fees.js?v=0.32.0"></script>
+  <script src="record.js?v=0.32.0"></script>
+  <script src="audit.js?v=0.32.0"></script>
+  <script src="xlsx.js?v=0.32.0"></script>
+  <script src="payer-knowledge.js?v=0.32.0"></script>
+  <script src="excel.js?v=0.32.0"></script>
+  <script src="who.js?v=0.32.0"></script>
+  <script src="dev-updates.js?v=0.32.0"></script>
+  <script src="config-ui.js?v=0.32.0"></script>
+  <script src="app.js?v=0.32.0"></script>
 </body>
 </html>

@@ -5,6 +5,7 @@
   const C = window.SoharCore;
   const $ = (id) => document.getElementById(id);
   let rows = [], tasks = [], irRows = [], exportsData = null, discVerify = [], verFailed = [], scope = 'upcoming', asOf = null, list = [], tab = 'prep';
+  let planByMrn = new Map(); // v0.32: MRN -> the pane's priced booked visits (record.visitPlan)
   let inOffice = false, web = false;
   // v0.12: clinic lists, the skipped list and the Payer learning views (from the pane).
   let clinic = null, skipped = [], skipCols = [], learning = null, guarantor = { count: 0, noDob: 0 };
@@ -80,10 +81,14 @@
     ivn = { visits: (m.ivn && m.ivn.visits) || [], secondary: (m.ivn && m.ivn.secondary) || [] }; fillIvnClinicsFs();
     clinic = m.clinic || null; skipped = m.skipped || []; skipCols = m.skipCols || []; learning = m.learning || null; guarantor = m.guarantor || { count: 0, noDob: 0 };
     rows = m.results || []; tasks = m.tasks || []; irRows = m.ir || []; exportsData = m.exports || null; discVerify = m.discoveryVerify || []; verFailed = m.verifyFailed || []; scope = m.scope || 'upcoming'; web = !!m.web;
+    fillHtmlClinics(m.htmlClinics); // v0.32
     asOf = m.asOf ? new Date(m.asOf) : null;
     flow = m.flow || []; outcomes = m.outcomes || []; profiles = m.profiles || {};
     visits = m.visits || {}; lastUpdated = m.lastUpdated || null; admins = m.admins || []; notes = m.notes || {};
     billing = m.billing || {}; dataSt = m.data || null; ticketRows = m.ticketRows || []; // v0.30
+    // v0.32: every booked visit priced by the pane (record.visitPlan), per MRN, for the Benefits projection.
+    planByMrn = new Map();
+    for (const x of m.visitPlan || []) { const k = String(x.MRN || '').replace(/^0+/, ''); if (!planByMrn.has(k)) planByMrn.set(k, []); planByMrn.get(k).push(x); }
     savedAudits = m.audits || savedAudits;
     cfgData = m.config || cfgData; daily = m.daily || null; // v0.31 Config and Import tabs
     checks = m.checks || { history: [], patient: [] };
@@ -357,7 +362,10 @@
     // The fee context (fees.js prepareEstimates) carries the payer's per-code rules; a visit counts toward the
     // deductible per its codes' rules when staff classified them (v0.23).
     const fx = fees && fees.contexts ? fees.contexts[per] || null : null;
-    const proj = REC.projection(rec && rec.financial, fl, { dedApplies: (f) => dedAppliesOf(fx, codesOfVisit({ f, event: f.Event })) });
+    // v0.32: the pane's priced visits (Sohar's quote, then the PR calculator) when it sent them; the Flow rows otherwise.
+    const vp = planByMrn.get(String(r.MRN || '').replace(/^0+/, '')) || [];
+    const proj = (vp.length ? REC.projectionFromPlan(rec ? rec.financial : r, vp) : null)
+      || REC.projection(rec && rec.financial, fl, { dedApplies: (f) => dedAppliesOf(fx, codesOfVisit({ f, event: f.Event })) });
     const items = visitItems(vs, fl);
     const next = items[0] ? items[0].date : r['Next Appt'];
     return { k, rec, r, per, prof, checks, its, vs, fl, fx, fresh, plans, proj, items, next, marks: REC.milestones(rec ? rec.results : [r], plans),
@@ -633,8 +641,10 @@
 
   // ----- Benefits projection: the booked visits' estimates applied to the deductible and the OOP max -----
   function benefitsSection(c) {
-    const head = '<div class="pv-hrow"><h3 class="pv-h">Benefits projection</h3><span class="hint">From booked visits and their Flow estimates. A projection, not a quote.</span></div>';
     const p = c.proj;
+    const head = `<div class="pv-hrow"><h3 class="pv-h">Benefits projection</h3><span class="hint">${p && p.plan
+      ? 'Every booked visit: Sohar\'s quote on the first visit with a code, then the PR calculator as the deductible is used. A projection, not a quote.'
+      : 'From booked visits and their Flow estimates. A projection, not a quote.'}</span></div>`;
     if (!p) return `${head}<p class="hint">No projection yet. It needs the deductible and OOP max from a verification.</p>`;
     const meter = (label, m) => {
       if (!m) return '';
@@ -646,8 +656,9 @@
         <div class="pv-mbar" role="img" aria-label="${esc(`${label}: ${money(m.met)} of ${money(m.total)} met; the striped part is projected from booked visits`)}"><span class="met f-${tone}" style="width:${metPct}%"></span><span class="proj f-${tone}" style="left:${metPct}%;width:${projPct}%"></span></div>
         <div class="hint">${esc(`${money(m.met)} met · ${money(m.left)} left`)}</div></div>`;
     };
-    const missing = c.items.filter((x) => !x.f || num(x.f['Sohar Est Patient']) == null || REC.isSandbox(x.f));
-    const missText = (x) => `${sd(x.date)} ${x.event || ''}${x.f && REC.isSandbox(x.f) && num(x.f['Sohar Est Patient']) != null ? ' (sandbox)' : ''}`.trim();
+    // v0.32: with priced visits, only a visit that has a code but no estimate is missing (ESK, TMS sessions are never estimated).
+    const missing = p.plan ? p.missing.filter((x) => x['Est Code']) : c.items.filter((x) => !x.f || num(x.f['Sohar Est Patient']) == null || REC.isSandbox(x.f));
+    const missText = (x) => (p.plan ? `${sd(x['Appt Date'])} ${x.Event || ''}`.trim() : `${sd(x.date)} ${x.event || ''}${x.f && REC.isSandbox(x.f) && num(x.f['Sohar Est Patient']) != null ? ' (sandbox)' : ''}`.trim());
     const line = (m, what) => (!m ? '' : m.left <= 0 ? `${what} already met.` : m.at ? `${what} projected to be met at the ${sd(m.at['Appt Date'])} visit.` : `${what} not met by booked visits. ${money(Math.max(0, m.left - m.applied))} left after the last estimate.`);
     return `${head}<section class="pv-card pv-proj">
         ${meter('Deductible', p.ded)}${meter('Out-of-pocket max', p.oop)}
@@ -655,9 +666,10 @@
           <b class="pv-pamt">${esc(x.applied == null ? (REC.isSandbox(x.flow) && x.est != null ? 'Sandbox' : 'No estimate') : x.est != null && x.applied < x.est ? `${money(x.applied)} (est. ${money(x.est)})` : money(x.applied))}</b>
           <span class="hint pv-pleft">${x.oopLeft == null ? '' : `OOP left ${x.applied == null ? '—' : x.oopLeft === 0 ? 'Met' : money(x.oopLeft)}`}</span>
           ${x.ruled && x.applied != null ? `<span class="hint">${x.toward ? 'Counts toward deductible' : 'Deductible waived'}</span>` : ''}
+          ${x.source ? `<span class="hint">${esc(x.source)}${x.nextYear ? ' · next plan year' : ''}</span>` : ''}${p.plan && x.applied == null && x.note ? `<span class="hint">${esc(x.note)}</span>` : ''}
           ${x.marks.map((l) => mark(/approaching/i.test(l) ? 'amber' : 'green', l)).join('')}</div>`).join('')}</div>` : '<p class="hint">No Sohar Flow estimates for the booked visits yet.</p>'}
         <div class="pv-psum">${[line(p.ded, 'Deductible'), line(p.oop, 'OOP max')].filter(Boolean).map((t) => `<div>${esc(t)}</div>`).join('')}
-          ${missing.length ? `<div class="tone-amber"><b>Incomplete: ${esc(missing.map(missText).join(', '))} ${missing.length > 1 ? 'have' : 'has'} no estimate and ${missing.length > 1 ? 'are' : 'is'} left out.</b></div>` : c.items.length ? '<div class="hint">Every booked visit has an estimate.</div>' : ''}</div>
+          ${missing.length ? `<div class="tone-amber"><b>Incomplete: ${esc(missing.map(missText).join(', '))} ${missing.length > 1 ? 'have' : 'has'} no estimate and ${missing.length > 1 ? 'are' : 'is'} left out.</b></div>` : (p.plan ? p.rows.length : c.items.length) ? '<div class="hint">Every booked visit that can be priced has an estimate.</div>' : ''}</div>
       </section>`;
   }
 
@@ -1729,8 +1741,17 @@
   $('drop').addEventListener('dragleave', () => $('drop').classList.remove('over'));
   $('drop').addEventListener('drop', (e) => { e.preventDefault(); $('drop').classList.remove('over'); upload(e.dataTransfer.files); });
   document.querySelectorAll('[data-save]').forEach((b) => b.addEventListener('click', () => save(b.dataset.save)));
-  // v0.31: interactive HTML exports, built and saved by the pane from the workbook.
-  document.querySelectorAll('[data-html]').forEach((b) => b.addEventListener('click', () => toPane({ type: 'export-html', kind: b.dataset.html })));
+  // v0.31: interactive HTML exports, built and saved by the pane from the workbook. v0.32: one page with everything,
+  // for all clinics or the one picked.
+  document.querySelectorAll('[data-html]').forEach((b) => b.addEventListener('click', () => toPane({ type: 'export-html', kind: b.dataset.html, clinic: ($('htmlClinic') || {}).value || '' })));
+  /** The web page export's clinic picker: the pane's list (results and the rotation's checks), else the results' Next Location. */
+  function fillHtmlClinics(list) {
+    const sel = $('htmlClinic'); if (!sel) return;
+    const keep = sel.value;
+    const locs = (list && list.length ? list : [...new Set(rows.map((r) => String(r['Next Location'] || '').trim()).filter(Boolean))]).slice().sort();
+    sel.innerHTML = '<option value="">All clinics</option>' + locs.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
+    if (locs.includes(keep)) sel.value = keep;
+  }
   $('btnFee').addEventListener('click', () => $('fileFee').click());
   $('fileFee').addEventListener('change', (e) => { uploadFee(e.target.files); e.target.value = ''; });
   $('btnCopy').addEventListener('click', async () => {

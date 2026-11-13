@@ -6,9 +6,9 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none';">
   <title>Sohar eligibility, full screen</title>
-  <link rel="stylesheet" href="style.css?v=0.31.0">
-  <script src="theme.js?v=0.31.0"></script>
-  <link rel="stylesheet" href="dev-updates.css?v=0.31.0">
+  <link rel="stylesheet" href="style.css?v=0.32.0">
+  <script src="theme.js?v=0.32.0"></script>
+  <link rel="stylesheet" href="dev-updates.css?v=0.32.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body class="dash">
@@ -282,10 +282,9 @@
             <button class="primary alt" data-save="worklist">Worklist (filtered)</button>
             <button class="primary alt" data-save="ir">IR Portal cross-reference</button>
             <p class="hint">Interactive web pages (search, filters, sorting, light and dark, Sohar links), for OneDrive or SharePoint only. Sohar import files stay CSV.</p>
-            <button class="primary alt" data-html="patients">Patients (web page)</button>
-            <button class="primary alt" data-html="results">Sohar results (web page)</button>
-            <button class="primary alt" data-html="history">Verification history (web page)</button>
-            <button class="primary alt" data-html="audits">Account audits (web page)</button>
+            <label class="hint" for="htmlClinic">Clinic for the web page</label>
+            <select id="htmlClinic" data-html-clinic><option value="">All clinics</option></select>
+            <button class="primary alt" data-html="all">Everything (web page)</button>
           </div>
         </div>
       </div>
@@ -335,16 +334,16 @@
     <section id="detail" class="detail" hidden></section>
   </main>
 
-  <script src="payer-rules.js?v=0.31.0"></script>
-  <script src="core.js?v=0.31.0"></script>
-  <script src="rules.js?v=0.31.0"></script>
-  <script src="fees.js?v=0.31.0"></script>
-  <script src="record.js?v=0.31.0"></script>
-  <script src="xlsx.js?v=0.31.0"></script>
-  <script src="audit.js?v=0.31.0"></script>
-  <script src="who.js?v=0.31.0"></script>
-  <script src="dev-updates.js?v=0.31.0"></script>
-  <script src="config-ui.js?v=0.31.0"></script>
-  <script src="dashboard.js?v=0.31.0"></script>
+  <script src="payer-rules.js?v=0.32.0"></script>
+  <script src="core.js?v=0.32.0"></script>
+  <script src="rules.js?v=0.32.0"></script>
+  <script src="fees.js?v=0.32.0"></script>
+  <script src="record.js?v=0.32.0"></script>
+  <script src="xlsx.js?v=0.32.0"></script>
+  <script src="audit.js?v=0.32.0"></script>
+  <script src="who.js?v=0.32.0"></script>
+  <script src="dev-updates.js?v=0.32.0"></script>
+  <script src="config-ui.js?v=0.32.0"></script>
+  <script src="dashboard.js?v=0.32.0"></script>
 </body>
 </html>

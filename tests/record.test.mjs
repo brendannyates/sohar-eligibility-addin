@@ -517,6 +517,65 @@ test('htmlReport: a self-contained page; no name, DOB or member ID column; Sohar
   for (const k of ['patients', 'results']) assert.ok(!REC.HTML_EXPORT_COLS[k].some((c) => /member id|^last name|^first name|^dob/i.test(c)), k);
 });
 
+test('htmlReport schedule: each day, one column per provider, cards in time order with status, bars and labelled links', () => {
+  const cols = REC.HTML_EXPORT_COLS.results;
+  const base = { 'Next Location': 'Castro', 'Next Event': 'MM F/U 30', Copay: '$30', 'Last Name': 'Hidden' };
+  const rows = [
+    { ...base, LASFIR: 'SYNAAA', MRN: '770001', 'Next Appt': '11/13/2026', 'Next Time': '1:30 PM', 'Next Provider': 'Wood', 'Sent As': 'Verification', 'Sohar Status': 'Eligible', Deductible: '$1,000', 'Deductible Remaining': '$250', 'OOP Max': '$5,000', 'OOP Remaining': '$0', 'Sohar Link': 'https://app.soharhealth.com/verifications/v-1' },
+    { ...base, LASFIR: 'SYNBBB', MRN: '770002', 'Next Appt': '11/13/2026', 'Next Time': '9:00 AM', 'Next Provider': 'Wood', 'Sent As': 'Discovery', 'Sohar Status': 'Ineligible', 'Work Queue': 'Coverage', Action: 'Run discovery', 'Sohar Link': 'https://app.soharhealth.com/discovery/d-2' },
+    { ...base, LASFIR: 'SYNBBB', MRN: '770002', 'Next Appt': '11/13/2026', 'Next Time': '9:00 AM', 'Next Provider': 'Wood', 'Sent As': 'Verification', 'Sohar Status': 'Eligible', 'Sohar Link': 'https://app.soharhealth.com/verifications/v-3' },
+    { ...base, LASFIR: 'SYNCCC', MRN: '770003', 'Next Appt': '11/14/2026', 'Next Time': '10:00 AM', 'Next Provider': 'Lau', 'Sohar Status': 'Pending' },
+  ];
+  const h = REC.htmlReport({ title: 'Sohar results', sections: [{ id: 'results', title: 'Sohar results', cols, rows, filters: ['Next Provider', 'Sohar Status'], view: REC.HTML_EXPORT_VIEWS.results }] });
+  assert.ok(!h.includes('Hidden'));
+  const days = h.match(/<h3>[^<]+/g);
+  assert.deepEqual(days, ['<h3>Fri 11/13', '<h3>Sat 11/14']);
+  const cards = h.match(/data-rows="[^"]+"/g);
+  assert.deepEqual(cards, ['data-rows="1 2"', 'data-rows="0"', 'data-rows="3"'], 'one card per visit, 9:00 before 1:30 PM, both checks on one card');
+  assert.ok(h.includes('>Discovery &#8599;</a>') && h.includes('>Verification &#8599;</a>'));
+  assert.ok(h.includes('$250 left of $1,000') && h.includes('Met ($5,000)'));
+  assert.match(h, /<div class="todo"><b>Coverage<\/b>: Run discovery<\/div>/);
+  assert.match(h, /<option value="Wood">Wood \(3\)<\/option>/);
+  assert.match(h, /data-v="schedule" aria-pressed="true"/);
+  assert.match(h, /<tr class="dt" data-d="0"/);
+  new Function(h.match(/<script>([\s\S]*)<\/script>/)[1]);
+  assert.equal(REC.statusTone('complete.ineligible'), 'bad');
+  assert.equal(REC.statusTone('Eligible'), 'ok');
+  assert.equal(REC.soharLinkLabel('https://app.soharhealth.com/x/1', { 'Sent As': 'Discovery' }), 'Discovery');
+  assert.equal(REC.benefitMeter('Deductible', '$0', '$0').includes('None'), true);
+});
+
+test('plan-year estimates: the rotation\'s Flow Results file is a Flow file, keeps Source Rotation and lands on the Sohar Results rows', () => {
+  const cols = ['Key', 'LASFIR', 'MRN', 'Appt Date', 'Time', 'Event', 'Location', 'Provider', 'Flow Run ID', 'Run Status', 'NextGen Policy Status', 'Sohar Payer', 'Plan',
+    'Est Codes', 'Sohar Est Patient', 'Estimate Note', 'NextGen Verification Link', 'Last Updated', 'Source', 'Reset Basis', 'Est 90792', 'Est 99214', 'Est 99215'];
+  const row = (o) => cols.map((c) => o[c] ?? '');
+  const file = [cols,
+    row({ Key: '770001|11/16/2026|9:00 AM', LASFIR: 'SYNAAA', MRN: '770001', 'Appt Date': '11/16/2026', Time: '9:00 AM', 'Run Status': 'Rotation estimate', 'NextGen Policy Status': 'complete.eligible',
+      'Est Codes': '99214', 'Sohar Est Patient': '35.00', 'NextGen Verification Link': 'https://app.soharhealth.com/verifications/11111111-1111-1111-1111-111111111111',
+      'Last Updated': '2026-11-13T15:00:00.000Z', Source: 'Rotation', 'Est 90792': '52.10', 'Est 99214': '35.00', 'Est 99215': '48.00' }),
+    row({ Key: '770002|11/17/2026|10:00 AM', LASFIR: 'SYNBBB', MRN: '770002', 'Appt Date': '11/17/2026', 'Run Status': 'Rotation estimate', 'Estimate Note': 'No fee column', 'Last Updated': '2026-11-13T15:00:00.000Z', Source: 'Rotation' })];
+  assert.ok(REC.isFlowFile(file));
+  const recs = REC.flowRecords(file);
+  assert.equal(recs[0].Source, 'Rotation');
+  assert.equal(REC.historyFromFlow(recs).length, 0, 'rotation estimate rows never re-date a verification in history');
+  assert.equal(REC.historyFromFlow([{ ...recs[0], 'Run Status': 'complete' }])[0].Source, 'Rotation', 'a Flow Results row keeps its own Source');
+  const results = [{ MRN: '770001', 'Next Appt': '11/16/2026', LASFIR: 'SYNAAA' }, { MRN: '0770001', 'Next Appt': '11/20/2026' }, { MRN: '770002', 'Next Appt': '11/17/2026' }];
+  const out = REC.withEstimates(results, recs.concat({ ...recs[0], MRN: '770001', 'Appt Date': '11/16/2026', 'Sohar Est Patient': '999', File: 'Flow sandbox.csv' }));
+  assert.equal(out[0]['Est Code'], '99214'); assert.equal(out[0]['Est Patient'], '$35.00'); assert.equal(out[0]['Est 99215'], '$48.00'); assert.equal(out[0]['Estimate Source'], 'Sohar Cost Estimate');
+  assert.equal(out[1]['Est Patient'], '', 'another visit: no own-code share'); assert.equal(out[1]['Est 90792'], '$52.10', 'but the plan-year quotes show');
+  assert.equal(out[2]['Est Patient'], ''); assert.equal(out[2]['Est 99214'], '', 'a row with no estimate fills nothing');
+  for (const c of REC.ESTIMATE_RESULT_COLS) assert.ok(c in out[2]);
+  const h = REC.htmlReport({ title: 'x', sections: [{ id: 'r', title: 'r', cols: REC.HTML_EXPORT_COLS.results, rows: out.map((r) => ({ ...r, 'Next Provider': 'Wood', 'Sohar Status': 'complete.eligible' })), view: REC.HTML_EXPORT_VIEWS.results }] });
+  assert.match(h, /<div class="est">Estimate 99214 <b>\$35\.00<\/b>/);
+  assert.ok(h.includes('90792 $52.10'));
+});
+
+test('isSoharRunExport: Sohar\'s dashboard run export (run IDs only) is told apart from a Flow Results file', () => {
+  assert.equal(REC.isSoharRunExport([['flowRunId', 'inputId', 'status', 'created'], ['r-1', '770001', 'COMPLETED', '2026-11-13']]), true);
+  assert.equal(REC.isSoharRunExport([['Flow Run ID', 'Sohar Est Patient'], ['r-1', '1']]), false);
+  assert.equal(REC.isSoharRunExport([['verificationId', 'status'], ['v-1', 'complete.eligible']]), false);
+});
+
 test("rotationIds / withSource: the rotation's own import files are Source Rotation (synthetic ids)", () => {
   const ids = REC.rotationIds([{ name: 'Sohar API Results - Verification 2026-11-12 (rotation).csv', records: [{ verificationId: 'v-rot-1' }, { requestId: 'd-rot-2' }] },
     { name: 'Sohar export.csv', records: [{ verificationId: 'v-imp-3' }] }]);

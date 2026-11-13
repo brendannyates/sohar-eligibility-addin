@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.31.0';
+  const VERSION = '0.32.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -221,6 +221,7 @@
   /** Scan the Import sheet, build the patient list and Sohar imports, then re-match saved Sohar and IR uploads. */
   async function refreshAll() {
     if (state.fees) state.fees.loaded = false; // fee estimates (On only): pick up edits made on the fee sheets
+    if (X.takeUnchanged) X.takeUnchanged(); // count only this refresh's saves left alone (stampUpdated)
     // state.step names the step running, so an error says where loading stopped (errText).
     step('reading the payer credential rules'); await loadPayerRules(); // esketamine payer credential rules: pick up edits made on the sheet
     step('reading the clinic notes'); await loadClinicNotes();
@@ -256,7 +257,10 @@
     const more = X.takeRecovered ? X.takeRecovered() : [];
     const note = [state.recoveredNote, more.length ? `An earlier save of ${more.join(', ')} was interrupted; the add-in finished it. Nothing was lost.` : ''].filter(Boolean).join(' ');
     state.recoveredNote = '';
-    setStatus(`${note ? `${note} ` : ''}Updated ${now}: ${what}.`, note ? 'warn' : 'ok');
+    // v0.32: sheets that already held the same rows were left alone instead of rebuilt.
+    const same = X.takeUnchanged ? X.takeUnchanged().length : 0;
+    const kept = same ? ` ${same} sheet${same === 1 ? '' : 's'} already up to date, not rewritten.` : '';
+    setStatus(`${note ? `${note} ` : ''}Updated ${now}: ${what}.${kept}`, note ? 'warn' : 'ok');
   }
   /** "2026-10-20 18:05 UTC": readable on the Config sheet, never turned into a date by Excel, parsed by core.soharTime. */
   function utcStamp(d) { return `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`; }
@@ -365,7 +369,8 @@
     dropZone('dropResults', 'fileResults', (files) => guard(() => uploadResults(files), 'resultsResult'));
     $('btnCopyMsg').addEventListener('click', () => guard(() => copyAdminMessage('action'), 'resultsResult'));
     $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits'), 'benBox'));
-    document.querySelectorAll('[data-html]').forEach((b) => b.addEventListener('click', () => guard(() => saveHtmlExport(b.dataset.html, 'htmlNote'), 'htmlNote'))); // v0.31
+    document.querySelectorAll('[data-html]').forEach((b) => b.addEventListener('click', () => guard(() => saveHtmlExport(b.dataset.html, 'htmlNote', ($('htmlClinic') || {}).value || ''), 'htmlNote'))); // v0.31; v0.32 clinic
+    if ($('htmlClinic')) $('htmlClinic').addEventListener('focus', () => { fillPaneHtmlClinics().catch(() => {}); }); // v0.32
     $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(C.fileName('worklist'), C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
     $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(C.fileName('benefits'), C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'benBox'), 'benBox'));
     $('btnDlDiscVer').addEventListener('click', () => guard(downloadDiscoveryVerify, 'resultsResult'));
@@ -1067,7 +1072,7 @@
    */
   function renderGuarantorPrompt() {
     const box = $('guarBox');
-    const c = C.guarantorCandidates(state.patients || [], state.results || [], [...state.guarantorActive.keys()]);
+    const c = C.guarantorCandidates(state.patients || [], importResults(), [...state.guarantorActive.keys()]);
     state.guarantorCandidates = c;
     if (!c.length || state.guarantorDismissed) { box.hidden = true; return; }
     const noDob = c.filter((x) => !x.hasDob).length;
@@ -1337,7 +1342,7 @@
     box.innerHTML = parts.join('');
   }
   function computeFlags() {
-    state.flags = state.patients ? R.allFlags(inScopePatients(), state.results || [], rulesCfg()) : new Map();
+    state.flags = state.patients ? R.allFlags(inScopePatients(), importResults(), rulesCfg()) : new Map();
     return state.flags;
   }
   /** Per Nbr -> secondary payer (chart, else the one billed at the last encounter), for the IVN export. */
@@ -1349,6 +1354,8 @@
     }
     return m;
   }
+  // v0.32: the results the NextGen report produced (the rotation's checks left out), for what learns from or flags the report.
+  const importResults = () => (state.results || []).filter((r) => r.Source !== 'Rotation');
   const pillsFor = (per) => [...new Set((state.flags.get(String(per ?? '').trim()) || []).map((f) => f.label))].join('; ');
 
   /** Recompute flags; write the Review sheet (build review + flags) and Payer Evidence; refresh the Clinic tab. */
@@ -1358,7 +1365,7 @@
     const pts = inScopePatients();
     const flagRows = R.reviewRows(state.flags, pts);
     // One High row for Sohar results with no patient identifiers (no NextGen task each).
-    const review = (state.review || []).concat(C.noIdentifierReviewRows(state.results || []), flagRows);
+    const review = (state.review || []).concat(C.noIdentifierReviewRows(importResults()), flagRows);
     await X.replaceTable(X.TABLES.review, C.REVIEW_COLS, review);
     const sev = { High: 0, Medium: 0, Low: 0 };
     for (const r of review) sev[r.Severity] = (sev[r.Severity] || 0) + 1;
@@ -1366,13 +1373,13 @@
     if (bi) bi.innerHTML = sev.High ? `<span class="hi">${sev.High} high-priority item${sev.High === 1 ? '' : 's'}</span> on the Review sheet${flagRows.length ? ` (${flagRows.length} clinic flag${flagRows.length === 1 ? '' : 's'} included)` : ''}.` : '';
     try {
       const prev = await X.readPayerEvidence();
-      state.evidence = R.payerEvidence(pts, state.results || [], prev, new Date(), state.perToKey);
+      state.evidence = R.payerEvidence(pts, importResults(), prev, new Date(), state.perToKey);
       await X.writePayerEvidence(R.PAYER_EVIDENCE_COLS, state.evidence);
     } catch (e) { console.error(e); note('clinicFilesNote', `Payer Evidence sheet not updated: ${e.message}`, 'warn'); }
     const run = new Date();
     state.clinic = {
-      rows: R.clinicRows('All', pts, state.results || [], state.flags, run),
-      review: R.clinicReviewRows('All', pts, state.results || [], state.flags, run),
+      rows: R.clinicRows('All', pts, importResults(), state.flags, run),
+      review: R.clinicReviewRows('All', pts, importResults(), state.flags, run),
       runDate: C.fmtDate(new Date(Date.UTC(run.getFullYear(), run.getMonth(), run.getDate()))),
     };
     renderClinic();
@@ -1392,13 +1399,13 @@
     try {
       const history = await X.readPayerMetricHistory();
       const today = C.localDate(new Date());
-      const first = C.payerMetrics(state.patients || [], state.results || [], state.payerTests || [], history);
+      const first = C.payerMetrics(state.patients || [], importResults(), state.payerTests || [], history);
       const hist = C.appendMetricHistory(history, first.rows, today);
-      state.metrics = C.payerMetrics(state.patients || [], state.results || [], state.payerTests || [], hist);
+      state.metrics = C.payerMetrics(state.patients || [], importResults(), state.payerTests || [], hist);
       await X.writePayerMetrics(C.PAYER_METRIC_COLS, state.metrics.rows);
       if (first.rows.length || history.some((h) => String(h.Date) === today)) await X.writePayerMetricHistory(C.PAYER_METRIC_HISTORY_COLS, hist);
     } catch (e) { console.error(e); warn.push(`Payer Metrics not updated: ${e.message}`); }
-    state.themes = C.guarantorThemes(state.results || []);
+    state.themes = C.guarantorThemes(importResults());
     if (state.themes.rows.length) await X.writeGuarantorThemes(C.GUARANTOR_THEME_COLS, state.themes.rows).catch((e) => { console.error(e); warn.push(`Guarantor Themes not updated: ${e.message}`); });
     renderLearning(warn);
   }
@@ -1603,8 +1610,8 @@
   function clinicWorkbook(loc) {
     const pts = inScopePatients();
     const run = new Date();
-    const rows = R.clinicRows(loc, pts, state.results || [], state.flags, run);
-    const review = R.clinicReviewRows(loc, pts, state.results || [], state.flags, run);
+    const rows = R.clinicRows(loc, pts, importResults(), state.flags, run);
+    const review = R.clinicReviewRows(loc, pts, importResults(), state.flags, run);
     const runDate = C.fmtDate(new Date(Date.UTC(run.getFullYear(), run.getMonth(), run.getDate())));
     const bytes = XL.buildWorkbook({
       sheets: [
@@ -1642,7 +1649,7 @@
     }
     const flow = await readFlowRows();
     const pack = R.clinicPack(loc, {
-      patients: inScopePatients(), results: state.results || [], review: state.review || [],
+      patients: inScopePatients(), results: (state.results || []).filter((r) => r.Source !== 'Rotation'), review: state.review || [],
       learningRows: C.payerLearningRows(state.learning || []), metricRows: state.metrics ? state.metrics.rows : [], tasks: await liveTasks(),
       cfg: state.cfg, payerRuleRows: R.payerRuleRows(state.payerRules || []), runAt: new Date(), version: VERSION,
       // v0.29: the rotation's rows, the clinics' consent and desk collections, and this clinic's fee tables.
@@ -1826,29 +1833,156 @@
   }
 
   // ---------- v0.31: interactive HTML exports (record.htmlReport), saved like the other files ----------
+  // v0.32 (Brendan, 11/13): one page with everything ('all'), for all clinics or one; the single-section kinds stay for now.
   const HTML_EXPORTS = {
+    all: { label: 'Sohar Eligibility', title: 'Sohar Eligibility' },
     patients: { label: 'Sohar Patients', title: 'Patients' },
     results: { label: 'Sohar Results', title: 'Sohar results' },
     history: { label: 'Sohar Verification History', title: 'Verification history' },
     audits: { label: 'Sohar Account Audits', title: 'Account audits' },
   };
+  /** v0.32: the rotation's Eligibility Checks rows (Power Query, tblEligibilityChecks); [] when the query is not set up. */
+  async function ledgerRows() {
+    if (state.demo) return (state.demoQuery && state.demoQuery.ledger) || state.demoLedger || (state.demoLedger = demoLedger());
+    return (await X.readQueryTable('ledger').catch(() => null)) || [];
+  }
+  const mrnKey = (m) => String(m ?? '').trim().replace(/^0+/, '');
+  const NOT_BOOKED = /cancel|no.?show|resched|deleted|bumped/i;
+  /**
+   * v0.32: every booked visit from today, priced (record.visitPlan): the report's visits for patients with a result, and the
+   * rotation ledger's visits. Rates: the ledger's Allowed for the visit's own code, else the patient's fee context (Config
+   * Fee estimates On). How a code counts: the fee payer's code rules (Estimate Defaults), else what Sohar's quote shows.
+   */
+  async function visitPlanRows(results) {
+    const rs = results || [];
+    const ledger = await ledgerRows(), flowRows = await currentFlow().catch(() => []);
+    const today = C.parseDate(localToday());
+    const byMrn = new Map(), perOf = new Map();
+    for (const r of rs) {
+      const k = mrnKey(r.MRN); if (!k) continue;
+      if (!byMrn.has(k)) byMrn.set(k, []);
+      byMrn.get(k).push(r);
+      if (r['Per Nbr'] && !perOf.has(k)) perOf.set(k, String(r['Per Nbr']));
+    }
+    const lead = new Map([...byMrn].map(([k, list]) => [k, REC.leadOf(list)]));
+    const seen = new Set(), visits = [];
+    const add = (v) => {
+      const d = C.parseDate(String(v.date || ''));
+      if (!v.MRN || !d || (today && d < today)) return;
+      const k = `${v.MRN}|${C.fmtDate(d)}|${String(v.time || '').trim()}`;
+      if (seen.has(k)) return;
+      seen.add(k); visits.push({ ...v, date: C.fmtDate(d) });
+    };
+    const det = state.detection || (state.rows && C.detectHeader(state.rows));
+    if (det && state.rows) {
+      const mrnByPer = new Map(), tagByPer = new Map();
+      for (const r of [...(state.patients || []), ...rs]) {
+        const per = String(r['Per Nbr'] || '');
+        if (per && r.MRN && !mrnByPer.has(per)) mrnByPer.set(per, mrnKey(r.MRN));
+        if (per && C.tagOf(r) && !tagByPer.has(per)) tagByPer.set(per, C.tagOf(r));
+      }
+      for (const [per, vs] of REC.reportVisits(state.rows, det, null, localToday())) {
+        const mrn = mrnByPer.get(per);
+        if (!mrn || !byMrn.has(mrn)) continue;
+        for (const v of vs) if (!NOT_BOOKED.test(v.status)) add({ MRN: mrn, lasfir: tagByPer.get(per) || '', per, date: v.date, time: v.time, event: v.event, location: v.loc, provider: v.provider });
+      }
+    }
+    for (const l of ledger) add({ MRN: mrnKey(l.MRN), lasfir: String(l.LASFIR || ''), per: perOf.get(mrnKey(l.MRN)) || '', date: l['Appt Date'], time: l.Time, event: l.Event,
+      location: l.Location, provider: l.Provider, allowed: l.Allowed, allowedCode: String(l['Est Codes'] || '').trim() });
+    const quotes = REC.quotesByMrn(flowRows, ledger);
+    const prep = state.fees && state.fees.prep;
+    const ctxOf = (per) => (prep && per && prep.contexts ? prep.contexts[per] || null : null);
+    const num = (v) => { const n = parseFloat(String(v ?? '').replace(/[$,\s]/g, '')); return isNaN(n) ? null : n; };
+    const ivkPrice = state.cfg && state.cfg.fees && state.cfg.fees.ivkMed;
+    const appts = importAppts();
+    return REC.visitPlan(visits, {
+      codeOf: (v, line, payer) => F.visitCode(v.event, line, payer),
+      benefitsOf: (mrn) => lead.get(mrn) || null,
+      quotesOf: (mrn) => quotes.get(mrn) || {},
+      rateOf: (mrn, code, v) => {
+        if (v.allowedCode === code && num(v.allowed) != null) return num(v.allowed);
+        const ctx = ctxOf(v.per || perOf.get(mrn));
+        const rates = ctx && ctx.rateKey && prep.tables && prep.tables.rates ? prep.tables.rates[ctx.rateKey] || {} : {};
+        const lv = F.providerLevel(v.provider) || 'MD';
+        return rates[code] ? rates[code][lv] ?? rates[code].MD ?? null : null;
+      },
+      togglesOf: (mrn, code) => { const ctx = ctxOf(perOf.get(mrn)); return (ctx && ctx.codeRules && ctx.codeRules[code]) || null; },
+      medOf: (v) => (v.per ? F.ivkMedication(F.ivkInfusion(v.per, v.date, v.event, appts), ivkPrice).amount : null),
+      math: F.estimateMath,
+    });
+  }
+  /** v0.32: the clinics for the web page's picker: the results' Next Location and the rotation's ledger Location. */
+  async function htmlClinicList() {
+    const set = new Set();
+    for (const r of state.results || []) if (String(r['Next Location'] || '').trim()) set.add(String(r['Next Location']).trim());
+    for (const l of await ledgerRows()) if (String(l.Location || '').trim()) set.add(String(l.Location).trim());
+    return [...set].sort();
+  }
+  async function fillPaneHtmlClinics() {
+    const sel = $('htmlClinic'); if (!sel) return;
+    const keep = sel.value, locs = await htmlClinicList().catch(() => []);
+    sel.innerHTML = '<option value="">All clinics</option>' + locs.map((l) => `<option value="${esc(l)}">${esc(l)}</option>`).join('');
+    if (locs.includes(keep)) sel.value = keep;
+  }
+  const pickCols = (cols, rows) => (rows || []).map((r) => Object.fromEntries(cols.map((c) => [c, C.cellOf(r, c) == null ? '' : C.cellOf(r, c)])));
+  const withLine = (rows, eventCol) => (rows || []).map((r) => ({ ...r, 'Service Line': r['Service Line'] || (String(r[eventCol] || '').trim() ? C.visitLine(r[eventCol]) : '') }));
+  const estimateFlowRows = (flowRows) => (flowRows || []).filter((f) => !/sandbox/i.test(String(f.File || '')) && ['Sohar Est Patient', 'Est 90792', 'Est 99214', 'Est 99215'].some((c) => String(f[c] ?? '').trim() !== ''))
+    .map((f) => ({ ...f, 'Estimate Source': REC.estimateSourceOf(f) })).sort((a, b) => String(b['Last Updated']).localeCompare(String(a['Last Updated'])));
+  /** v0.32: the one page: Appointments (each booked visit priced), Sohar results, cost estimates, history, patients, audits. */
+  async function htmlEverything(clinic) {
+    const rs = (await currentResults()) || [];
+    const ledger = await ledgerRows();
+    if (!rs.length && !ledger.length) throw new Error('No Sohar results or rotation checks yet (step 3, or refresh the Power Query data).');
+    const flowRows = await currentFlow().catch(() => []);
+    const here = (v) => !clinic || String(v || '').trim() === clinic;
+    const appts = (await visitPlanRows(rs)).filter((r) => here(r.Location));
+    const mrns = new Set(appts.map((r) => mrnKey(r.MRN)));
+    const mine = (r, locCol) => here(r[locCol]) || (!!clinic && mrns.has(mrnKey(r.MRN)));
+    const C_ = REC.HTML_EXPORT_COLS, V = REC.HTML_EXPORT_VIEWS;
+    const sections = [{ id: 'appointments', title: 'Appointments', cols: C_.appointments, rows: pickCols(C_.appointments, appts),
+      filters: ['Provider', 'Estimate Source', 'Est Code', 'Sohar Status', 'Sohar Payer', 'Milestone'], view: V.appointments,
+      note: 'Every booked visit from today, with its estimate: Sohar\'s quote on the first visit with a code, then the PR calculator (contracted rate, copay, coinsurance) against the deductible and OOP max left after the visits before it. Open a row for the patient\'s visits in order.' }];
+    const res = withLine(rs.filter((r) => mine(r, 'Next Location')), 'Next Event');
+    if (res.length) sections.push({ id: 'results', title: 'Sohar results', cols: C_.results, rows: pickCols(C_.results, res),
+      filters: ['Next Provider', 'Source', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'], view: V.results,
+      note: 'One row per Sohar check: the add-in\'s uploads and the rotation\'s checks (Source Rotation). Schedule: each day, one column per provider.' });
+    const est = withLine(estimateFlowRows(flowRows).filter((r) => mine(r, 'Location')), 'Event');
+    if (est.length) sections.push({ id: 'estimates', title: 'Cost estimates', cols: C_.estimates, rows: pickCols(C_.estimates, est),
+      filters: ['Estimate Source', 'Sohar Payer', 'Est Codes', 'Reset Basis'], view: V.estimates,
+      note: 'From Flow Results (the production Flow and the 7 AM rotation). Sohar Cost Estimate: Sohar priced it; PR Calculator Estimate: priced with the fee schedule\'s contracted rates when Sohar could not.' });
+    const hist = (await X.readVerificationHistory().catch(() => [])).filter((h) => mine(h, 'Clinic')).slice().reverse();
+    if (hist.length) sections.push({ id: 'history', title: 'Verification history', cols: REC.VERIFICATION_HISTORY_COLS, rows: hist,
+      filters: ['Source', 'Kind', 'Sohar Status', 'Policy Key'], view: V.history, note: 'Every check the add-in processed, newest first. Policy Key is the Sohar payerId and the member ID\'s last 4.' });
+    const pts = withLine((state.patients || []).filter((p) => p['In Scope'] === 'Yes' && (!clinic || mrns.has(mrnKey(p.MRN)))), 'Next Event');
+    if (pts.length) sections.push({ id: 'patients', title: 'Patients', cols: C_.patients, rows: pickCols(C_.patients, pts), filters: ['Route', 'State', 'Confidence'], note: 'In-scope patients from the last build of the NextGen report.' });
+    const a = await currentAudits(true).catch(() => ({ summary: [] }));
+    const audits = (a.summary || []).filter((x) => !clinic || mrns.has(mrnKey(x.MRN)));
+    if (audits.length) sections.push({ id: 'audits', title: 'Account audits', cols: AU.AUDIT_COLS, rows: audits, filters: ['Plan Year'] });
+    const label = clinic ? `Sohar Eligibility - ${clinic}` : 'Sohar Eligibility - All clinics';
+    return { name: REC.htmlReportFileName(label), html: REC.htmlReport({ title: clinic ? `Sohar Eligibility · ${clinic}` : 'Sohar Eligibility · All clinics', subtitle: `${appts.length} booked visit${appts.length === 1 ? '' : 's'}`, generated: fmtStamp(new Date()), version: VERSION, sections }) };
+  }
   /** The page for one export kind, from what the pane holds (sheet-safe columns only). */
-  async function htmlExportPage(kind) {
-    const pick = (cols, rows) => (rows || []).map((r) => Object.fromEntries(cols.map((c) => [c, C.cellOf(r, c) == null ? '' : C.cellOf(r, c)])));
+  async function htmlExportPage(kind, clinic) {
+    if (kind === 'all') return htmlEverything(clinic || '');
     let sections;
     if (kind === 'patients') {
       if (!state.patients) throw new Error('Upload the NextGen report first (step 1).');
       const cols = REC.HTML_EXPORT_COLS.patients;
-      sections = [{ id: 'patients', title: 'Patients', cols, rows: pick(cols, state.patients.filter((p) => p['In Scope'] === 'Yes')), filters: ['Route', 'State', 'Confidence'], note: 'In-scope patients from the last build.' }];
+      sections = [{ id: 'patients', title: 'Patients', cols, rows: pickCols(cols, withLine(state.patients.filter((p) => p['In Scope'] === 'Yes'), 'Next Event')), filters: ['Route', 'State', 'Confidence'], note: 'In-scope patients from the last build.' }];
     } else if (kind === 'results') {
       const rs = (await currentResults()) || [];
       if (!rs.length) throw new Error('No Sohar results yet (step 3).');
-      const cols = REC.HTML_EXPORT_COLS.results;
-      sections = [{ id: 'results', title: 'Sohar results', cols, rows: pick(cols, rs), filters: ['Next Location', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'] }];
+      const cols = REC.HTML_EXPORT_COLS.results, flowRows = await currentFlow().catch(() => []);
+      const estRows = estimateFlowRows(flowRows);
+      const ecols = REC.HTML_EXPORT_COLS.estimates;
+      sections = [{ id: 'results', title: 'Sohar results', cols, rows: pickCols(cols, withLine(REC.withEstimates(rs, flowRows), 'Next Event')), filters: ['Next Provider', 'Next Location', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'], view: REC.HTML_EXPORT_VIEWS.results, note: 'Schedule: each day, one column per provider. Open a card or a table row for the benefit details.' }];
+      if (estRows.length) sections.push({ id: 'estimates', title: 'Plan-year cost estimates', cols: ecols, rows: pickCols(ecols, withLine(estRows, 'Event')),
+        filters: ['Estimate Source', 'Location', 'Sohar Payer', 'Est Codes', 'Reset Basis'], view: REC.HTML_EXPORT_VIEWS.estimates,
+        note: 'From Flow Results: the production Flow and the 7 AM rotation. Est Codes is the visit\'s own code; Est 90792 / 99214 / 99215 are the plan-year quotes (patient share).' });
     } else if (kind === 'history') {
       const h = await X.readVerificationHistory();
       if (!h.length) throw new Error('Verification History is empty: it fills as Sohar results and Flow results are uploaded.');
-      sections = [{ id: 'history', title: 'Verification history', cols: REC.VERIFICATION_HISTORY_COLS, rows: h.slice().reverse(), filters: ['Source', 'Kind', 'Sohar Status', 'Clinic', 'Policy Key'], note: 'Every check the add-in processed, newest first. Policy Key is the Sohar payerId and the member ID\'s last 4.' }];
+      sections = [{ id: 'history', title: 'Verification history', cols: REC.VERIFICATION_HISTORY_COLS, rows: h.slice().reverse(), filters: ['Source', 'Kind', 'Sohar Status', 'Clinic', 'Policy Key'], view: REC.HTML_EXPORT_VIEWS.history, note: 'Every check the add-in processed, newest first. Policy Key is the Sohar payerId and the member ID\'s last 4.' }];
     } else if (kind === 'audits') {
       const a = await currentAudits(true);
       const hist = await X.readAccountAuditHistory().catch(() => []);
@@ -1859,8 +1993,8 @@
     const ex = HTML_EXPORTS[kind];
     return { name: REC.htmlReportFileName(ex.label), html: REC.htmlReport({ title: ex.title, subtitle: 'Sohar Eligibility', generated: fmtStamp(new Date()), version: VERSION, sections }) };
   }
-  async function saveHtmlExport(kind, boxId) {
-    const p = await htmlExportPage(kind);
+  async function saveHtmlExport(kind, boxId, clinic) {
+    const p = await htmlExportPage(kind, clinic);
     return saveBinary(p.name, new TextEncoder().encode(p.html), 'text/html;charset=utf-8', boxId, 'interactive web page');
   }
 
@@ -1888,18 +2022,27 @@
    * Sohar Flow results files (v0.20) dropped with the Sohar outputs: saved on the hidden Flow Results sheet (latest
    * per visit), never matched as verification or discovery. Returns {rest: the other files, html: a summary}.
    */
+  const RESULT_SHEET_COLS = () => C.RESULTS_COLS.concat(REC.ESTIMATE_RESULT_COLS, 'Pills', REC.LEDGER_RESULT_COLS); // v0.32: Source, Discovery and Cost estimate links
   async function takeFlowFiles(list) {
     const flow = list.filter((f) => REC.isFlowFile(f.rows));
-    const rest = list.filter((f) => !flow.includes(f));
-    if (!flow.length) return { rest, html: '' };
+    // Sohar's dashboard export of Flow runs has run IDs only (no outputs): say how to get the results instead of matching it.
+    const runs = list.filter((f) => !flow.includes(f) && REC.isSoharRunExport(f.rows));
+    const runNote = runs.length ? `<p class="warn">${runs.map((f) => esc(f.name)).join(', ')}: Sohar's run export lists run IDs, not results. Fetch the results with <code>node receiver.js runs --export "&lt;this file&gt;" --env production</code> (eligibility-check skill, scripts/flow) and upload the Flow Results CSV it writes.</p>` : '';
+    const rest = list.filter((f) => !flow.includes(f) && !runs.includes(f));
+    if (!flow.length) return { rest, html: runNote };
     const m = REC.mergeFlow(await currentFlow(true), flow, fmtStamp(new Date()));
     progress(`${flow.map((f) => f.name).join(', ')}: Sohar Flow results, ${m.read} visit${m.read === 1 ? '' : 's'}`);
     await X.writeFlowResults(REC.FLOW_SHEET_COLS, m.rows);
     state.flow = m.rows;
     // v0.31: the Flow's checks go on Verification History too (Source Flow).
     await appendHistory(REC.historyFromFlow(flow.flatMap((f) => REC.flowRecords(f.rows))), progress);
+    // A Flow / estimates file on its own: put its estimates on the Sohar Results rows now (a results upload does it otherwise).
+    if (!rest.length && !state.demo) {
+      try { const rs = await currentResults(); if (rs && rs.length) { state.results = REC.withEstimates(rs, m.rows); await X.writeResults(RESULT_SHEET_COLS(), state.results); } }
+      catch (e) { console.error(e); progress(`Sohar Results not updated with the estimates: ${e.message}`); }
+    }
     const sandbox = flow.some((f) => /sandbox/i.test(f.name));
-    return { rest, html: `<p class="ok">Sohar Flow: ${m.added} new visit${m.added === 1 ? '' : 's'}${m.replaced ? `, ${m.replaced} updated` : ''}; ${m.rows.length} saved. Cost estimates show at the top of each patient's record in full screen.${sandbox ? ' <b>Sandbox file: test results, not real coverage.</b>' : ''}</p>` };
+    return { rest, html: runNote + `<p class="ok">Sohar Flow: ${m.added} new visit${m.added === 1 ? '' : 's'}${m.replaced ? `, ${m.replaced} updated` : ''}; ${m.rows.length} saved. Cost estimates show at the top of each patient's record in full screen.${sandbox ? ' <b>Sandbox file: test results, not real coverage.</b>' : ''}</p>` };
   }
   /**
    * v0.31: add checks to the hidden Verification History (record.mergeHistory: append-only, a re-read updates fields,
@@ -1934,6 +2077,17 @@
     return state.flow || [];
   }
   /** Demo: made-up Flow results (sandbox) for the first three demo patients with a next visit. Invented amounts. */
+  /** v0.32: the rotation's Eligibility Checks in demo mode: one Austin patient the NextGen report doesn't have. Made up. */
+  function demoLedger() {
+    const now = new Date(), day = (off) => { const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() + off); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+    const base = { MRN: '990001', LASFIR: 'TEXAUS', Location: 'Austin', Provider: 'Pike, Robin MD', Route: 'Verification', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible',
+      'Verification ID': 'demo-v-990001', 'Sohar Link': 'https://app.soharhealth.com/verifications/demo-v-990001', Plan: 'Aetna Choice POS II', 'Sohar Payer': 'Aetna', Network: 'In network',
+      Deductible: '750', 'Deductible Remaining': '420', 'OOP Max': '3500', 'OOP Remaining': '2900', Copay: '', Coinsurance: '20%', 'Sohar Date': day(-1), 'Last Checked': `${day(0)} 07:30`,
+      'Cost Estimate ID': 'demo-ce-990001', 'Cost Estimate Link': 'https://app.soharhealth.com/cost-estimates/demo-ce-990001', 'Coverage Start': `01/01/${now.getFullYear()}` };
+    return [[1, '9:00 AM', 'Tel New Patient - Mature', '90792', '240.00', '240.00'], [8, '9:00 AM', 'Telepsych', '99214', '', '150.00'], [15, '9:00 AM', 'Telepsych', '99214', '', '150.00'], [22, '9:00 AM', 'Telepsych', '99214', '', '150.00']]
+      .map(([off, Time, Event, code, pr, allowed]) => ({ ...base, 'Row Key': `990001|${day(off)}|${Time}`, 'Appt Date': day(off), Time, Event, 'Est Codes': code, Allowed: allowed, 'Sohar Est Patient': pr,
+        'Estimate Note': pr ? `Codes quoted ${code}; Sohar Cost Estimate` : '' }));
+  }
   function demoFlow() {
     const seen = new Set(), out = [];
     for (const r of state.results || []) {
@@ -2023,7 +2177,17 @@
     const secBy = secondaryByPer();
     // Pills and Secondary Payer ride along for full screen (Secondary Payer is not written to the Results sheet).
     res.results = res.results.map((r) => ({ ...r, Pills: pillsFor(C.keyOf(r)), 'Secondary Payer': secBy.get(String(r['Per Nbr'])) || '' }));
-    await X.writeResults(C.RESULTS_COLS.concat('Pills'), res.results);
+    // v0.31 (11/13): each visit's plan-year cost estimate from Flow Results (Flow or the rotation's estimates file).
+    const flowNow = await currentFlow().catch(() => []);
+    res.results = REC.withEstimates(res.results, flowNow);
+    // v0.32 (Brendan, 11/13): the rotation's checks (Power Query's Eligibility Checks) join Sohar Results, history, the
+    // patient view and the exports, so clinics the Import report leaves out still show. Never NextGen tasks or payer
+    // outcomes: those stay on the Import's own results (res.results), and the rotation writes its own tasks.
+    const fromRotation = REC.withEstimates(REC.ledgerResults(await ledgerRows(), res.results, { asOf: res.asOf || localToday() })
+      .map((r) => ({ ...r, Pills: pillsFor(C.keyOf(r)) })), flowNow);
+    if (fromRotation.length) step(`${fromRotation.length} check${fromRotation.length === 1 ? '' : 's'} from the rotation's Eligibility Checks added (Source Rotation).`);
+    const shown = res.results.concat(fromRotation);
+    await X.writeResults(RESULT_SHEET_COLS(), shown);
     const tasks = C.keepDone(C.buildTasks(res.results, await taskOpts(res.results)), await X.readTasks());
     step(`Writing ${tasks.length} rows to the NextGen Tasks sheet…`);
     await X.writeTasks(C.TASK_COLS, tasks);
@@ -2039,7 +2203,7 @@
     const zips = new Map((await X.readVerifyFailed()).filter((r) => String(r.zipCode || '').trim()).map((r) => [state.perToKey.get(String(r.id)) || String(r.id), String(r.zipCode).trim()]));
     const vf = res.verificationDiscovery.map((r) => (r.zipCode ? r : { ...r, zipCode: zips.get(String(r.id)) || '' }));
     await X.writeVerifyFailed(C.DISCOVERY_SHEET_COLS, vf);
-    state.results = res.results; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv; state.verifyFailed = vf;
+    state.results = shown; state.resultsAsOf = res.asOf; state.tasks = tasks; state.discoveryVerify = dv; state.verifyFailed = vf;
     // Payer outcomes ledger (hidden Payer Outcomes sheet): every Sohar outcome, append-only, for payer learning.
     // "Clear saved Sohar results" does not touch it. A read error skips the update, so the ledger is never overwritten.
     let newOutcomes = 0;
@@ -2056,7 +2220,7 @@
     // v0.31: Verification History, every check kept with its date and Source (Import or Dashboard), per policy.
     // The rotation's own import files (… (rotation).csv) are Source Rotation, so the morning run never looks like the import.
     const rotIds = REC.rotationIds(list.map((f) => ({ name: f.name, records: C.readResultRows(f.rows).records })));
-    await appendHistory(REC.withSource(REC.historyFromResults(res.results), rotIds, 'Rotation'), step);
+    await appendHistory(REC.withSource(REC.historyFromResults(res.results), rotIds, 'Rotation').concat(REC.historyFromResults(fromRotation, 'Rotation')), step);
     // New outcomes can promote, demote or suggest payers: rebuild so the Payer Map, Patients and imports follow.
     // (The Sohar Results sheet picks up a changed mapping on the next refresh.)
     if (newOutcomes && state.patients) await build({ deferRules: true });
@@ -2226,7 +2390,7 @@
       codes: PK ? PK.mergeEstimateCodes(f.codes, F.ESTIMATE_CODE_SEEDS) : f.codes, defaults: PK ? PK.mergeEstimateDefaults(f.defaults) : f.defaults, appts: importAppts(),
       feeFlags: PK ? PK.feeFlags() : [],
       teleKeywords: (state.cfg && state.cfg.teleKeywords) || ['Tele'], cfgDefaults: state.cfg.fees.defaults, when: fmtStamp(new Date()),
-      pers: C.benefitsView(rs).rows.map((r) => r['Per Nbr']),
+      pers: C.benefitsView(rs).rows.map((r) => r['Per Nbr']).filter(Boolean), // v0.32: rotation checks have no Per Nbr
     });
     const save = async (kind, cols, all, label) => {
       const rows = PK ? PK.sheetOnly(all) : all; // built-in rows stay in the code, off the sheet
@@ -2550,7 +2714,7 @@
       flow: await currentFlow(), outcomes: await timelineOutcomes(), profiles: await patientProfiles(),
       // v0.27 IVN export: clinic -> kept/expected events per Per Nbr, and secondary payers, so full screen saves the same file.
       ivn: { visits: [...C.ivnIndex(state.patients || []).entries()], secondary: [...secondaryByPer().entries()] },
-      visits: await patientVisits(), notes: await patientNotesByKey(), audits: await currentAudits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames),
+      visits: await patientVisits(), notes: await patientNotesByKey(), audits: await currentAudits(), lastUpdated: await lastUpdatedStamps(), admins: REC.adminNames(state.cfg && state.cfg.adminNames), htmlClinics: await htmlClinicList().catch(() => []), visitPlan: await visitPlanRows(state.results || []).catch((e) => { console.warn('visit plan not built', e); return []; }), // v0.32
       // v0.30: open billing tickets, the account balance and financial notes per patient, and the Power Query refresh.
       billing: await billingByKey(), data: await queryStatus(), ticketRows: await ticketRowsForView(),
       // v0.28: who picked their name in the pane (ticks, notes, code rules and audits record it) and the list to switch to.
@@ -2828,7 +2992,7 @@
         throw e;
       }
     } else if (m.type === 'export-html') { // v0.31: an interactive HTML export asked for in full screen
-      try { const msg = await saveHtmlExport(m.kind, 'resultsResult'); await sendToDialog({ type: 'notice', ok: true, text: msg }); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
+      try { const msg = await saveHtmlExport(m.kind, 'resultsResult', m.clinic || ''); await sendToDialog({ type: 'notice', ok: true, text: msg }); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
     } else if (m.type === 'config-set') { // v0.31: an edit in the full-screen Config tab
       try {
         const text = await saveConfig(m.setting, m.value);
