@@ -2555,6 +2555,8 @@
       who: { name: who.name, users: whoList(), here: whoRead().used },
       // v0.31: the Config tab (same section as the pane) and the Import tab's daily NextGen list.
       config: configPayload(), daily: state.daily || null,
+      // v0.31: every check per policy (Verification History + the rotation's Patient History) for the patient view.
+      checks: { history: await currentHistory(), patient: state.demo ? [] : ((await X.readQueryTable('history').catch(() => null)) || []) },
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;

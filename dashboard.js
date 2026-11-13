@@ -86,6 +86,7 @@
     billing = m.billing || {}; dataSt = m.data || null; ticketRows = m.ticketRows || []; // v0.30
     savedAudits = m.audits || savedAudits;
     cfgData = m.config || cfgData; daily = m.daily || null; // v0.31 Config and Import tabs
+    checks = m.checks || { history: [], patient: [] };
     renderConfigFs(); renderImportFs();
     if (m.who) setWhoFrom(m.who);
     fees = F && m.fees && m.fees.on ? m.fees : null;
@@ -698,7 +699,7 @@
       <div class="pv-card pv-since"><div class="hint">Since last check</div><b>${esc(since.a)}</b><div class="hint">${esc(since.sub)}</div></div>
       <section class="pv-card pv-tl"><div class="hint pv-tl-h">${esc(cur ? [cur.payer, cur.memberId].filter(Boolean).join(' · ') : planTitle(c.r))} · current · newest first</div>
         <ol>${evs.map(evHtml).join('')}</ol></section>
-      <section class="pv-card pv-prev"><h4>Previous plans</h4>${prev.length ? prev.map(prevHtml).join('') : '<p class="hint">No earlier plans for this MRN.</p>'}</section>`;
+      <section class="pv-card pv-prev"><h4>Previous plans</h4>${prev.length ? prev.map(prevHtml).join('') : '<p class="hint">No earlier plans for this MRN.</p>'}</section>${checksByPolicyHtml(c.k)}`;
   }
   const statusTone = (s) => (/eligible$|found|active/i.test(s) && !/ineligible|not found/i.test(s) ? 'green' : /error|ineligible|inactive|not found/i.test(s) ? 'red' : 'grey');
   function resultEvent(r, marks) {
@@ -1491,7 +1492,14 @@
   }
 
   // ---------- v0.31: Import and Config tabs (every workbook write goes to the pane) ----------
-  let cfgData = null, daily = null;
+  let cfgData = null, daily = null, checks = { history: [], patient: [] };
+  /** v0.31: every check of this patient, one list per policy (record.policyTimeline), newest first. */
+  function checksByPolicyHtml(k) {
+    const tl = REC.policyTimeline(checks.history, checks.patient, k);
+    if (!tl.length) return '';
+    const row = (r) => `<div class="pv-pitem"><b>${esc(r.Kind || 'Check')}</b> · ${esc(sd(r['Pulled At']) || r['Pulled At'])} · ${esc(r['Sohar Status'] || '—')} <span class="hint">${esc(r.Source || '')}</span>${/^https:\/\//.test(r['Sohar Link'] || '') ? ` <a href="${esc(r['Sohar Link'])}" target="_blank" rel="noopener">Sohar</a>` : ''}</div>`;
+    return `<section class="pv-card pv-prev"><h4>Checks by policy</h4>${tl.map((g, i) => `<details${i === 0 ? ' open' : ''}><summary><b>${esc(g.payer || 'Unknown payer')}</b> <span class="hint">${esc([g.policyKey ? `${g.payerId} ending ${g.last4 || '?'}` : '', `${g.rows.length} check${g.rows.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</span></summary>${g.rows.map(row).join('')}</details>`).join('')}</section>`;
+  }
   function renderImportFs() {
     const d = $('dailyFs');
     if (d) {
@@ -1830,6 +1838,11 @@
       config: { model: C.configModel({}, F ? F.PLAN_YEAR_CONFIG_ROWS : []), look: { feesOn: false, feePayerMap: [], estimateCodes: F ? F.ESTIMATE_CODE_SEEDS.slice(0, 12) : [] },
         payers: [{ name: 'Synthetic Health Plan', n: 2, label: 'Not mapped', needs: true, guess: '', evidence: '', flag: '', choices: [{ label: 'Synthetic Health (00001)', kind: 'use', payerId: '00001', payerName: 'Synthetic Health' }, { label: 'Not a payer (self-pay, VIP, a placeholder)', kind: 'not', payerId: '', payerName: '' }] }] },
       daily: { rows: 42, at: '11/12/2026 7:30 AM', text: 'Up to date.' },
+      // v0.31: made-up checks for one patient on two policies (the old one stays after a new one is found).
+      checks: { history: [
+        { MRN: '80100', 'Pulled At': '2026-11-10T15:00:00.000Z', Kind: 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Payer': 'Blue Shield of California', 'Policy Key': '94036#0101', Source: 'Import', 'Sohar ID': 'demo-v1' },
+        { MRN: '80100', 'Pulled At': '2026-09-02T15:00:00.000Z', Kind: 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Payer': 'Synth Mutual', 'Policy Key': '00001#7777', Source: 'Flow', 'Sohar ID': 'demo-v0' }],
+        patient: [{ 'Row Key': 'demo-r1', MRN: '80100', When: '2026-10-20T14:00:00Z', Kind: 'Verification', Detail: 'complete.eligible · Blue Shield of California', Source: 'Rotation', Ref: 'demo-r1' }] },
       lastUpdated: { report: new Date(Date.now() - 2 * 36e5).toISOString(), sohar: new Date(Date.now() - 3 * 864e5).toISOString(), flow: new Date().toISOString() } });
     // #patient opens the first demo patient's record (for checking the layout), #patient/<section> a section of it;
     // other hashes pick a tab.
