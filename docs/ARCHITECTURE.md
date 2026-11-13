@@ -258,6 +258,16 @@ Sohar results also has a Schedule view, the default: each day, one column per pr
 time order. A card carries every check for that visit (status badge, payer, copay and coinsurance, bars, links) and any Work
 Queue action. The details and the schedule read only the columns the export keeps, so names, DOBs and member IDs never appear.
 
+**Cost estimates (11/13).** The 7 AM rotation writes its plan-year estimates as a Flow Results file,
+`Sohar Flow Results - Plan-Year Estimates <date> (rotation).csv` (FLOW_COLS, Source Rotation, Run Status "Rotation estimate",
+one row per visit: Est Codes / Sohar Est Patient for the visit's own code, Est 90792 / 99214 / 99215 for the plan-year quotes).
+The Sohar results upload takes it like the Flow's own results. Its rows stay off Verification History, because their verification
+already arrived from the rotation's verification import with its real date. Sohar Results gains Est Code, Est Patient, Est 90792 /
+99214 / 99215, Estimate Note, Estimate Source and Estimate Date (`record.withEstimates`: MRN + visit date, else the patient's
+latest per-code quotes). Sohar's own dashboard export of Flow runs has run IDs only: the upload says to fetch the results with
+`receiver.js runs --export` and upload the CSV that writes. The rotation estimates a policy only when it has no Sohar estimate
+yet this plan year; one from before v0.31 (one code) counts, and a fee-math fallback (no fee column, rate or TIN) is retried.
+
 ## 8. Privacy
 - **Sheets and CSVs:** LASFIR and MRN only. No names, DOBs or member IDs, except the Sohar import CSVs, which Sohar needs
   and which are saved to OneDrive only.

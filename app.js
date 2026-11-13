@@ -1843,8 +1843,13 @@
     } else if (kind === 'results') {
       const rs = (await currentResults()) || [];
       if (!rs.length) throw new Error('No Sohar results yet (step 3).');
-      const cols = REC.HTML_EXPORT_COLS.results;
-      sections = [{ id: 'results', title: 'Sohar results', cols, rows: pick(cols, rs), filters: ['Next Provider', 'Next Location', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'], view: REC.HTML_EXPORT_VIEWS.results, note: 'Schedule: each day, one column per provider. Open a card or a table row for the benefit details.' }];
+      const cols = REC.HTML_EXPORT_COLS.results, flowRows = await currentFlow().catch(() => []);
+      const estRows = (flowRows || []).filter((f) => !/sandbox/i.test(String(f.File || '')) && ['Sohar Est Patient', 'Est 90792', 'Est 99214', 'Est 99215'].some((c) => String(f[c] ?? '').trim() !== ''));
+      const ecols = REC.HTML_EXPORT_COLS.estimates;
+      sections = [{ id: 'results', title: 'Sohar results', cols, rows: pick(cols, REC.withEstimates(rs, flowRows)), filters: ['Next Provider', 'Next Location', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'], view: REC.HTML_EXPORT_VIEWS.results, note: 'Schedule: each day, one column per provider. Open a card or a table row for the benefit details.' }];
+      if (estRows.length) sections.push({ id: 'estimates', title: 'Plan-year cost estimates', cols: ecols, rows: pick(ecols, estRows.slice().sort((a, b) => String(b['Last Updated']).localeCompare(String(a['Last Updated'])))),
+        filters: ['Source', 'Location', 'Sohar Payer', 'Est Codes', 'Reset Basis'], view: REC.HTML_EXPORT_VIEWS.estimates,
+        note: 'From Flow Results: the production Flow and the 7 AM rotation. Est Codes is the visit\'s own code; Est 90792 / 99214 / 99215 are the plan-year quotes (patient share).' });
     } else if (kind === 'history') {
       const h = await X.readVerificationHistory();
       if (!h.length) throw new Error('Verification History is empty: it fills as Sohar results and Flow results are uploaded.');
@@ -1888,18 +1893,27 @@
    * Sohar Flow results files (v0.20) dropped with the Sohar outputs: saved on the hidden Flow Results sheet (latest
    * per visit), never matched as verification or discovery. Returns {rest: the other files, html: a summary}.
    */
+  const RESULT_SHEET_COLS = () => C.RESULTS_COLS.concat(REC.ESTIMATE_RESULT_COLS, 'Pills');
   async function takeFlowFiles(list) {
     const flow = list.filter((f) => REC.isFlowFile(f.rows));
-    const rest = list.filter((f) => !flow.includes(f));
-    if (!flow.length) return { rest, html: '' };
+    // Sohar's dashboard export of Flow runs has run IDs only (no outputs): say how to get the results instead of matching it.
+    const runs = list.filter((f) => !flow.includes(f) && REC.isSoharRunExport(f.rows));
+    const runNote = runs.length ? `<p class="warn">${runs.map((f) => esc(f.name)).join(', ')}: Sohar's run export lists run IDs, not results. Fetch the results with <code>node receiver.js runs --export "&lt;this file&gt;" --env production</code> (eligibility-check skill, scripts/flow) and upload the Flow Results CSV it writes.</p>` : '';
+    const rest = list.filter((f) => !flow.includes(f) && !runs.includes(f));
+    if (!flow.length) return { rest, html: runNote };
     const m = REC.mergeFlow(await currentFlow(true), flow, fmtStamp(new Date()));
     progress(`${flow.map((f) => f.name).join(', ')}: Sohar Flow results, ${m.read} visit${m.read === 1 ? '' : 's'}`);
     await X.writeFlowResults(REC.FLOW_SHEET_COLS, m.rows);
     state.flow = m.rows;
     // v0.31: the Flow's checks go on Verification History too (Source Flow).
     await appendHistory(REC.historyFromFlow(flow.flatMap((f) => REC.flowRecords(f.rows))), progress);
+    // A Flow / estimates file on its own: put its estimates on the Sohar Results rows now (a results upload does it otherwise).
+    if (!rest.length && !state.demo) {
+      try { const rs = await currentResults(); if (rs && rs.length) { state.results = REC.withEstimates(rs, m.rows); await X.writeResults(RESULT_SHEET_COLS(), state.results); } }
+      catch (e) { console.error(e); progress(`Sohar Results not updated with the estimates: ${e.message}`); }
+    }
     const sandbox = flow.some((f) => /sandbox/i.test(f.name));
-    return { rest, html: `<p class="ok">Sohar Flow: ${m.added} new visit${m.added === 1 ? '' : 's'}${m.replaced ? `, ${m.replaced} updated` : ''}; ${m.rows.length} saved. Cost estimates show at the top of each patient's record in full screen.${sandbox ? ' <b>Sandbox file: test results, not real coverage.</b>' : ''}</p>` };
+    return { rest, html: runNote + `<p class="ok">Sohar Flow: ${m.added} new visit${m.added === 1 ? '' : 's'}${m.replaced ? `, ${m.replaced} updated` : ''}; ${m.rows.length} saved. Cost estimates show at the top of each patient's record in full screen.${sandbox ? ' <b>Sandbox file: test results, not real coverage.</b>' : ''}</p>` };
   }
   /**
    * v0.31: add checks to the hidden Verification History (record.mergeHistory: append-only, a re-read updates fields,
@@ -2023,7 +2037,9 @@
     const secBy = secondaryByPer();
     // Pills and Secondary Payer ride along for full screen (Secondary Payer is not written to the Results sheet).
     res.results = res.results.map((r) => ({ ...r, Pills: pillsFor(C.keyOf(r)), 'Secondary Payer': secBy.get(String(r['Per Nbr'])) || '' }));
-    await X.writeResults(C.RESULTS_COLS.concat('Pills'), res.results);
+    // v0.31 (11/13): each visit's plan-year cost estimate from Flow Results (Flow or the rotation's estimates file).
+    res.results = REC.withEstimates(res.results, await currentFlow().catch(() => []));
+    await X.writeResults(RESULT_SHEET_COLS(), res.results);
     const tasks = C.keepDone(C.buildTasks(res.results, await taskOpts(res.results)), await X.readTasks());
     step(`Writing ${tasks.length} rows to the NextGen Tasks sheet…`);
     await X.writeTasks(C.TASK_COLS, tasks);

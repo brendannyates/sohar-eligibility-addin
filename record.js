@@ -97,6 +97,32 @@
   }
   /** "$45.00" style amounts from a Flow row, '' when blank. */
   const flowAmount = (v) => { const n = num(v); return n == null ? '' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`; };
+  // v0.31 (11/13): plan-year cost estimates on the Sohar Results rows, from Flow Results (the production Flow, or the 7 AM
+  // rotation's "Sohar Flow Results - Plan-Year Estimates … (rotation).csv"). Matched on MRN + visit date for the visit's own code
+  // (Est Code / Est Patient); otherwise the patient's latest per-code estimate fills Est 90792 / 99214 / 99215 only. Sandbox rows never.
+  const ESTIMATE_RESULT_COLS = ['Est Code', 'Est Patient', 'Est 90792', 'Est 99214', 'Est 99215', 'Estimate Note', 'Estimate Source', 'Estimate Date'];
+  const PER_CODE_COLS = ['Est 90792', 'Est 99214', 'Est 99215'];
+  function withEstimates(results, flowRows) {
+    const mk = (m) => str(m).replace(/^0+/, '');
+    const dk = (d) => { const t = C.parseDate(str(d)); return t ? C.fmtDate(t) : str(d); };
+    const perCode = (f) => PER_CODE_COLS.some((c) => num(f[c]) != null);
+    const usable = (flowRows || []).filter((f) => !isSandbox(f) && (num(f['Sohar Est Patient']) != null || perCode(f))).sort((a, b) => updatedMs(a) - updatedMs(b));
+    const byVisit = new Map(), byMrn = new Map();
+    for (const f of usable) { byVisit.set(mk(f.MRN) + '|' + dk(f['Appt Date']), f); if (perCode(f)) byMrn.set(mk(f.MRN), f); }
+    return (results || []).map((r) => {
+      const o = { ...r, ...Object.fromEntries(ESTIMATE_RESULT_COLS.map((c) => [c, ''])) };
+      const v = str(r.MRN) && str(r['Next Appt']) ? byVisit.get(mk(r.MRN) + '|' + dk(r['Next Appt'])) : null, f = v || byMrn.get(mk(r.MRN));
+      if (!f) return o;
+      return Object.assign(o, { 'Est Code': v ? str(f['Est Codes']) : '', 'Est Patient': v ? flowAmount(f['Sohar Est Patient']) : '',
+        ...Object.fromEntries(PER_CODE_COLS.map((c) => [c, flowAmount(f[c])])), 'Estimate Note': str(f['Estimate Note']),
+        'Estimate Source': str(f.Source) || 'Flow', 'Estimate Date': str(f['Last Updated'] || f.Started).slice(0, 10) });
+    });
+  }
+  /** Sohar's own dashboard export of Flow runs: run IDs and inputs only, no outputs (the receiver fetches those). */
+  function isSoharRunExport(rows) {
+    if (isFlowFile(rows)) return false;
+    return (rows || []).slice(0, 10).some((r) => (r || []).some((c) => /^(flowrunid|runid)$/i.test(str(c).replace(/[\s_-]/g, ''))));
+  }
 
   // ---------- one record per patient ----------
   const timeOf = (r) => { const t = C.soharTime(r['Sohar Date']); return isNaN(t) ? -Infinity : t; };
@@ -479,6 +505,10 @@
   function historyFromFlow(flowRows) {
     const out = [];
     for (const r of flowRows || []) {
+      // The rotation's estimates file re-states verifications it did days earlier, stamped with the estimate's time. Those
+      // checks reach history from the rotation's own verification import files with their real dates; a copy dated today would
+      // make the visit look freshly verified. Its estimates stay on Flow Results (estimateDueFor reads them there).
+      if (/^rotation estimate$/i.test(str(r['Run Status']))) continue;
       const disc = /discover/i.test(str(r['Estimate Policy']));
       const id = linkId(disc ? r['Discovered Verification Link'] : r['NextGen Verification Link']) || linkId(r['Discovered Verification Link']) || linkId(r['NextGen Verification Link']);
       if (!id) continue;
@@ -490,7 +520,7 @@
         Copay: str(r.Copay), Coinsurance: str(r.Coinsurance), Deductible: str(r.Deductible), 'Deductible Remaining': str(r['Deductible Remaining']),
         'OOP Max': str(r['OOP Max']), 'OOP Remaining': str(r['OOP Remaining']), 'Sohar ID': id,
         'Sohar Link': `https://app.soharhealth.com/verifications/${id}`, 'Related Sohar IDs': linkId(r['Discovery Link']),
-        'Policy Key': str(r['Policy Key']), 'Projected Patient Responsibility': str(r['Sohar Est Patient']), 'Estimate Note': str(r['Estimate Note']), Source: 'Flow',
+        'Policy Key': str(r['Policy Key']), 'Projected Patient Responsibility': str(r['Sohar Est Patient']), 'Estimate Note': str(r['Estimate Note']), Source: str(r.Source) || 'Flow',
       });
     }
     return out;
@@ -596,18 +626,27 @@
   const HTML_EXPORT_COLS = {
     patients: ['LASFIR', 'MRN', 'State', 'Route', 'In Scope', 'Next Appt', 'Next Event', 'POS', 'Primary Payer', 'Sohar payerId', 'Confidence', 'Secondary Payer', 'Flags'],
     results: ['LASFIR', 'Next Appt', 'Next Time', 'Next Provider', 'Next Event', 'Next Location', 'MRN', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Benefit Flag',
-      'Plan', 'Network', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining', 'NextGen Payer',
+      'Plan', 'Network', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining',
+      'Est Code', 'Est Patient', 'Est 90792', 'Est 99214', 'Est 99215', 'Estimate Source', 'Estimate Date', 'Estimate Note', 'NextGen Payer',
       'Sohar Payer', 'Sohar payerId', 'Match', 'Discovery Follow-up', 'Sohar Link', 'Sohar Date'],
+    estimates: ['LASFIR', 'MRN', 'Appt Date', 'Time', 'Event', 'Location', 'Provider', 'Sohar Payer', 'Plan', 'Network', 'Est Codes', 'Sohar Est Patient', 'Est 90792',
+      'Est 99214', 'Est 99215', 'Reset Basis', 'Source', 'Estimate Note', 'NextGen Verification Link', 'Discovered Verification Link', 'Last Updated'],
   };
   const BENEFIT_BARS = [['Deductible', 'Deductible', 'Deductible Remaining'], ['OOP max', 'OOP Max', 'OOP Remaining']];
   // Per export: details (fields and bars in the expandable row) and schedule (which columns place a card).
   const HTML_EXPORT_VIEWS = {
     results: {
       details: { fields: ['Sent As', 'Sohar Status', 'Plan', 'Network', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'NextGen Payer', 'Sohar Payer',
-        'Sohar payerId', 'Match', 'Benefit Flag', 'Work Queue', 'Action', 'Discovery Follow-up', 'Sohar Date'], bars: BENEFIT_BARS },
+        'Sohar payerId', 'Match', 'Benefit Flag', 'Work Queue', 'Action', 'Discovery Follow-up', 'Sohar Date', 'Est Code', 'Est Patient', 'Est 90792', 'Est 99214', 'Est 99215',
+        'Estimate Source', 'Estimate Date', 'Estimate Note'], bars: BENEFIT_BARS },
       schedule: { date: 'Next Appt', time: 'Next Time', column: 'Next Provider', person: 'LASFIR', id: 'MRN', visit: ['Next Event', 'Next Location'],
         kind: 'Sent As', status: 'Sohar Status', payer: ['Sohar Payer', 'NextGen Payer'], queue: 'Work Queue', action: 'Action',
-        facts: [['Copay', 'Copay'], ['Coins', 'Coinsurance'], ['', 'Network'], ['', 'Benefit Flag']], bars: BENEFIT_BARS },
+        facts: [['Copay', 'Copay'], ['Coins', 'Coinsurance'], ['', 'Network'], ['', 'Benefit Flag']], bars: BENEFIT_BARS,
+        estimate: { code: 'Est Code', amount: 'Est Patient', perCode: PER_CODE_COLS, source: 'Estimate Source' } },
+    },
+    estimates: {
+      details: { fields: ['Appt Date', 'Event', 'Provider', 'Sohar Payer', 'Plan', 'Network', 'Est Codes', 'Sohar Est Patient', 'Est 90792', 'Est 99214', 'Est 99215',
+        'Reset Basis', 'Source', 'Estimate Note', 'Last Updated'], bars: [] },
     },
     history: {
       details: { fields: ['Pulled At', 'Kind', 'Sohar Status', 'Sohar Payer', 'Plan', 'Network', 'Coverage Level', 'Coverage Start', 'Coverage End', 'Copay',
@@ -665,7 +704,7 @@ tr.dt>td{background:var(--sunken);padding:10px 12px 12px 40px;white-space:normal
 .top{display:flex;gap:8px;align-items:baseline}.tm{font-weight:600;font-variant-numeric:tabular-nums;min-width:62px}.who{font-weight:700;letter-spacing:.03em}.top .muted{margin-left:auto}
 .todo{background:color-mix(in srgb,var(--amber) 12%,transparent);border-radius:4px;padding:4px 7px;font-size:12px}.todo b{color:var(--amber)}
 .chk{display:grid;gap:5px;border-top:1px dashed var(--line);padding-top:6px}.ch{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center}.kind{font-size:11.5px;color:var(--muted)}
-.facts{color:var(--muted);font-size:11.5px}.card details summary{cursor:pointer;color:var(--muted);font-size:11.5px}.card details .panel{display:block;margin-top:6px}.card details .meters,.card details .links{display:none}
+.facts{color:var(--muted);font-size:11.5px}.est{font-size:12px;background:color-mix(in srgb,var(--blue) 9%,transparent);border-radius:4px;padding:4px 7px}.est b{font-variant-numeric:tabular-nums}.card details summary{cursor:pointer;color:var(--muted);font-size:11.5px}.card details .panel{display:block;margin-top:6px}.card details .meters,.card details .links{display:none}
 .empty{padding:18px 4px;text-align:center}.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 footer{padding:10px 20px 20px;color:var(--muted);font-size:11.5px}
 @media (max-width:700px){.search{flex-basis:100%}.panel{grid-template-columns:1fr}}
@@ -809,6 +848,11 @@ ${body}
           const tones = rs.map((r) => statusTone(g(r, sp.status)));
           const tone = queue ? 'warn' : ['ok', 'bad', 'warn'].find((t) => tones.includes(t)) || '';
           const visit = (sp.visit || []).map((k) => g(v.r, k)).filter(Boolean).join(' · ');
+          const es = sp.estimate, eRow = es ? rs.find((r) => g(r, es.amount) || es.perCode.some((k) => g(r, k))) : null;
+          // The visit's own code first, then the other plan-year quotes (patient share).
+          const codesOf = (r) => es.perCode.filter((k) => g(r, k) && !(g(r, es.amount) && k === `Est ${g(r, es.code)}`)).map((k) => escH(k.replace(/^Est /, '') + ' ' + g(r, k))).join(' · ');
+          const estLine = !eRow ? '' : '<div class="est">' + (g(eRow, es.amount) ? 'Estimate ' + escH(g(eRow, es.code)) + ' <b>' + escH(g(eRow, es.amount)) + '</b>' : 'Plan-year estimate')
+            + (codesOf(eRow) ? '<span class="muted"> · plan year ' + codesOf(eRow) + '</span>' : '') + (g(eRow, es.source) ? '<span class="muted"> · ' + escH(g(eRow, es.source)) + '</span>' : '') + '</div>';
           const checks = rs.map((r) => {
             const st = g(r, sp.status), payer = (sp.payer || []).map((k) => g(r, k)).find(Boolean) || '';
             const facts = (sp.facts || []).map(([l, k]) => [l, g(r, k)]).filter(([, x]) => x).map(([l, x]) => escH(l ? `${l} ${x}` : x)).join(' · ');
@@ -817,7 +861,7 @@ ${body}
               + `${facts ? `<div class="facts">${facts}</div>` : ''}${m ? `<div class="meters">${m}</div>` : ''}${l ? `<div class="links">${l}</div>` : ''}</div>`;
           }).join('');
           return `<article class="card ${tone}" data-rows="${v.idx.join(' ')}"><div class="top"><span class="tm">${escH(g(v.r, sp.time) || '—')}</span><span class="who">${escH(g(v.r, sp.person))}</span><span class="muted">${escH(g(v.r, sp.id))}</span></div>`
-            + `${visit ? `<div class="muted">${escH(visit)}</div>` : ''}${queue ? `<div class="todo"><b>${escH(queue)}</b>${action ? `: ${escH(action)}` : ''}</div>` : ''}${checks}`
+            + `${visit ? `<div class="muted">${escH(visit)}</div>` : ''}${queue ? `<div class="todo"><b>${escH(queue)}</b>${action ? `: ${escH(action)}` : ''}</div>` : ''}${estLine}${checks}`
             + `${det ? `<details><summary>Details</summary>${rs.map(panel).join('')}</details>` : ''}</article>`;
         };
         const byTime = (a, b) => reportMinutes(g(a.r, sp.time)) - reportMinutes(g(b.r, sp.time)) || g(a.r, sp.person).localeCompare(g(b.r, sp.person));
@@ -1145,5 +1189,5 @@ ${s.note ? `<p class="muted note">${escH(s.note)}</p>` : ''}<div class="filters"
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,
     addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName,
     // v0.31
-    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, rotationIds, withSource, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor, HTML_EXPORT_COLS, HTML_EXPORT_VIEWS, htmlReport, htmlReportFileName, statusTone, soharLinkLabel, benefitMeter };
+    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, rotationIds, withSource, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor, HTML_EXPORT_COLS, HTML_EXPORT_VIEWS, ESTIMATE_RESULT_COLS, withEstimates, isSoharRunExport, htmlReport, htmlReportFileName, statusTone, soharLinkLabel, benefitMeter };
 });
