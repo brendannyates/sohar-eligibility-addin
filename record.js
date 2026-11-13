@@ -21,7 +21,9 @@
     'Discovery Status', 'Discovered Payer', 'Policy vs NextGen', 'NextGen Payer ID', 'NextGen Policy Status', 'Discovered Policy Status',
     'Estimate Policy', 'Network', 'Plan', 'Sohar Payer', 'Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining', 'Copay',
     'Coinsurance', 'Fee Tab', 'Rate Level', 'Est Codes', 'Sohar Est Patient', 'Sohar Est Plan Pays', 'Estimate Note', 'Discovery Link',
-    'Discovered Verification Link', 'NextGen Verification Link', 'Started', 'Last Updated', 'Note'];
+    'Discovered Verification Link', 'NextGen Verification Link', 'Started', 'Last Updated', 'Note',
+    // v0.31: where the check came from (Flow), the picked policy (payerId#last 4), its Reset Basis, and the plan-year lines' PR.
+    'Source', 'Policy Key', 'Reset Basis', 'Est 90792', 'Est 99214', 'Est 99215'];
   const FLOW_SHEET_COLS = FLOW_COLS.concat('File', 'Uploaded');
   const FLOW_MARKS = ['Flow Run ID', 'Sohar Est Patient'];
 
@@ -45,6 +47,7 @@
       if (!(r || []).some((v) => str(v))) continue;
       const o = {};
       for (const c of FLOW_COLS) { const j = hd.h.indexOf(c); o[c] = j < 0 ? '' : str(r[j]); }
+      if (!o.Source) o.Source = 'Flow'; // files from before v0.31 have no Source column
       if (!o.Key) o.Key = o['Flow Run ID'] || (o.MRN && o['Appt Date'] ? `${o.MRN}|${o['Appt Date']}|${o.Time}` : '');
       if (o.Key) out.push(o);
     }
@@ -375,40 +378,286 @@
     return (saved || []).filter((r) => { if (str(r.Item) === 'note') return true; const d = C.parseDate(r['Appt Date']); return !d || d >= t0; });
   }
 
-  // ---------- Sohar Flow import (v0.21) ----------
-  // The CSV template Sohar gives for the "MHS Eligibility - Discovery vs NextGen" Flow, exactly, in order. One row per
-  // patient. The Flow's rateTable is an object and has no CSV column, so Flow runs from this file get discovery, the
-  // NextGen policy check and network status, but no cost estimate.
+  // ---------- Sohar Flow import (v0.21; v0.31 columns per docs/ARCHITECTURE.md section 5) ----------
+  // The CSV template of the production "MHS Eligibility - Discovery vs NextGen" Flow (template v27), exactly, in order.
+  // One row per patient. No tin: the Flow template looks the TIN up by providerGroupName. estimate is "yes" only when
+  // the policy's plan-year estimate is due (fees.planYearEstimateDue); rateTable is a JSON string the Flow parses
+  // ($eval): {"<Sohar payerId>": [{"code": "99214", "contractedRate": 0.00}, ...]}.
   const FLOW_IMPORT_COLS = ['id', 'patient.firstName', 'patient.lastName', 'patient.dateOfBirth', 'patient.state', 'placeOfServiceCode',
-    'specialtyCode', 'chartPayerId', 'chartMemberId', 'tin', 'providerGroupName'];
-  const FLOW_IMPORT_CONFIG_ROWS = [
-    { setting: 'TIN', value: '', what: 'Sohar Flow import: the practice tax ID (tin column). Blank: left blank on every row.' },
-    { setting: 'Sohar provider group', value: '', what: 'Sohar Flow import: the provider group name the Flow checks network status for (providerGroupName). Blank: the overall network status.' },
-  ];
+    'specialtyCode', 'chartPayerId', 'chartMemberId', 'providerGroupName', 'estimate', 'rateTable'];
+  // Sohar's provider group names, by the patient's state (exactly as Sohar has them).
+  const PROVIDER_GROUPS = { CA: 'MINDFUL HEALTH SOLUTIONS A PROFESSIONAL MEDICAL CORPORATION', TX: 'Mindful Health Solutions TX PA', WA: 'Mindful Health Solutions Wa Pc' };
+  // v0.31: the TIN and Sohar provider group rows are gone (the Flow has them); the plan-year codes row is fees.PLAN_YEAR_CONFIG_ROWS.
+  const FLOW_IMPORT_CONFIG_ROWS = [];
   /**
-   * Flow import rows from the built patients (core.buildPatients after the re-verify skip). In scope only. chartPayerId
+   * Flow import rows from the built patients (core.buildPatients after the freshness rule). In scope only. chartPayerId
    * and chartMemberId are the NextGen policy the Flow checks discovery against: filled only for patients routed to
-   * verification (a confident payer), from their first insurance; discovery patients get blanks, so a guessed payer is
-   * never verified as the chart policy. Left out: every insurance verified eligible inside the skip window (no repeat
-   * Sohar calls), and rows the Flow would reject (no name, DOB or state).
-   * Returns {rows, skipped: [{key, why}]}.
+   * verification (a confident payer), from their first insurance still due; discovery patients get blanks, so a guessed
+   * payer is never verified as the chart policy. Left out: a service line with Include in import Off (x.excluded), every
+   * insurance not due under the freshness rule, and rows the Flow would reject (no name, DOB or state).
+   * cfg: {specialty, estimateOf(p, v) -> true/'yes' when the plan-year estimate is due, rateTableOf(p, v) -> {payerId:
+   * lines} or a JSON string}. Returns {rows, skipped: [{key, why}], estimates (rows with estimate yes)}.
    */
   function flowImportRows(patients, cfg) {
     const c = cfg || {};
     const rows = [], skipped = [];
+    let estimates = 0;
     for (const p of patients || []) {
       if (p['In Scope'] !== 'Yes') continue;
       const key = C.keyOf(p);
       const vrs = (p.x && p.x.verifyRows) || [];
-      if (p.Route === 'verification' && vrs.length && vrs.every((v) => v.reverifySkip)) { skipped.push({ key, why: 'verified eligible recently (skip window)' }); continue; }
+      if (p.x && p.x.excluded) { skipped.push({ key, why: p.x.excluded.reason || 'service line Off in Config' }); continue; }
+      if (p.Route === 'verification' && vrs.length && vrs.every((v) => v.reverifySkip)) { skipped.push({ key, why: 'already covered, or too early to re-verify' }); continue; }
       if (!str(p['First Name']) || !str(p['Last Name']) || !str(p.DOB) || !str(p.State)) { skipped.push({ key, why: 'no name, DOB or state' }); continue; }
       const v = p.Route === 'verification' ? (vrs.find((x) => !x.reverifySkip) || { payerId: p['Sohar payerId'], memberId: p['Member ID'] }) : null;
+      const est = typeof c.estimateOf === 'function' ? c.estimateOf(p, v) : false;
+      const yes = est === true || /^yes$/i.test(str(est)) || !!(est && est.due);
+      let rt = yes && typeof c.rateTableOf === 'function' ? c.rateTableOf(p, v) : null;
+      if (rt && typeof rt === 'object') rt = Object.keys(rt).length ? JSON.stringify(rt) : '';
+      if (yes) estimates++;
       rows.push({ id: key, 'patient.firstName': str(p['First Name']), 'patient.lastName': str(p['Last Name']), 'patient.dateOfBirth': str(p.DOB),
         'patient.state': str(p.State), placeOfServiceCode: str(p.POS), specialtyCode: str(c.specialty) || 'PSY',
-        chartPayerId: v ? str(v.payerId) : '', chartMemberId: v ? str(v.memberId) : '', tin: str(c.tin), providerGroupName: str(c.providerGroup) });
+        chartPayerId: v ? str(v.payerId) : '', chartMemberId: v ? str(v.memberId) : '',
+        providerGroupName: PROVIDER_GROUPS[str(p.State).toUpperCase()] || '', estimate: yes ? 'yes' : 'no', rateTable: str(rt) });
     }
-    return { rows, skipped };
+    return { rows, skipped, estimates };
   }
+  // ---------- Verification History (v0.31, docs/ARCHITECTURE.md section 5) ----------
+  // One row per Sohar check the add-in processed (Source Import, Flow or Dashboard), never replaced, sorted by Pulled At.
+  // The rotation's Eligibility History.csv columns, so a policy's timeline merges both (policyTimeline). No member ID:
+  // Policy Key is the Sohar payerId + '#' + the member ID's last 4 characters.
+  const VERIFICATION_HISTORY_COLS = ['Pulled At', 'LASFIR', 'MRN', 'Per Nbr', 'Clinic', 'Kind', 'Sohar Status', 'Sohar Payer', 'Sohar payerId', 'Plan',
+    'Network', 'Coverage Level', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'Deductible Status',
+    'OOP Max', 'OOP Remaining', 'OOP Status', 'Benefit Flag', 'Sohar ID', 'Sohar Link', 'Related Sohar IDs', 'Policy Key',
+    'Projected Patient Responsibility', 'Estimate Note', 'Source'];
+  const HISTORY_SOURCES = ['Import', 'Flow', 'Rotation', 'Dashboard', 'Webhook'];
+  /** "94036#7890" from a Sohar payerId and a member ID (letters and digits, last 4, upper case); '' without a payerId. */
+  function policyKey(payerId, memberId) {
+    const id = str(payerId);
+    if (!id) return '';
+    return `${id}#${str(memberId).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(-4)}`;
+  }
+  const isoOf = (v) => { const t = C.soharTime(v); return isNaN(t) ? str(v) : new Date(t).toISOString(); };
+  const linkId = (v) => { const m = /\/(?:verifications|discovery)\/([^/?#"]+)/.exec(str(v)); return m ? m[1] : ''; };
+  // An id match (MRN, Per Nbr, Sohar ref) is a check the add-in's own import sent; anything else came from the dashboard.
+  const importMatch = (m) => /^(mrn|per nbr|id|sohar ref)/i.test(str(m));
+  /**
+   * Sohar Results rows (mergeSoharResults) -> Verification History rows. Rows with no Sohar ref, not in the Sohar
+   * file, or matched by name only / not at all are left out (they may be someone else). source: 'Import' or 'Dashboard';
+   * blank = by match (an id match is Import, else Dashboard).
+   */
+  /**
+   * The Sohar ids in a set of uploaded result files that the 7 AM rotation wrote ("… (rotation).csv", lib.js writeImports):
+   * their history rows are Source Rotation, not Import, even though they match by MRN. files: [{name, records}].
+   */
+  function rotationIds(files) {
+    const ids = new Set();
+    for (const f of files || []) { if (!/\(rotation\)/i.test(str(f && f.name))) continue;
+      for (const r of (f && f.records) || []) for (const k of ['verificationId', 'requestId', 'discoveryId']) if (str(r && r[k])) ids.add(str(r[k])); }
+    return ids;
+  }
+  /** History rows with Source set to `source` for the Sohar ids in `ids` (a Set); other rows unchanged. */
+  function withSource(rows, ids, source) { return (rows || []).map((r) => (ids && ids.has(str(r['Sohar ID'])) ? { ...r, Source: source } : r)); }
+  function historyFromResults(results, source) {
+    const out = [];
+    for (const r of results || []) {
+      const ref = str(r['Sohar Ref']);
+      if (!ref || r['Sohar Status'] === 'Not in Sohar file' || /^name|^no match|^no identifiers/i.test(str(r.Match))) continue;
+      const row = {};
+      for (const k of VERIFICATION_HISTORY_COLS) row[k] = r[k] == null ? '' : str(r[k]);
+      Object.assign(row, {
+        'Pulled At': isoOf(r['Sohar Date']), Clinic: str(r['Next Location']), Kind: str(r['Sent As']) || 'Verification',
+        'Sohar ID': ref, 'Policy Key': policyKey(r['Sohar payerId'], r['Sohar Member ID'] || r['NextGen Member ID']),
+        'Related Sohar IDs': '', 'Projected Patient Responsibility': '', 'Estimate Note': '',
+        Source: str(source) || (importMatch(r.Match) ? 'Import' : 'Dashboard'),
+      });
+      out.push(row);
+    }
+    return out;
+  }
+  /** Flow Results rows (FLOW_COLS) -> Verification History rows, Source Flow. A Run with no verification is left out. */
+  function historyFromFlow(flowRows) {
+    const out = [];
+    for (const r of flowRows || []) {
+      const disc = /discover/i.test(str(r['Estimate Policy']));
+      const id = linkId(disc ? r['Discovered Verification Link'] : r['NextGen Verification Link']) || linkId(r['Discovered Verification Link']) || linkId(r['NextGen Verification Link']);
+      if (!id) continue;
+      out.push({
+        ...Object.fromEntries(VERIFICATION_HISTORY_COLS.map((k) => [k, ''])),
+        'Pulled At': isoOf(str(r['Last Updated']) || str(r.Started)), LASFIR: str(r.LASFIR), MRN: str(r.MRN), Clinic: str(r.Location), Kind: 'Verification',
+        'Sohar Status': str(disc ? r['Discovered Policy Status'] : r['NextGen Policy Status']) || str(r['NextGen Policy Status']),
+        'Sohar Payer': str(r['Sohar Payer']), 'Sohar payerId': str(r['Policy Key']).split('#')[0] || (disc ? '' : str(r['NextGen Payer ID'])), Plan: str(r.Plan), Network: str(r.Network),
+        Copay: str(r.Copay), Coinsurance: str(r.Coinsurance), Deductible: str(r.Deductible), 'Deductible Remaining': str(r['Deductible Remaining']),
+        'OOP Max': str(r['OOP Max']), 'OOP Remaining': str(r['OOP Remaining']), 'Sohar ID': id,
+        'Sohar Link': `https://app.soharhealth.com/verifications/${id}`, 'Related Sohar IDs': linkId(r['Discovery Link']),
+        'Policy Key': str(r['Policy Key']), 'Projected Patient Responsibility': str(r['Sohar Est Patient']), 'Estimate Note': str(r['Estimate Note']), Source: 'Flow',
+      });
+    }
+    return out;
+  }
+  const pulledMs = (r) => { const t = C.soharTime(r && r['Pulled At']); return isNaN(t) ? 0 : t; };
+  const histKey = (r) => str(r['Sohar ID']) || `${str(r.MRN)}|${str(r['Pulled At'])}|${str(r.Kind)}|${str(r['Policy Key'])}`;
+  /**
+   * Saved Verification History + new rows: append-only. A row already saved (same Sohar ID) has its fields updated by
+   * the new read (blank new fields keep the saved value) and keeps its first Source; nothing is ever dropped. Sorted by
+   * Pulled At, oldest first. Returns {rows, added, updated}.
+   */
+  function mergeHistory(saved, fresh) {
+    const by = new Map(), order = [];
+    const norm = (r) => Object.fromEntries(VERIFICATION_HISTORY_COLS.map((k) => [k, r[k] == null ? '' : str(r[k])]));
+    for (const r of saved || []) { const k = histKey(r); if (!by.has(k)) order.push(k); by.set(k, norm(r)); }
+    let added = 0, updated = 0;
+    for (const r of fresh || []) {
+      const k = histKey(r), n = norm(r), prev = by.get(k);
+      if (!prev) { by.set(k, n); order.push(k); added++; continue; }
+      const next = { ...prev };
+      for (const c of VERIFICATION_HISTORY_COLS) if (c !== 'Source' && n[c] !== '') next[c] = n[c];
+      if (VERIFICATION_HISTORY_COLS.some((c) => next[c] !== prev[c])) { by.set(k, next); updated++; }
+    }
+    const rows = order.map((k, i) => ({ r: by.get(k), i })).sort((a, b) => pulledMs(a.r) - pulledMs(b.r) || a.i - b.i).map((x) => x.r);
+    return { rows, added, updated };
+  }
+  const mrnSame = (a, b) => { const x = str(a).replace(/^0+/, ''), y = str(b).replace(/^0+/, ''); return !!x && x === y; };
+  /**
+   * One patient's checks as one timeline per policy, newest first: Verification History rows (the add-in) merged with
+   * tblPatientHistory rows (the rotation and the webhook: Row Key, MRN, When, Kind, Location, Detail "status · payer",
+   * Source, Ref). The same Sohar ID once (Verification History wins). A Patient History row joins the policy whose Sohar
+   * Payer it names (only one such policy), else a group of its own by payer name.
+   * Returns [{policyKey, payer, payerId, last4, latest, rows}], the policy with the newest check first.
+   */
+  function policyTimeline(historyRows, patientHistoryRows, mrn) {
+    const mine = (historyRows || []).filter((r) => mrnSame(r.MRN, mrn));
+    const ids = new Set(mine.map((r) => str(r['Sohar ID'])).filter(Boolean));
+    const rot = (patientHistoryRows || []).filter((r) => mrnSame(r.MRN, mrn) && !ids.has(str(r.Ref) || str(r['Row Key']))).map((r) => {
+      const [status, payer] = str(r.Detail).split(' · ');
+      return { 'Pulled At': isoOf(r.When), MRN: str(r.MRN), LASFIR: str(r.LASFIR), Clinic: str(r.Location), Kind: str(r.Kind), 'Sohar Status': str(status),
+        'Sohar Payer': str(payer), 'Sohar ID': str(r.Ref) || str(r['Row Key']), 'Policy Key': '', Source: str(r.Source) || 'Rotation', Amount: str(r.Amount) };
+    });
+    const groups = new Map();
+    const group = (k, r) => {
+      if (!groups.has(k)) groups.set(k, { policyKey: k.startsWith('payer:') ? '' : k, payer: '', payerId: '', last4: '', rows: [] });
+      const g = groups.get(k);
+      g.rows.push(r);
+      if (!g.payer && str(r['Sohar Payer'])) g.payer = str(r['Sohar Payer']);
+    };
+    for (const r of mine) group(str(r['Policy Key']) || `payer:${str(r['Sohar Payer']).toLowerCase()}`, r);
+    for (const r of rot) {
+      const name = str(r['Sohar Payer']).toLowerCase();
+      const hits = [...groups.entries()].filter(([, g]) => g.policyKey && g.rows.some((x) => str(x['Sohar Payer']).toLowerCase() === name));
+      group(hits.length === 1 ? hits[0][0] : `payer:${name}`, r);
+    }
+    const out = [...groups.values()];
+    for (const g of out) {
+      g.rows.sort((a, b) => pulledMs(b) - pulledMs(a));
+      g.latest = g.rows.length ? str(g.rows[0]['Pulled At']) : '';
+      const [id, l4] = g.policyKey.split('#');
+      g.payerId = str(id); g.last4 = str(l4);
+    }
+    return out.sort((a, b) => pulledMs(b.rows[0]) - pulledMs(a.rows[0]));
+  }
+  /**
+   * Is the plan-year estimate due for a patient's Flow import row (section 4)? p: a built patient; v: the chart policy
+   * sent (verifyRows entry) or null (discovery). ctx: {results (Sohar Results rows), history (Verification History),
+   * flow (Flow Results), today, planYear (fees.planYearEstimateDue)}. The policy is the patient's latest trusted
+   * verification of that policy (any policy for discovery). With none eligible on file, the Flow decides: due (the
+   * Flow estimates only an eligible picked policy), except a VA / TriWest / TRICARE chart payer.
+   * Returns {due, basis, policyKey, reason}.
+   */
+  function estimateDueFor(p, v, ctx) {
+    const c = ctx || {};
+    const key = C.keyOf(p);
+    const mine = (c.results || []).filter((r) => mrnSame(C.keyOf(r), key));
+    const pol = C.pickVerification(C.policyResults(mine, v || null));
+    const govt = /veterans?'?s*affairs|va|tris*-?west|tris*-?care|champva/i;
+    if (!pol || !/^complete.eligible/i.test(str(pol['Sohar Status']))) {
+      if (govt.test(str(p && p['Primary Payer']))) return { due: false, basis: '', policyKey: '', reason: 'VA, TriWest or TRICARE: $0 expected' };
+      return { due: true, basis: 'Unknown', policyKey: '', reason: 'no eligible verification on file: the Flow estimates the policy it picks if eligible' };
+    }
+    const pk = policyKey(pol['Sohar payerId'], pol['Sohar Member ID'] || (v && v.memberId));
+    const hist = (c.history || []).filter((h) => mrnSame(h.MRN, key) && str(h['Policy Key']) === pk)
+      .concat((c.flow || []).filter((f) => mrnSame(f.MRN, key) && (!str(f['Policy Key']) || str(f['Policy Key']) === pk)));
+    const basis = resetBasisFor(c.flow, pk);
+    const plan = typeof c.planYear === 'function' ? c.planYear({ ...pol, 'Reset Basis': basis || pol['Reset Basis'] }, hist, c.today || new Date()) : { due: true, basis: 'Unknown', reason: '' };
+    return { ...plan, policyKey: pk };
+  }
+  /** The newest Reset Basis recorded for a policy in Flow Results rows ('' when none). */
+  function resetBasisFor(flowRows, key) {
+    const k = str(key);
+    const r = (flowRows || []).filter((x) => k && str(x['Policy Key']) === k && /^(calendar|plan|unknown)$/i.test(str(x['Reset Basis'])))
+      .sort((a, b) => updatedMs(b) - updatedMs(a))[0];
+    return r ? str(r['Reset Basis']) : '';
+  }
+
+  // ---------- interactive HTML exports (v0.31, docs/ARCHITECTURE.md section 7) ----------
+  // One self-contained page in the add-in's design (its tokens, light and dark), with search, per-column filters and
+  // sorting, and Sohar links. No network: the page's own CSP allows only its inline style and script. Sohar import
+  // files stay CSV. Callers pass sheet-safe columns only (LASFIR and MRN, never names, DOBs or member IDs).
+  const HTML_EXPORT_COLS = {
+    patients: ['LASFIR', 'MRN', 'State', 'Route', 'In Scope', 'Next Appt', 'Next Event', 'POS', 'Primary Payer', 'Sohar payerId', 'Confidence', 'Secondary Payer', 'Flags'],
+    results: ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'LASFIR', 'MRN', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Benefit Flag', 'Plan', 'Network',
+      'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining', 'NextGen Payer', 'Sohar Payer', 'Sohar payerId',
+      'Match', 'Sohar Link', 'Sohar Date'],
+  };
+  const NO_EXPORT = /^(last name|first name|dob|date of birth|subscriber (first|last|dob)|member id|nextgen member id|sohar member id|chartmemberid|memberid|firstname|lastname|dateofbirth)$/i;
+  const SOHAR_LINK = /^https:\/\/app\.soharhealth\.com\/[^\s"'<>]*$/i;
+  const escH = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const REPORT_CSS = `:root{color-scheme:light;--page:#F3F4F1;--raised:#FFFFFF;--sunken:#F1F2EE;--line:#E3E6E1;--fg:#1B211F;--muted:#5E6863;--primary:#1E6B59;--on:#FFFFFF;--red:#B3261E;--amber:#8F5400;--blue:#2B5C8A}
+:root[data-theme="dark"]{color-scheme:dark;--page:#131716;--raised:#1B2220;--sunken:#182019;--line:#2A3330;--fg:#ECEFED;--muted:#9BA59F;--primary:#6DC4A6;--on:#0E2A22;--red:#F19189;--amber:#E9B150;--blue:#8FB8E6}
+*{box-sizing:border-box}body{margin:0;font:400 14px/1.4 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--page)}
+header{display:flex;flex-wrap:wrap;gap:6px 12px;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);background:var(--raised)}
+h1{margin:0;font-size:17px;font-weight:600}h2{font-size:15px;margin:0 0 6px}.muted{color:var(--muted);font-size:12px}
+main{padding:14px 18px;display:grid;gap:18px}section{background:var(--raised);border:1px solid var(--line);border-radius:6px;padding:12px}
+.bar{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:6px 0 8px}input,select,button{font:inherit;font-size:12.5px;color:var(--fg);background:var(--sunken);border:1px solid var(--line);border-radius:4px;padding:4px 8px}
+button{cursor:pointer}button:hover,input:focus,select:focus{border-color:var(--primary);outline:none}.wrap{overflow:auto;max-height:70vh}
+table{border-collapse:collapse;width:100%;font-size:12px}th{position:sticky;top:0;background:var(--sunken);text-align:left;font-weight:600;color:var(--muted);padding:5px 6px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
+th[aria-sort="ascending"]::after{content:" \\25B2"}th[aria-sort="descending"]::after{content:" \\25BC"}td{padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:hover td{background:color-mix(in srgb,var(--primary) 6%,transparent)}a{color:var(--primary)}.n{font-variant-numeric:tabular-nums}
+.ok{color:var(--primary)}.bad{color:var(--red)}.warn{color:var(--amber)}footer{padding:10px 18px 18px;color:var(--muted);font-size:11.5px}`;
+  // The page's script: search, column filters, sort, light / dark. Plain text: no network, no eval.
+  const REPORT_JS = `(function(){var d=document,r=d.documentElement;try{var t=localStorage.getItem("soharTheme");r.dataset.theme=t==="dark"||(!t&&window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light"}catch(e){}
+d.getElementById("theme").addEventListener("click",function(){r.dataset.theme=r.dataset.theme==="dark"?"light":"dark";try{localStorage.setItem("soharTheme",r.dataset.theme)}catch(e){}});
+Array.prototype.forEach.call(d.querySelectorAll("section[data-sec]"),function(s){var rows=Array.prototype.slice.call(s.querySelectorAll("tbody tr")),q=s.querySelector("[data-q]"),fs=s.querySelectorAll("[data-f]"),cnt=s.querySelector("[data-n]");
+function apply(){var v=(q.value||"").toLowerCase(),n=0;rows.forEach(function(tr){var ok=!v||tr.textContent.toLowerCase().indexOf(v)>=0;Array.prototype.forEach.call(fs,function(f){if(ok&&f.value!==""&&tr.children[+f.dataset.f].textContent!==f.value)ok=false});tr.hidden=!ok;if(ok)n++});cnt.textContent=n+" of "+rows.length}
+q.addEventListener("input",apply);Array.prototype.forEach.call(fs,function(f){f.addEventListener("change",apply)});
+Array.prototype.forEach.call(s.querySelectorAll("th"),function(th,i){th.addEventListener("click",function(){var asc=th.getAttribute("aria-sort")!=="ascending";Array.prototype.forEach.call(s.querySelectorAll("th"),function(h){h.removeAttribute("aria-sort")});th.setAttribute("aria-sort",asc?"ascending":"descending");
+var key=function(tr){var x=tr.children[i].textContent.trim(),m=x.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);if(m)return m[3]+m[1].padStart(2,"0")+m[2].padStart(2,"0")+x.slice(10);var n=parseFloat(x.replace(/[$,%]/g,""));return /^[-$\\d.,% ]+$/.test(x)&&!isNaN(n)?n:x.toLowerCase()};
+rows.sort(function(a,b){var x=key(a),y=key(b);if(typeof x==="number"&&typeof y==="number")return asc?x-y:y-x;x=String(x);y=String(y);return asc?x.localeCompare(y):y.localeCompare(x)});var tb=s.querySelector("tbody");rows.forEach(function(tr){tb.appendChild(tr)})})});apply()})})();`;
+  /**
+   * A self-contained interactive HTML page. o: {title, subtitle, generated (text), version, sections: [{id, title, cols,
+   * rows, filters (column names with a dropdown), note}]}. Columns that would carry a name, DOB or member ID are dropped.
+   * Cells holding a Sohar URL become links. Returns the HTML text.
+   */
+  function htmlReport(o) {
+    const c = o || {};
+    const secs = (c.sections || []).map((s, si) => {
+      const cols = (s.cols || []).filter((k) => !NO_EXPORT.test(str(k)));
+      const rows = s.rows || [];
+      const cell = (v) => { const t = str(v); return SOHAR_LINK.test(t) ? `<a href="${escH(t)}" target="_blank" rel="noopener noreferrer">Sohar</a>` : escH(t); };
+      const isNum = (k) => /amount|balance|copay|deductible|oop|remaining|max|responsibility|est |paid|billed|share/i.test(k);
+      const filters = (s.filters || []).filter((k) => cols.includes(k)).map((k) => {
+        const i = cols.indexOf(k), vals = [...new Set(rows.map((r) => str(r[k])).filter(Boolean))].sort().slice(0, 300);
+        return `<label class="muted">${escH(k)} <select data-f="${i}"><option value="">All</option>${vals.map((v) => `<option>${escH(v)}</option>`).join('')}</select></label>`;
+      }).join('');
+      return `<section data-sec="${si}" id="${escH(s.id || `s${si}`)}"><h2>${escH(s.title)}</h2>${s.note ? `<p class="muted">${escH(s.note)}</p>` : ''}
+<div class="bar"><input type="search" data-q placeholder="Search" aria-label="Search ${escH(s.title)}">${filters}<span class="muted" data-n></span></div>
+<div class="wrap"><table><thead><tr>${cols.map((k) => `<th scope="col">${escH(k)}</th>`).join('')}</tr></thead><tbody>
+${rows.map((r) => `<tr>${cols.map((k) => `<td${isNum(k) ? ' class="n"' : ''}>${cell(r[k])}</td>`).join('')}</tr>`).join('\n')}
+</tbody></table></div></section>`;
+    }).join('\n');
+    return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex"><title>${escH(c.title)}</title><style>${REPORT_CSS}</style></head>
+<body><header><div><h1>${escH(c.title)}</h1><div class="muted">${escH([c.subtitle, c.generated ? `Saved ${c.generated}` : '', c.version ? `Sohar Eligibility v${c.version}` : ''].filter(Boolean).join(' · '))}</div></div>
+<button id="theme" type="button" aria-label="Light or dark">Light / dark</button></header>
+<main>${secs}</main>
+<footer>LASFIR and MRN only. Contains PHI: keep it in MHS OneDrive or SharePoint, shared with invited people only. Never on a public site.</footer>
+<script>${REPORT_JS}</script></body></html>
+`;
+  }
+  /** "Sohar Results 2026-11-12.html" (local date). */
+  const htmlReportFileName = (label, d) => `${str(label).replace(/[\\/:*?"<>|]+/g, ' ').trim()} ${C.localDate(d)}.html`;
+
   /** "Sohar Ready Import - Flow 2026-10-30.csv" (local date), like the other import files. */
   const flowImportFileName = (d) => `Sohar Ready Import - Flow ${C.localDate(d)}.csv`;
 
@@ -704,5 +953,7 @@
     shortDate, plansOf, milestones, sinceLast, projection, actionItems, leadLine,
     PROFILE_HEADERS, profiles, samePerson, guarantorCheck, subscriberOf,
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,
-    addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName };
+    addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName,
+    // v0.31
+    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, rotationIds, withSource, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor, HTML_EXPORT_COLS, htmlReport, htmlReportFileName };
 });

@@ -58,12 +58,13 @@
       load(m);
       if (m.notice) notice(m.notice.text, m.notice.ok);
       if (m.focus) showTab(m.focus === 'exports' ? 'upload' : m.focus);
-    } else if (m.type === 'notice') { notice(m.text, m.ok); $('upState').textContent = ''; refreshing(false); }
+    } else if (m.type === 'notice') { notice(m.text, m.ok); $('upState').textContent = ''; $('impState').textContent = ''; $('cfgState').textContent = ''; refreshing(false); }
     else if (m.type === 'audits') {
       savedAudits = m.audits || { summary: [], lines: [] };
       if (m.notice) notice(m.notice.text, m.notice.ok);
       if (!$('detail').hidden && sec === 'audit') renderDetail('[data-au-save]');
     }
+    else if (m.type === 'config') { cfgData = m.config || cfgData; renderConfigFs(); if (m.notice) { notice(m.notice.text, m.notice.ok); SoharConfigUI.say($('cfgFs'), m.notice.text, m.notice.ok); } $('cfgState').textContent = ''; } // v0.31
     else if (m.type === 'fee-update') { fees = m.fees || null; renderFeeBar(); renderBenefits(); if (!$('detail').hidden && detailKey) renderDetail(); }
   }
   function refreshing(on) {
@@ -84,6 +85,9 @@
     visits = m.visits || {}; lastUpdated = m.lastUpdated || null; admins = m.admins || []; notes = m.notes || {};
     billing = m.billing || {}; dataSt = m.data || null; ticketRows = m.ticketRows || []; // v0.30
     savedAudits = m.audits || savedAudits;
+    cfgData = m.config || cfgData; daily = m.daily || null; // v0.31 Config and Import tabs
+    checks = m.checks || { history: [], patient: [] };
+    renderConfigFs(); renderImportFs();
     if (m.who) setWhoFrom(m.who);
     fees = F && m.fees && m.fees.on ? m.fees : null;
     renderFeeBar(); renderUpdated();
@@ -695,7 +699,7 @@
       <div class="pv-card pv-since"><div class="hint">Since last check</div><b>${esc(since.a)}</b><div class="hint">${esc(since.sub)}</div></div>
       <section class="pv-card pv-tl"><div class="hint pv-tl-h">${esc(cur ? [cur.payer, cur.memberId].filter(Boolean).join(' · ') : planTitle(c.r))} · current · newest first</div>
         <ol>${evs.map(evHtml).join('')}</ol></section>
-      <section class="pv-card pv-prev"><h4>Previous plans</h4>${prev.length ? prev.map(prevHtml).join('') : '<p class="hint">No earlier plans for this MRN.</p>'}</section>`;
+      <section class="pv-card pv-prev"><h4>Previous plans</h4>${prev.length ? prev.map(prevHtml).join('') : '<p class="hint">No earlier plans for this MRN.</p>'}</section>${checksByPolicyHtml(c.k)}`;
   }
   const statusTone = (s) => (/eligible$|found|active/i.test(s) && !/ineligible|not found/i.test(s) ? 'green' : /error|ineligible|inactive|not found/i.test(s) ? 'red' : 'grey');
   function resultEvent(r, marks) {
@@ -1483,8 +1487,86 @@
     $('vSub').hidden = name !== 'prep';
     $('vNote').textContent = name === 'prep' || name === 'worklist' || name === 'benefits'
       ? `${new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })} · select a patient to open their record` : '';
-    $('sharedFilters').hidden = name === 'upload' || name === 'clinic' || name === 'learning' || name === 'tickets';
+    $('sharedFilters').hidden = name === 'upload' || name === 'import' || name === 'config' || name === 'clinic' || name === 'learning' || name === 'tickets';
     hideDetail();
+  }
+
+  // ---------- v0.31: Import and Config tabs (every workbook write goes to the pane) ----------
+  let cfgData = null, daily = null, checks = { history: [], patient: [] };
+  /** v0.31: every check of this patient, one list per policy (record.policyTimeline), newest first. */
+  function checksByPolicyHtml(k) {
+    const tl = REC.policyTimeline(checks.history, checks.patient, k);
+    if (!tl.length) return '';
+    const row = (r) => `<div class="pv-pitem"><b>${esc(r.Kind || 'Check')}</b> · ${esc(sd(r['Pulled At']) || r['Pulled At'])} · ${esc(r['Sohar Status'] || '—')} <span class="hint">${esc(r.Source || '')}</span>${/^https:\/\//.test(r['Sohar Link'] || '') ? ` <a href="${esc(r['Sohar Link'])}" target="_blank" rel="noopener">Sohar</a>` : ''}</div>`;
+    return `<section class="pv-card pv-prev"><h4>Checks by policy</h4>${tl.map((g, i) => `<details${i === 0 ? ' open' : ''}><summary><b>${esc(g.payer || 'Unknown payer')}</b> <span class="hint">${esc([g.policyKey ? `${g.payerId} ending ${g.last4 || '?'}` : '', `${g.rows.length} check${g.rows.length === 1 ? '' : 's'}`].filter(Boolean).join(' · '))}</span></summary>${g.rows.map(row).join('')}</details>`).join('')}</section>`;
+  }
+  function renderImportFs() {
+    const d = $('dailyFs');
+    if (d) {
+      d.hidden = !(daily && daily.rows);
+      d.innerHTML = daily && daily.rows ? `<p><b>Daily NextGen list</b>: ${esc(daily.rows.toLocaleString())} rows${daily.at ? `, refreshed ${esc(daily.at)}` : ''}. ${esc(daily.text || '')}</p>
+        <button class="primary" id="btnDailyFs">Use the daily NextGen list</button>` : '';
+    }
+    const s = $('impSummary');
+    if (s) {
+      const ex = exportsData;
+      s.innerHTML = ex ? `<p>${(ex.verification || []).length} verification row${(ex.verification || []).length === 1 ? '' : 's'}, ${(ex.discovery || []).length} discovery, ${(ex.flow || []).length} Flow row${(ex.flow || []).length === 1 ? '' : 's'} ready.${skipped.length ? ` ${skipped.length} skipped (already covered, or too early to re-verify).` : ''}</p>` : '<p class="hint">No report loaded yet.</p>';
+    }
+  }
+  function payerItemHtml(it, i) {
+    return `<div class="payer" data-pi="${i}"><div class="name">${esc(it.name)} <span class="n">(${it.n} patient${it.n === 1 ? '' : 's'})</span> <span class="conf ${it.needs ? 'low' : 'ok'}">${esc(it.label)}</span></div>
+      <div class="guess">${it.guess ? `→ ${esc(it.guess)}` : '<span class="hint">No Sohar payer guessed</span>'}</div>
+      ${it.evidence ? `<div class="hint ev">${esc(it.evidence)}</div>` : ''}${it.flag ? `<p class="warn">${esc(it.flag)}</p>` : ''}
+      <div class="assign"><label>Sohar payer for ${esc(it.name)} <select data-pick="${i}"><option value="">Choose…</option>${it.choices.map((c, j) => `<option value="${j}">${esc(c.label)}</option>`).join('')}</select></label>
+      <button class="small" data-pick-save="${i}" disabled>Save</button></div></div>`;
+  }
+  function renderConfigFs() {
+    const box = $('cfgFs');
+    if (!box || !window.SoharConfigUI) return;
+    if (!cfgData) { box.innerHTML = '<p class="hint">Waiting for data from the pane…</p>'; return; }
+    box.innerHTML = SoharConfigUI.html(cfgData.model, cfgData.look);
+    const slot = box.querySelector('[data-cfg-payers]');
+    const items = cfgData.payers || [];
+    const need = items.filter((x) => x.needs);
+    if (slot) slot.innerHTML = items.length ? `${need.length ? `<p class="warn"><b>${need.length} insurance name${need.length === 1 ? '' : 's'} need${need.length === 1 ? 's' : ''} manual classification.</b> Pick the right Sohar payer once and it is remembered.</p>` : ''}${items.map(payerItemHtml).join('')}` : '<p class="hint">No payer names need a decision in this report.</p>';
+    SoharConfigUI.wire(box, (setting, value) => { SoharConfigUI.say(box, `Saving ${setting}…`, true); toPane({ type: 'config-set', setting, value }); }, (sheet) => toPane({ type: 'goto', sheet }));
+  }
+  function sendFile(type, files, stateId, what) {
+    if (!files || !files.length) return;
+    readFiles([...files]).then((fl) => {
+      $(stateId).textContent = `Sending ${fl.map((f) => f.name).join(', ')} to Excel…`;
+      toPane({ type, files: fl });
+    }).catch((e) => notice(e.message, false));
+  }
+  function wireDrop(dropId, inputId, onFiles) {
+    const d = $(dropId), inp = $(inputId);
+    if (!d || !inp) return;
+    d.addEventListener('click', () => inp.click());
+    d.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); inp.click(); } });
+    inp.addEventListener('change', (e) => { onFiles(e.target.files); e.target.value = ''; });
+    d.addEventListener('dragover', (e) => { e.preventDefault(); d.classList.add('over'); });
+    d.addEventListener('dragleave', () => d.classList.remove('over'));
+    d.addEventListener('drop', (e) => { e.preventDefault(); d.classList.remove('over'); onFiles(e.dataTransfer.files); });
+  }
+  function wireImportConfig() {
+    wireDrop('dropImportFs', 'fileImportFs', (f) => sendFile('import-upload', [...f].slice(0, 1), 'impState'));
+    wireDrop('dropCredFs', 'fileCredFs', (f) => sendFile('cred-upload', [...f].slice(0, 1), 'cfgState'));
+    wireDrop('dropIrFs', 'fileIrFs', (f) => sendFile('ir-upload', [...f].slice(0, 1), 'cfgState'));
+    wireDrop('dropClinicFs', 'fileClinicFs', (f) => sendFile('clinic-back', f, 'cfgState'));
+    $('dailyFs').addEventListener('click', (e) => { if (e.target.closest('#btnDailyFs')) { $('impState').textContent = 'Loading the daily NextGen list in Excel…'; toPane({ type: 'daily-list' }); } });
+    $('cfgFs').addEventListener('change', (e) => {
+      const s = e.target.closest('[data-pick]');
+      if (s) { const b = $('cfgFs').querySelector(`[data-pick-save="${s.dataset.pick}"]`); if (b) b.disabled = s.value === ''; }
+    });
+    $('cfgFs').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-pick-save]');
+      if (!b || !cfgData) return;
+      const i = +b.dataset.pickSave, it = (cfgData.payers || [])[i];
+      const s = $('cfgFs').querySelector(`[data-pick="${i}"]`);
+      if (!it || !s || s.value === '') return;
+      b.disabled = true; b.textContent = 'Saving…';
+      toPane({ type: 'payer-pick', name: it.name, choice: it.choices[+s.value] });
+    });
   }
 
   // ---------- uploads ----------
@@ -1639,6 +1721,7 @@
     renderTasks(); renderPrep(); renderMessage();
     if (!$('detail').hidden && $('detail').contains(cb)) renderDetail(`input[data-task="${CSS.escape(key)}"]`);
   });
+  wireImportConfig(); // v0.31
   $('drop').addEventListener('click', () => $('fileUp').click());
   $('drop').addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('fileUp').click(); } });
   $('fileUp').addEventListener('change', (e) => { upload(e.target.files); e.target.value = ''; });
@@ -1646,6 +1729,8 @@
   $('drop').addEventListener('dragleave', () => $('drop').classList.remove('over'));
   $('drop').addEventListener('drop', (e) => { e.preventDefault(); $('drop').classList.remove('over'); upload(e.dataTransfer.files); });
   document.querySelectorAll('[data-save]').forEach((b) => b.addEventListener('click', () => save(b.dataset.save)));
+  // v0.31: interactive HTML exports, built and saved by the pane from the workbook.
+  document.querySelectorAll('[data-html]').forEach((b) => b.addEventListener('click', () => toPane({ type: 'export-html', kind: b.dataset.html })));
   $('btnFee').addEventListener('click', () => $('fileFee').click());
   $('fileFee').addEventListener('change', (e) => { uploadFee(e.target.files); e.target.value = ''; });
   $('btnCopy').addEventListener('click', async () => {
@@ -1749,6 +1834,15 @@
       notes: { 80100: [{ note: 'Called the patient; new card scanned, plan unchanged', by: 'Jordan Lee', when: '10/19/2026 4:12 PM', visit: '' }] },
       // v0.30: made-up billing tickets, a balance and a financial note (Power Query in a real workbook).
       ...demoBilling(),
+      // v0.31: the Config tab with defaults and a made-up payer name (edits are not sent in demo mode).
+      config: { model: C.configModel({}, F ? F.PLAN_YEAR_CONFIG_ROWS : []), look: { feesOn: false, feePayerMap: [], estimateCodes: F ? F.ESTIMATE_CODE_SEEDS.slice(0, 12) : [] },
+        payers: [{ name: 'Synthetic Health Plan', n: 2, label: 'Not mapped', needs: true, guess: '', evidence: '', flag: '', choices: [{ label: 'Synthetic Health (00001)', kind: 'use', payerId: '00001', payerName: 'Synthetic Health' }, { label: 'Not a payer (self-pay, VIP, a placeholder)', kind: 'not', payerId: '', payerName: '' }] }] },
+      daily: { rows: 42, at: '11/12/2026 7:30 AM', text: 'Up to date.' },
+      // v0.31: made-up checks for one patient on two policies (the old one stays after a new one is found).
+      checks: { history: [
+        { MRN: '80100', 'Pulled At': '2026-11-10T15:00:00.000Z', Kind: 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Payer': 'Blue Shield of California', 'Policy Key': '94036#0101', Source: 'Import', 'Sohar ID': 'demo-v1' },
+        { MRN: '80100', 'Pulled At': '2026-09-02T15:00:00.000Z', Kind: 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar Payer': 'Synth Mutual', 'Policy Key': '00001#7777', Source: 'Flow', 'Sohar ID': 'demo-v0' }],
+        patient: [{ 'Row Key': 'demo-r1', MRN: '80100', When: '2026-10-20T14:00:00Z', Kind: 'Verification', Detail: 'complete.eligible · Blue Shield of California', Source: 'Rotation', Ref: 'demo-r1' }] },
       lastUpdated: { report: new Date(Date.now() - 2 * 36e5).toISOString(), sohar: new Date(Date.now() - 3 * 864e5).toISOString(), flow: new Date().toISOString() } });
     // #patient opens the first demo patient's record (for checking the layout), #patient/<section> a section of it;
     // other hashes pick a tab.

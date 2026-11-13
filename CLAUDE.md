@@ -97,8 +97,19 @@ Hard rules:
   refresh, full screen, light / dark (full screen's ⟳ sends `refresh` to the pane).
   (The v0.29 clinic lookup webhook is called by the Clinic Template Tool only, never by this add-in.)
 - `VERIFICATION_COLS`, `DISCOVERY_COLS` and `record.FLOW_IMPORT_COLS` (the "MHS Eligibility - Discovery vs NextGen" Flow's CSV
-  template, v0.21) match the Sohar CSV templates exactly, in order. Do not rename or reorder. The Flow file has no
-  rateTable column, so Flow runs from it never estimate cost.
+  template, v27 since v0.31: no tin, `estimate` and a `rateTable` JSON string) match the Sohar CSV templates exactly, in
+  order. Do not rename or reorder. TINs live only in Sohar and the Flow template: never in Config, a CSV or this repo.
+- v0.31 (Brendan, 11/12; contract in `docs/ARCHITECTURE.md`, change it there and in the owning pure module together):
+  the freshness rule is `core.reverifyDue(check, visit, line, cfg)` (max(visit - window, the 1st 00:00 Pacific), per
+  service line from `core.visitLine` / `rules.serviceLine`, Config rows `REVERIFY_CONFIG_ROWS`), the plan-year estimate
+  is `fees.planYearEstimateDue` / `fees.visitCode`, and the 7 AM rotation `require`s the same files, so keep their
+  signatures. `tblVerificationHistory` (`record.VERIFICATION_HISTORY_COLS`, Policy Key = payerId#last 4, never a member
+  ID) and `tblAccountAuditHistory` (`audit.AUDIT_HISTORY_COLS`) are OWNED, hidden and append-only (pass every old row
+  back: `record.mergeHistory`, `audit.appendAuditHistory`). The Config section (`config-ui.js`, pane Admin tab and
+  full-screen Config tab) writes only through `saveConfig` (`core.configEdit` + `setConfigValue`). Full-screen Import and
+  Config tabs send files and edits to the pane (`import-upload`, `daily-list`, `config-set`, `payer-pick`,
+  `cred-upload`, `ir-upload`, `clinic-back`, `export-html`, `goto`). HTML exports are `record.htmlReport` pages (no
+  network, no name / DOB / member ID columns), saved through `saveBinary`.
 - Output table columns (`PATIENT_COLS`, `REVIEW_COLS`) must match the template workbook. Changing the column count means shipping a new `Sohar_Eligibility_Template.xlsx`; a rename of the same column is applied in place by `replaceTable` (v0.12 Review Per Nbr -> MRN).
 - The patient key is the MRN (`core.keyOf`, PER-<Per Nbr> fallback). Key on it, never on Per Nbr, in anything saved or sent to Sohar. `cfg.payerTests` is the Config settings; Payer Tests rows travel as `cfg.payerTestRows`.
 - `payer-rules.js` is shared byte-identical with the Clinic Template Tool and ESK Tracker repos: never edit it here alone. The real Payer Credential Rules table (OneDrive CSV, imported to the editable `Payer Credential Rules` sheet) never goes in this repo, a test, a fixture or the demo. Besse approval is a flag only.

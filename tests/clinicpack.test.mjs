@@ -511,6 +511,6 @@ test('clinicUnpack: wrong or missing SE Info is a readable error; optional sheet
   assert.throws(() => R.clinicUnpack({ 'SE Info': info(), 'SE Patients': [['Key', 'Record'], ['900001', '{not json']] }), /SE Patients sheet, row 2, cannot be read/);
   const se = R.clinicUnpack({ 'se info': info() });
   assert.deepEqual([se.patients, se.results, se.review, se.payers, se.done, se.payerRules], [[], [], [], [], [], []]);
-  assert.deepEqual(se.settings, { sfhpProviders: [], reverifyDays: 7, reverifyNewMonth: false, approachingPct: 0.2, locationState: {}, defaultState: '' });
+  assert.deepEqual(se.settings, { sfhpProviders: [], reverifyDays: 7, reverifyNewMonth: false, approachingPct: 0.2, locationState: {}, defaultState: '', reverify: C.reverifyConfig({}) });
   assert.deepEqual(R.clinicDerive(se, [], TODAY).counts.patients, 0);
 });

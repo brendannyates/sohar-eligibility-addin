@@ -49,7 +49,32 @@ The add-in records every payer classification and every Sohar outcome, and uses 
 - **error.payer.npi** (the provider's NPI setup at the payer) is neutral, never a payer error.
 - Step 1 rows show the evidence (`Sohar: 9 agreed, 1 other payer, score 83`); the build note says `Learning: N promoted, N demoted, N suggestions, N re-scored`. After an upload adds outcomes, the add-in rebuilds so the Payer Map, Patients and imports follow; the Sohar Results sheet picks up a changed mapping on the next refresh.
 
-### Re-verify skip window (v0.10)
+### v0.31: one eligibility system (Brendan, 11/12; contract in `docs/ARCHITECTURE.md`)
+
+- **Freshness rule** (`core.reverifyDue(check, visit, line, cfg)`, replaces the v0.10 skip window below): a visit at T is
+  covered by an eligible verification of the same policy made on or after max(T − `Re-verify window (hours)`, the 1st of
+  T's month 00:00 Pacific). Per service line (`rules.serviceLine` / `core.visitLine`: Provider, TMS treatment, ESK, IVK):
+  `Window`, `Weekly` (that week's Monday, and the 1st) or a number of days. Covered visits leave the verification file;
+  an eligible check older than the cover date waits for it ("not yet", next check on or after that date) instead of
+  being sent early, because a check before the cover date would not cover the visit. No check on file, ineligible or
+  coverage ending before the visit: sent now. `Include in import: <line>` Off leaves that line out of every import file
+  (the 7 AM rotation still covers it). `Re-verify days` / `Re-verify in new month` migrate once (`core.reverifyMigration`).
+- **Plan-year estimate** (`fees.planYearEstimateDue`, `fees.visitCode`): once per policy per plan year, the Flow quotes
+  90792, 99214 and 99215 (Config `Plan-year estimate codes`). Reset Basis Unknown estimates at January 1 and the plan
+  date until a deductible reset across one boundary decides. No estimate for VA, TriWest, TRICARE or a met OOP max.
+  IVK is 99214 plus the medication; ESK, TMS treatment and MT / MTR show no code (the tracker BIDF is the reference).
+- **Flow import** (`record.FLOW_IMPORT_COLS`, template v27): no tin; `providerGroupName` by state; `estimate` yes/no;
+  `rateTable` JSON for the chart payer and the payers discovery finds most in the state (needs Fee estimates On).
+- **History**: hidden `Verification History` (every check, Source Import / Flow / Dashboard, Policy Key = payerId#last 4)
+  and `Account Audit History` (every audit run), append-only. The patient view lists checks by policy, newest first.
+- **Config section** at the bottom of the Admin tab (and full screen's Config tab, `config-ui.js`): re-verify rules,
+  include switches, plan-year codes, payer mapping, read-only Fee Payer Map and Estimate Codes.
+- **Full screen** Import tab (report upload, daily list) and Config tab (plus esketamine rules, IR file, clinic files);
+  every write still goes through the pane.
+- **HTML exports** (`record.htmlReport`): patients, Sohar results, Verification History, account audits as one
+  self-contained page each (search, filters, sort, light and dark, Sohar links; no network). Sohar imports stay CSV.
+
+### Re-verify skip window (v0.10; replaced by the v0.31 freshness rule above)
 
 Approved by Brendan on 2026-10-20. Config (optional rows, added on build when missing): `Skip recent verifications` (On), `Re-verify days` (7, shared with R9), `Re-verify in new month` (Off).
 
@@ -256,10 +281,11 @@ If the pane ever fails to load inside Excel after a Microsoft update, the first 
 | `xlsx.js` | Dependency-free .xlsx writer for clinic files (real tables, hyperlinks, hidden sheet, pane auto-open parts), and a small reader (`readWorkbook`) for the fee schedule upload; `readXls` / `readAnyWorkbook` (v0.23) read the old binary .xls too. |
 | `audit.js` | Pure account audit (v0.23): InstaMed, Arietis and NextGen appointment readers, charge and code checks, payment matching, benefits learned from claims, re-quote, true balance, made-up demo files. Loads after `core.js` and `fees.js`, in full screen only. |
 | `fees.js` | Pure fee estimate logic (v0.11, a test, Off by default): fee schedule parsing, location / payer matching, estimate math, made-up demo schedule. Loads after `core.js`. |
+| `config-ui.js` | v0.31: draws the Config section (pane Admin tab, full-screen Config tab) from `core.configModel`; every edit goes to the pane. |
 | `save.html`, `save.js` | Fallback save tab for Excel on the web; takes CSV text or base64 (.xlsx). |
 | `excel.js` | Everything that reads or writes the workbook. Table names must match the template. The Clinic Work Inbox is the one table it only creates and reads (flow-owned). |
 | `app.js` | Pane behaviour, step flow, payer mapping UI, uploads, downloads, demo mode. |
-| `dashboard.html`, `dashboard.js` | Full-screen window (Office dialog): prep, worklist, NextGen tasks, messages, upload and save. |
+| `dashboard.html`, `dashboard.js` | Full-screen window (Office dialog): import, prep, worklist, NextGen tasks, messages, upload and save, config. |
 | `index.html`, `style.css` | Pane markup and styles. |
 | `manifest.xml` | Ribbon button and host URL. |
 | `tests/*.test.mjs` | `node --test` suite. `tests/excel.test.mjs` runs the real `excel.js` against `tests/helpers/excel-mock.mjs` (a model of the Excel API with failure injection) and sweeps every save through a failure at every step. |

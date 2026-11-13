@@ -763,7 +763,8 @@
   function buildExports(patients, cfg) {
     const c = cfg || {};
     const specialty = c.specialty || 'PSY';
-    const inScope = patients.filter((p) => p['In Scope'] === 'Yes');
+    // v0.31: a service line with Config Include in import Off leaves every file (applyReverifySkips sets x.excluded).
+    const inScope = patients.filter((p) => p['In Scope'] === 'Yes' && !(p.x && p.x.excluded));
     const verification = [];
     for (const p of inScope.filter((x) => x.Route === 'verification')) {
       const vrs = p.x && p.x.verifyRows && p.x.verifyRows.length ? p.x.verifyRows : [{ payerId: p['Sohar payerId'], memberId: p['Member ID'] }];
@@ -2333,6 +2334,10 @@
    * Append-only: previous rows stay; fresh rows are added unless their Key is already there. A row saved before v0.12
    * keeps its patient as MRN (its Per Nbr as a PER- key, converted with perToKey when given).
    */
+  /** v0.31: Payer Outcomes rows by Sohar Date, oldest first (stable; unreadable dates first). */
+  function sortOutcomes(rows) {
+    return (rows || []).map((r, i) => ({ r, i })).sort((a, b) => (outcomeTime(a.r) - outcomeTime(b.r)) || a.i - b.i).map((x) => x.r);
+  }
   function appendOutcomes(previous, fresh, perToKey) {
     const seen = new Set(), rows = [];
     const norm = (r) => Object.fromEntries(PAYER_OUTCOME_COLS.map((c) => [c, c === 'MRN' ? migrateKey(savedKey(r), perToKey) : r[c] == null ? '' : r[c]]));
@@ -2674,45 +2679,145 @@
     }];
   }
 
-  // ---------- re-verify skip window (approved by Brendan 2026-10-20) ----------
-  // A verification-routed policy (payerId + member ID) recently verified eligible is left out of the verification file;
-  // the clinic R9 Re-verify flag uses the same due rule (reverifyDue / reverifyCheck).
-  const REVERIFY_DEFAULTS = { skip: true, days: 7, newMonth: false };
-  const REVERIFY_CONFIG_ROWS = [
-    { setting: 'Skip recent verifications', value: 'On', what: 'On or Off. On: a patient whose same insurance (Sohar payerId + member ID) Sohar verified eligible within Re-verify days is left out of the verification file (still on Patients; the pane lists them with a Re-verify anyway button). Failed, ineligible or pending results never skip.' },
-    { setting: 'Re-verify days', value: 7, what: 'Calendar days a Sohar eligible verification stays current: skipped until then, and the clinic Re-verify flag after. A next visit in a new month within these days re-verifies sooner.' },
-    { setting: 'Re-verify in new month', value: 'Off', what: 'On or Off. On: also re-verify whenever the month changed since the verification, or the next visit is in a different month, whatever the days.' },
-  ];
-  /** Config {Setting: Value} -> {skip, days, newMonth}. Re-verify days: a whole number >= 0, default 7. */
-  function reverifyConfig(cfg) {
-    const c = cfg || {};
-    const raw = (k) => (c[k] == null ? '' : String(c[k]).trim());
-    const n = parseInt(raw('Re-verify days'), 10);
-    return {
-      skip: !/^(off|no|n|false|0)$/i.test(raw('Skip recent verifications')),
-      days: isNaN(n) || n < 0 ? REVERIFY_DEFAULTS.days : n,
-      newMonth: /^(on|yes|y|true|1)$/i.test(raw('Re-verify in new month')),
-    };
-  }
-  /** Local calendar day of a Sohar Date (resolved || created) as a UTC-midnight Date, else null. */
-  function soharDay(v) { const t = soharTime(v); return isNaN(t) ? null : dayOf(new Date(t)); }
+  // ---------- verification freshness (v0.31, Brendan 2026-11-12; docs/ARCHITECTURE.md section 3) ----------
+  // A visit at T is covered by an eligible verification of the same policy made at t when
+  // t >= max(T - window, the 1st of T's month at 00:00 Pacific). Per service line (visitLine): Window (that rule), Weekly
+  // (that week's Monday, and the 1st still applies) or a number of days. Replaces the v0.12 skip window (Re-verify days,
+  // Re-verify in new month), which migrates once (reverifyMigration). The clinic R9 Re-verify flag uses the same rule.
   const isVerResult = (r) => !!r && r['Sent As'] === 'Verification' && r['Sohar Status'] !== 'Not in Sohar file';
   // A name-only match, an unmatched row or one with no identifiers never stands for the patient.
   const untrustedMatch = (r) => /^name|^no match|^no identifiers/i.test(str(r.Match));
-  const monthOf = (d) => d.getUTCFullYear() * 12 + d.getUTCMonth();
+  const SERVICE_LINES = ['Provider', 'TMS treatment', 'ESK', 'IVK'];
+  const LINE_DEFAULTS = { 'Provider': 'Window', 'TMS treatment': 'Weekly', 'ESK': 'Window', 'IVK': 'Window' };
+  const REVERIFY_DEFAULTS = { skip: true, windowHours: 72, onFirst: true, lines: { ...LINE_DEFAULTS },
+    include: Object.fromEntries(SERVICE_LINES.map((l) => [l, true])) };
+  const REVERIFY_CONFIG_ROWS = [
+    { setting: 'Skip recent verifications', value: 'On', what: 'On or Off. On: a visit already covered by an eligible Sohar verification of the same insurance (Sohar payerId + member ID) is left out of the verification file (still on Patients; the pane lists it with a Re-verify anyway button). Failed, ineligible or pending results never skip.' },
+    { setting: 'Re-verify window (hours)', value: 72, what: 'A visit is covered by an eligible verification made no earlier than this many hours before it (and not before the 1st of the visit\'s month, see Re-verify on the 1st). Replaces Re-verify days.' },
+    { setting: 'Re-verify on the 1st', value: 'On', what: 'On or Off. On: a visit on or after the 1st of a month is never covered by a verification from the month before, so every active policy is re-verified from the 1st. Replaces Re-verify in new month.' },
+    ...SERVICE_LINES.map((l) => ({ setting: `Re-verify: ${l}`, value: LINE_DEFAULTS[l], what: `${l} visits: Window (the window and 1st rule above), Weekly (a verification on or after that week's Monday, and the 1st rule), or a number of days.` })),
+    ...SERVICE_LINES.map((l) => ({ setting: `Include in import: ${l}`, value: 'On', what: `On or Off. Off: ${l} visits leave the Sohar import files at the next build (the 7 AM rotation still covers them).` })),
+  ];
+  const isOffText = (v) => /^(off|no|n|false|0)$/i.test(str(v));
+  /** "weekly" -> "Weekly", "window" -> "Window", "3" -> "3" (days), anything else -> ''. */
+  function lineRuleText(v) {
+    const s = str(v);
+    if (/^week/i.test(s)) return 'Weekly';
+    if (/^win/i.test(s)) return 'Window';
+    const n = parseFloat(s);
+    return !isNaN(n) && n >= 0 && /^\d+(\.\d+)?(\s*days?)?$/i.test(s) ? String(n) : '';
+  }
+  /** Config {Setting: Value} -> {skip, windowHours, onFirst, lines: {line: 'Window'|'Weekly'|'<days>'}, include: {line: bool}}. */
+  function reverifyConfig(cfg) {
+    const c = cfg || {};
+    const raw = (k) => (c[k] == null ? '' : String(c[k]).trim());
+    const h = parseFloat(raw('Re-verify window (hours)'));
+    const lines = {}, include = {};
+    for (const l of SERVICE_LINES) { lines[l] = lineRuleText(raw(`Re-verify: ${l}`)) || LINE_DEFAULTS[l]; include[l] = !isOffText(raw(`Include in import: ${l}`)); }
+    return { skip: !isOffText(raw('Skip recent verifications')), windowHours: isNaN(h) || h < 0 ? REVERIFY_DEFAULTS.windowHours : h,
+      onFirst: !isOffText(raw('Re-verify on the 1st')), lines, include };
+  }
+  /**
+   * One-time migration from the v0.12 rows: {setting: value} for the new rows, only while the new rows are missing. A
+   * changed Re-verify days (not the old default 7) becomes the window in hours; the old default takes the new 72 h.
+   * Re-verify in new month On becomes Re-verify on the 1st On; Off was the old default, so the new default (On) stands.
+   */
+  function reverifyMigration(cfg) {
+    const c = cfg || {};
+    const has = (k) => c[k] != null && String(c[k]).trim() !== '';
+    if (has('Re-verify window (hours)') || has('Re-verify on the 1st')) return {};
+    const out = {};
+    const n = parseInt(String(c['Re-verify days'] ?? ''), 10);
+    if (has('Re-verify days') && !isNaN(n) && n >= 0 && n !== 7) out['Re-verify window (hours)'] = n * 24;
+    if (has('Re-verify in new month') && /^(on|yes|y|true|1)$/i.test(String(c['Re-verify in new month']).trim())) out['Re-verify on the 1st'] = 'On';
+    return out;
+  }
+  /** REVERIFY_CONFIG_ROWS with the migrated values (for ensureConfigRows, which only adds missing rows). */
+  function reverifyConfigRows(cfg) {
+    const m = reverifyMigration(cfg);
+    return REVERIFY_CONFIG_ROWS.map((r) => (m[r.setting] != null ? { ...r, value: m[r.setting] } : r));
+  }
 
   /**
-   * Is a Sohar re-verification due? rows: Sohar Results rows (verification) for one policy. opts: {nextAppt (Date or
-   * MM/DD/YYYY), today (Date, local day used), days (default 7), newMonth (bool)}. Not due only when the latest row
-   * (by Sohar Date) is complete.eligible, verified less than days calendar days ago, its Coverage End is not before the
-   * next visit, the next visit is not in a different month/year within days of today, and (newMonth On) neither today
-   * nor the next visit is in a different month/year than the verification.
-   * Returns {due, code ('none'|'not eligible'|'window'|'coverage end'|'new month'|'fresh'), reason, verified, dueDate, daysSince, status}.
+   * The service line of one visit's NextGen event, for the freshness rule: 'ESK' (esketamine sessions), 'IVK' (IV
+   * ketamine infusions), 'TMS treatment' (daily TMS sessions) or 'Provider' (everything else: consults of any kind, TMS
+   * follow-ups (TFU, TTF), MT / MTR, med management, intakes). rules.serviceLine is this function.
    */
-  function reverifyDue(rows, opts) {
-    const o = opts || {};
-    const days = o.days != null && !isNaN(+o.days) ? +o.days : REVERIFY_DEFAULTS.days;
-    const today = dayOf(o.today instanceof Date && !isNaN(o.today) ? o.today : new Date());
+  function visitLine(event) {
+    const s = ` ${str(event).toLowerCase().replace(/[^a-z0-9/]+/g, ' ')} `;
+    if (/\bconsult/.test(s)) return 'Provider';
+    if (/\b(esketamine|spravato|esk)\b/.test(s)) return 'ESK';
+    if (/\b(ivk|iv ketamine|ketamine infusion)\b/.test(s)) return 'IVK';
+    const tms = /\b(tms|magv\w*|theta|brainsway)\b/.test(s);
+    if (/\b(tfu|ttf)\b/.test(s) || (tms && /\b(follow ?up|f\/u|fu)\b/.test(s))) return 'Provider';
+    if (/\b(mt|mtr|motor threshold|mapping)\b/.test(s) || (tms && /\binitial\b/.test(s))) return 'Provider';
+    return tms ? 'TMS treatment' : 'Provider';
+  }
+
+  // Pacific wall clock (America/Los_Angeles, DST included). Without Intl, UTC-8.
+  const PT_ZONE = 'America/Los_Angeles';
+  let ptFormat = null;
+  function ptParts(ms) {
+    try {
+      if (!ptFormat) ptFormat = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, hourCycle: 'h23', year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      const o = {};
+      for (const p of ptFormat.formatToParts(new Date(ms))) o[p.type] = p.value;
+      return { y: +o.year, m: +o.month, d: +o.day, h: +o.hour % 24, mi: +o.minute };
+    } catch (e) {
+      const d = new Date(ms - 8 * 3600000);
+      return { y: d.getUTCFullYear(), m: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes() };
+    }
+  }
+  /** Pacific wall-clock time -> UTC ms. */
+  function ptMs(y, m, d, h, mi) {
+    const want = Date.UTC(y, m - 1, d, h || 0, mi || 0);
+    let t = want + 8 * 3600000;
+    for (let i = 0; i < 3; i++) { const p = ptParts(t); const diff = want - Date.UTC(p.y, p.m - 1, p.d, p.h, p.mi); if (!diff) break; t += diff; }
+    return t;
+  }
+  /** The Pacific calendar day of a time, as a UTC-midnight day value (like parseDate). */
+  const ptDay = (ms) => { const p = ptParts(ms); return new Date(Date.UTC(p.y, p.m - 1, p.d)); };
+  /**
+   * A visit's time in ms. visit: ms, a Date (a UTC-midnight day value is that day at 00:00 Pacific), 'MM/DD/YYYY' or
+   * 'MM/DD/YYYY 9:00 AM', or {date, time}. Dates and times are Pacific wall clock; no time = 00:00. NaN when unreadable.
+   */
+  function visitTime(visit) {
+    if (visit == null || visit === '') return NaN;
+    if (typeof visit === 'number') return visit;
+    if (visit instanceof Date) {
+      if (isNaN(visit)) return NaN;
+      const isDay = visit.getUTCHours() === 0 && visit.getUTCMinutes() === 0 && visit.getUTCSeconds() === 0 && visit.getUTCMilliseconds() === 0;
+      return isDay ? ptMs(visit.getUTCFullYear(), visit.getUTCMonth() + 1, visit.getUTCDate(), 0, 0) : visit.getTime();
+    }
+    const o = typeof visit === 'object' ? visit : { date: visit, time: String(visit).replace(/^\S+/, '') };
+    const day = o.date instanceof Date ? dayOf(o.date) : parseDate(o.date);
+    if (!day) return NaN;
+    const m = str(o.time).match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+    const h = m ? (m[3] ? (+m[1] % 12) + (/pm/i.test(m[3]) ? 12 : 0) : +m[1]) : 0;
+    return ptMs(day.getUTCFullYear(), day.getUTCMonth() + 1, day.getUTCDate(), h, m ? +m[2] : 0);
+  }
+  /** {kind: 'window'|'weekly'|'days', days} for a service line's Config rule. */
+  function lineRule(rc, line) {
+    const t = lineRuleText((rc && rc.lines && rc.lines[line]) || LINE_DEFAULTS[line] || 'Window') || 'Window';
+    return t === 'Weekly' ? { kind: 'weekly', text: t } : t === 'Window' ? { kind: 'window', text: t } : { kind: 'days', days: +t, text: `${t} days` };
+  }
+  /** The earliest verification time (ms) that covers a visit at T on this service line. */
+  function coverFrom(T, line, rc) {
+    const r = rc || REVERIFY_DEFAULTS;
+    const rule = lineRule(r, line);
+    const p = ptParts(T);
+    let from;
+    if (rule.kind === 'weekly') {
+      const back = (new Date(Date.UTC(p.y, p.m - 1, p.d)).getUTCDay() + 6) % 7; // days since Monday
+      const mon = new Date(Date.UTC(p.y, p.m - 1, p.d - back));
+      from = ptMs(mon.getUTCFullYear(), mon.getUTCMonth() + 1, mon.getUTCDate(), 0, 0);
+    } else if (rule.kind === 'days') from = T - rule.days * MS_DAY;
+    else from = T - (r.windowHours != null ? +r.windowHours : REVERIFY_DEFAULTS.windowHours) * 3600000;
+    if (r.onFirst !== false) from = Math.max(from, ptMs(p.y, p.m, 1, 0, 0));
+    return from;
+  }
+  const nowOf = (o) => { const t = o && (o.now || o.today); return t instanceof Date && !isNaN(t) ? t.getTime() : typeof t === 'number' ? t : Date.now(); };
+  const pickVerification = (rows) => {
     let best = null, bt = -Infinity;
     for (const r of rows || []) {
       if (!isVerResult(r)) continue;
@@ -2720,32 +2825,45 @@
       if (isNaN(t)) continue;
       if (!best || t > bt || (t === bt && str(r['Sohar Date']) > str(best['Sohar Date']))) { best = r; bt = t; }
     }
-    if (!best) return { due: true, code: 'none', reason: 'no Sohar verification on file', verified: '', dueDate: '', daysSince: null, status: '' };
-    const vDay = dayOf(new Date(bt));
-    const since = Math.round((today - vDay) / MS_DAY);
-    const status = str(best['Sohar Status']);
-    const base = { verified: fmtDate(vDay), daysSince: since, status };
-    const due = (code, reason) => ({ ...base, due: true, code, reason, dueDate: fmtDate(today) });
-    if (!/^complete\.eligible/i.test(status)) return due('not eligible', `latest verification ${fmtDate(vDay)} came back ${status || 'pending'}`);
-    if (since >= days) return due('window', `verified eligible ${fmtDate(vDay)}, ${since} day${since === 1 ? '' : 's'} ago`);
-    const next = o.nextAppt instanceof Date ? dayOf(o.nextAppt) : parseDate(o.nextAppt);
-    const end = parseDate(best['Coverage End']);
-    if (end && next && end < next) return due('coverage end', `coverage ends ${fmtDate(end)}, before the ${fmtDate(next)} visit`);
-    let dueDay = new Date(vDay.getTime() + days * MS_DAY);
-    if (next && monthOf(next) !== monthOf(vDay)) {
-      if (o.newMonth) return due('new month', `next visit ${fmtDate(next)} is in a different month than the ${fmtDate(vDay)} verification`);
-      if ((next - today) / MS_DAY < days) return due('new month', `next visit ${fmtDate(next)} is in a new month, within ${days} days`);
-      const sooner = new Date(next.getTime() - (days - 1) * MS_DAY);
-      if (sooner < dueDay) dueDay = sooner;
-    }
-    if (o.newMonth) {
-      if (monthOf(today) !== monthOf(vDay)) return due('new month', `verified ${fmtDate(vDay)}, in an earlier month`);
-      const first = new Date(Date.UTC(vDay.getUTCFullYear(), vDay.getUTCMonth() + 1, 1));
-      if (first < dueDay) dueDay = first;
-    }
-    return { ...base, due: false, code: 'fresh', reason: `verified eligible ${fmtDate(vDay)}, next check ${fmtDate(dueDay)}`, dueDate: fmtDate(dueDay) };
-  }
+    return best;
+  };
 
+  /**
+   * Is a Sohar verification due for this visit? check: the policy's latest verification (a Sohar Results row: Sohar
+   * Status, Sohar Date, Coverage End; or a Verification History row with Pulled At), or null. visit: see visitTime (blank =
+   * now). line: a SERVICE_LINES entry (default Provider). cfg: reverifyConfig output, or the raw Config, plus today / now.
+   * Codes: 'none' and 'not eligible' (due now), 'coverage end' (ends before the visit, due), 'covered' (not due),
+   * 'window' (an eligible check older than the cover date, and the cover date has come: due), 'not yet' (an eligible
+   * check older than the cover date, which has not come yet: not due now; a check before it would not cover the visit).
+   * Returns {due, covered, code, reason, verified, dueDate (the cover date when not covered), daysSince, status, line, rule}.
+   */
+  function reverifyDue(check, visit, line, cfg) {
+    const c = cfg || {};
+    const rc = c.lines ? { ...REVERIFY_DEFAULTS, ...c } : { ...reverifyConfig(c), today: c.today, now: c.now };
+    const ln = SERVICE_LINES.includes(line) ? line : 'Provider';
+    const now = nowOf(rc);
+    const vt = visitTime(visit);
+    const T = isNaN(vt) ? now : vt;
+    const from = coverFrom(T, ln, rc);
+    const fromDay = fmtDate(ptDay(from)), visitDay = fmtDate(ptDay(T));
+    const rule = lineRule(rc, ln).text;
+    const t = check ? soharTime(check['Sohar Date'] != null && check['Sohar Date'] !== '' ? check['Sohar Date'] : check['Pulled At']) : NaN;
+    const base = { line: ln, rule, verified: '', daysSince: null, status: '', dueDate: '' };
+    if (!check || isNaN(t)) return { ...base, due: true, covered: false, code: 'none', reason: 'no Sohar verification on file', dueDate: fmtDate(ptDay(now)) };
+    const status = str(check['Sohar Status']);
+    const vDay = ptDay(t);
+    const since = Math.round((ptDay(now) - vDay) / MS_DAY);
+    const b = { ...base, verified: fmtDate(vDay), daysSince: since, status };
+    const due = (code, reason) => ({ ...b, due: true, covered: false, code, reason, dueDate: fmtDate(ptDay(now)) });
+    if (!/^complete\.eligible/i.test(status)) return due('not eligible', `latest verification ${fmtDate(vDay)} came back ${status || 'pending'}`);
+    const end = parseDate(check['Coverage End']);
+    if (end && end < ptDay(T)) return due('coverage end', `coverage ends ${fmtDate(end)}, before the ${visitDay} visit`);
+    if (t >= from) return { ...b, due: false, covered: true, code: 'covered', reason: `verified eligible ${fmtDate(vDay)}, covers the ${visitDay} visit (${ln}: ${rule})` };
+    if (now >= from) return due('window', `verified eligible ${fmtDate(vDay)}, before ${fromDay}, so it does not cover the ${visitDay} visit (${ln}: ${rule})`);
+    return { ...b, due: false, covered: false, code: 'not yet', reason: `verified eligible ${fmtDate(vDay)}, next check on or after ${fromDay} for the ${visitDay} visit (${ln}: ${rule})`, dueDate: fromDay };
+  }
+  /** Local calendar day of a Sohar Date (resolved || created) as a UTC-midnight Date, else null. */
+  function soharDay(v) { const t = soharTime(v); return isNaN(t) ? null : dayOf(new Date(t)); }
   /**
    * The Sohar Results rows (verification, trusted match) for one verifyRows entry: same Per Nbr (when given), same
    * member ID (ignoring punctuation and leading zeros; a blank one never matches), same Sohar payerId, and the same
@@ -2766,7 +2884,55 @@
     });
   }
   /** reverifyDue for one policy (verifyRows entry, or null for any verification) from Sohar Results rows. */
-  function reverifyCheck(rows, v, opts) { return reverifyDue(policyResults(rows, v, opts && opts.per), opts); }
+  /**
+   * reverifyDue for one policy (verifyRows entry, or null for any verification) from Sohar Results rows: the latest
+   * trusted verification of that policy. opts: {per, visit or nextAppt, line, today / now, and the reverifyConfig fields}.
+   */
+  function reverifyCheck(rows, v, opts) {
+    const o = opts || {};
+    return reverifyDue(pickVerification(policyResults(rows, v, o.per)), o.visit != null ? o.visit : o.nextAppt, o.line, o);
+  }
+  /**
+   * v0.31: the Config section (pane Admin tab and full-screen Config tab) as data: the freshness rows, the include
+   * switches and any extra rows (e.g. fees.PLAN_YEAR_CONFIG_ROWS), with the current values and what each does.
+   * raw: Config {Setting: Value}. Returns {skip, windowHours, onFirst, lines: [{line, rule, ruleSetting, include,
+   * includeSetting}], extra: [{setting, value, what}], rows (every editable setting)}.
+   */
+  function configModel(raw, extraRows) {
+    const c = raw || {};
+    const rc = reverifyConfig(c);
+    const whatOf = new Map(REVERIFY_CONFIG_ROWS.map((r) => [r.setting, r.what]));
+    const lines = SERVICE_LINES.map((l) => ({ line: l, rule: rc.lines[l], ruleSetting: `Re-verify: ${l}`, include: rc.include[l], includeSetting: `Include in import: ${l}` }));
+    const extra = (extraRows || []).map((r) => ({ setting: r.setting, value: c[r.setting] == null || String(c[r.setting]).trim() === '' ? r.value : c[r.setting], what: r.what || '' }));
+    const rows = REVERIFY_CONFIG_ROWS.map((r) => r.setting).concat(extra.map((r) => r.setting));
+    return { skip: rc.skip, windowHours: rc.windowHours, onFirst: rc.onFirst, lines, extra, rows, what: Object.fromEntries(whatOf) };
+  }
+  /**
+   * A Config edit from the Config section, checked before it is written: {ok, value, error}. Only the settings the
+   * section shows can be set this way (extra: settings of the extra rows allowed too).
+   */
+  function configEdit(setting, value, extraSettings) {
+    const s = str(setting), v = str(value);
+    const onOff = (x) => (/^(on|yes|y|true|1)$/i.test(x) ? 'On' : /^(off|no|n|false|0)$/i.test(x) ? 'Off' : '');
+    if (s === 'Skip recent verifications' || s === 'Re-verify on the 1st' || /^Include in import: /.test(s)) {
+      if (/^Include in import: /.test(s) && !SERVICE_LINES.includes(s.slice(19))) return { ok: false, error: `Unknown service line in ${s}` };
+      return onOff(v) ? { ok: true, value: onOff(v) } : { ok: false, error: `${s}: On or Off` };
+    }
+    if (s === 'Re-verify window (hours)') { const n = parseFloat(v); return !isNaN(n) && n >= 0 && n <= 24 * 62 ? { ok: true, value: n } : { ok: false, error: 'Re-verify window (hours): a number of hours, 0 to 1488' }; }
+    if (/^Re-verify: /.test(s)) {
+      if (!SERVICE_LINES.includes(s.slice(11))) return { ok: false, error: `Unknown service line in ${s}` };
+      const t = lineRuleText(v);
+      return t ? { ok: true, value: t } : { ok: false, error: `${s}: Window, Weekly or a number of days` };
+    }
+    if ((extraSettings || []).includes(s)) return { ok: true, value: v };
+    return { ok: false, error: `${s || 'That setting'} is not edited here. Change it on the Config sheet.` };
+  }
+  /** A built patient's next visit for the freshness rule: {date, time} from Next Appt and its appointment's time. */
+  function nextVisitOf(p) {
+    const d = str(p && p['Next Appt']);
+    const a = ((p && p.x && p.x.appointments) || []).find((x) => str(x.date) === d);
+    return { date: d, time: a ? str(a.time) : '' };
+  }
 
   // Hidden Re-verify Requests sheet: someone asked to send a recently verified patient anyway. By: who asked (the Clinic
   // tab, a clinic file brought back, or the admin's "re-verify all"). Rows saved before v0.12 have Per Nbr, read as PER- keys.
@@ -2827,44 +2993,57 @@
   }
 
   /**
-   * Apply the skip window to built patients (buildPatients). results: Sohar Results rows from the saved uploads
-   * (mergeSoharResults). opts: {skip, days, newMonth (reverifyConfig), today, requests (Map or Set of patient keys asking
-   * to re-verify anyway)}. Only in-scope verification patients are checked. Each verifyRows entry not due gets reverifySkip
-   * {verified, due, reason}; buildExports leaves those rows out. A patient with a skipped row keeps Route verification,
-   * gets "; skipped: verified eligible MM/DD/YYYY, next check MM/DD/YYYY" on Route Reason and x.reverifySkip
-   * {verified, due, reason, partial} (partial: another insurance still goes). Returns {patients (copies), skipped: [{key,
-   * per, mrn, last, first, location, nextAppt, verified, due, reason, partial}], requested: [same shape: patients the skip
-   * would have left out but a request sends anyway]}.
+   * Apply the freshness rule (v0.31, reverifyDue) to built patients (buildPatients). results: Sohar Results rows from
+   * the saved uploads (mergeSoharResults). opts: reverifyConfig fields, today / now, requests (Map or Set of patient keys
+   * asking to re-verify anyway). The service line is visitLine(Next Event).
+   * - Include in import Off for the line: the patient leaves every import file (x.excluded {line, reason}; the
+   *   verification rows get reverifySkip), listed in excluded.
+   * - Skip recent verifications On: each verifyRows entry not due (covered, or not yet) gets reverifySkip {verified, due,
+   *   reason, code}; buildExports leaves those rows out. The patient keeps Route verification, gets "; skipped: <reason>"
+   *   on Route Reason and x.reverifySkip {verified, due, reason, code, partial} (partial: another insurance still goes).
+   * Returns {patients (copies), skipped: [{key, per, mrn, last, first, location, nextAppt, line, verified, due, reason,
+   * code, partial}], requested: [same shape: patients the skip would have left out but a request sends anyway], excluded}.
    */
   function applyReverifySkips(patients, results, opts) {
-    const o = { ...REVERIFY_DEFAULTS, ...(opts || {}) };
+    const o0 = opts || {};
+    const o = o0.lines ? { ...REVERIFY_DEFAULTS, ...o0 } : { ...REVERIFY_DEFAULTS, ...o0, ...reverifyConfig(o0), skip: o0.skip != null ? o0.skip : true };
     const asked = o.requests instanceof Map || o.requests instanceof Set ? o.requests : new Set(o.requests || []);
     const byKey = new Map();
     for (const r of results || []) { const k = keyOf(r); if (!k) continue; if (!byKey.has(k)) byKey.set(k, []); byKey.get(k).push(r); }
-    const skipped = [], requested = [];
+    const skipped = [], requested = [], excluded = [];
     const out = (patients || []).map((p) => {
       const k = keyOf(p);
+      if (p['In Scope'] !== 'Yes') return p;
+      const line = visitLine(p['Next Event']);
       const vrs = (p.x && p.x.verifyRows) || [];
-      if (!o.skip || p.Route !== 'verification' || p['In Scope'] !== 'Yes' || !vrs.length) return p;
+      const who = { key: k, per: str(p['Per Nbr']), mrn: str(p.MRN), last: p['Last Name'], first: p['First Name'],
+        location: str(p.x && p.x.location), nextAppt: str(p['Next Appt']), line };
+      if (o.include && o.include[line] === false) {
+        const reason = `Config Include in import: ${line} is Off (the 7 AM rotation covers it)`;
+        excluded.push({ ...who, reason });
+        const skip = { verified: '', due: '', reason, code: 'excluded', partial: false };
+        return { ...p, 'Route Reason': `${p['Route Reason']}; left out: ${reason}`,
+          x: { ...p.x, excluded: { line, reason }, reverifySkip: vrs.length ? skip : (p.x && p.x.reverifySkip), verifyRows: vrs.map((v) => ({ ...v, reverifySkip: skip })) } };
+      }
+      if (!o.skip || p.Route !== 'verification' || !vrs.length) return p;
       const rows = byKey.get(k) || [];
-      const checks = vrs.map((v) => reverifyCheck(rows, v, { ...o, nextAppt: p['Next Appt'] }));
+      const visit = nextVisitOf(p);
+      const checks = vrs.map((v) => reverifyCheck(rows, v, { ...o, visit, line }));
       if (checks.every((c) => c.due)) return p;
       const first = checks.find((c) => !c.due);
       const partial = checks.some((c) => c.due);
-      const skip = { verified: first.verified, due: first.dueDate, reason: first.reason, partial };
-      const who = { key: k, per: str(p['Per Nbr']), mrn: str(p.MRN), last: p['Last Name'], first: p['First Name'],
-        location: str(p.x && p.x.location), nextAppt: str(p['Next Appt']), ...skip };
+      const skip = { verified: first.verified, due: first.dueDate, reason: first.reason, code: first.code, partial };
       if (asked.has(k)) {
-        requested.push({ ...who, requested: asked instanceof Map ? str(asked.get(k)) : '' });
+        requested.push({ ...who, ...skip, requested: asked instanceof Map ? str(asked.get(k)) : '' });
         return { ...p, x: { ...p.x, reverifyRequested: true, reverifySkipped: skip } };
       }
-      skipped.push(who);
+      skipped.push({ ...who, ...skip });
       return {
         ...p, 'Route Reason': `${p['Route Reason']}; skipped: ${first.reason}${partial ? ' (the other insurance is still sent)' : ''}`,
-        x: { ...p.x, reverifySkip: skip, verifyRows: vrs.map((v, i) => (checks[i].due ? v : { ...v, reverifySkip: { verified: checks[i].verified, due: checks[i].dueDate, reason: checks[i].reason } })) },
+        x: { ...p.x, reverifySkip: skip, verifyRows: vrs.map((v, i) => (checks[i].due ? v : { ...v, reverifySkip: { verified: checks[i].verified, due: checks[i].dueDate, reason: checks[i].reason, code: checks[i].code } })) },
       };
     });
-    return { patients: out, skipped, requested };
+    return { patients: out, skipped, requested, excluded };
   }
 
   // ---------- guarantor resubmission (v0.12, approved by Brendan 2026-10-20) ----------
@@ -3260,11 +3439,12 @@
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, timeMins, soharTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,
     VERIFIABLE, CONFIDENT, AUTO_LABELS, isAutoLabel, needsClassification, confirmedNames, autoMatchPayer, autoTokens, AUTO_MEDIUM, finClassPayerIndex, matchVerifyRow, isVip, isSelfPay,
-    LEARN_DEFAULTS, LEARNING_CONFIG_ROWS, learningConfig, mergeNotes, PAYER_OUTCOME_COLS, verificationSignal, payerOutcomes, appendOutcomes,
+    LEARN_DEFAULTS, LEARNING_CONFIG_ROWS, learningConfig, mergeNotes, PAYER_OUTCOME_COLS, verificationSignal, payerOutcomes, appendOutcomes, sortOutcomes,
     learnPayers, learnFinClasses, planLearning, learningEvidence, PAYER_LEARNING_COLS, payerLearningRows, learningReviewRows,
     PAYER_MAP_LOG_COLS, mapChangeLog, sheetEditLog, DEMOTE_MARK, FLAG_ACK, flagAckNote, groupOutcomes,
     SOHAR_REF_COLS, refsOf, refIndex, appendRefs, noIdentifierReviewRows,
     REVERIFY_DEFAULTS, REVERIFY_CONFIG_ROWS, reverifyConfig, reverifyDue, policyResults, reverifyCheck,
+    SERVICE_LINES, LINE_DEFAULTS, configModel, configEdit, visitLine, visitTime, coverFrom, lineRule, lineRuleText, ptMs, ptDay, reverifyMigration, reverifyConfigRows, nextVisitOf, pickVerification,
     REVERIFY_REQUEST_COLS, pruneReverifyRequests, addReverifyRequest, applyReverifySkips, soharDay,
     PER_PREFIX, keyOf, savedKey, perKey, migrateKey, perKeyMap, splitId, searchedAs, idLabel, MAPPING_DISCOVERY_COLS, isMappingCandidate, subscriberFor,
     removeReverifyRequest, mergeClinicRequests, GUARANTOR_REASONS, GUARANTOR_REQUEST_COLS, guarantorCandidates, addGuarantorRequests, pruneGuarantorRequests,

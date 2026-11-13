@@ -237,7 +237,7 @@ test('clinic rows carry the skip window and the clinic\'s Re-verify anyway; requ
   assert.deepEqual(out.skipped.map((s) => [s.key, s.mrn, s.per, s.location]), [['M402', 'M402', '402', 'San Rafael']]);
   const rows = R.clinicRows('All', out.patients, hist.results, new Map(), new Date(2026, 9, 20, 9));
   const r = rows.find((x) => x['Per Nbr'] === '402');
-  assert.deepEqual([r['Verification Skipped'], r['Next Check'], r['Re-verify Anyway']], ['Verified eligible 10/19/2026', '10/26/2026', '']);
+  assert.deepEqual([r['Verification Skipped'], r['Next Check'], r['Re-verify Anyway']], ['Verified eligible 10/19/2026', '10/24/2026', ''], 'v0.31: next check is the cover date of the visit (10/27 - 72 h)');
   assert.equal(C.keyOf(r), 'M402');
   const asked = C.applyReverifySkips(b.patients, hist.results, { today: new Date(2026, 9, 20, 9), requests: new Map([['M402', 't']]) });
   const r2 = R.clinicRows('All', asked.patients, hist.results, new Map(), new Date(2026, 9, 20, 9)).find((x) => x['Per Nbr'] === '402');

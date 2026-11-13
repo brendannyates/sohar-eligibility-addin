@@ -1,7 +1,7 @@
 /* app.js — wires the pane to core.js (logic) and excel.js (workbook). */
 (function () {
   'use strict';
-  const VERSION = '0.30.0';
+  const VERSION = '0.31.0';
   const ADDIN_ID = '9786ae8a-f258-4f2c-9627-4c6f0f25db7e';
   const C = window.SoharCore;
   const R = window.SoharRules;
@@ -365,6 +365,7 @@
     dropZone('dropResults', 'fileResults', (files) => guard(() => uploadResults(files), 'resultsResult'));
     $('btnCopyMsg').addEventListener('click', () => guard(() => copyAdminMessage('action'), 'resultsResult'));
     $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits'), 'benBox'));
+    document.querySelectorAll('[data-html]').forEach((b) => b.addEventListener('click', () => guard(() => saveHtmlExport(b.dataset.html, 'htmlNote'), 'htmlNote'))); // v0.31
     $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(C.fileName('worklist'), C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
     $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(C.fileName('benefits'), C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'benBox'), 'benBox'));
     $('btnDlDiscVer').addEventListener('click', () => guard(downloadDiscoveryVerify, 'resultsResult'));
@@ -406,6 +407,7 @@
       $('scope').value = state.cfg.scope;
       $('asOf').value = state.cfg.asOf ? state.cfg.asOf.toISOString().slice(0, 10) : '';
       showFeeUi();
+      renderConfig(); // v0.31
       renderDailyList().catch((e) => console.warn('daily NextGen list not shown', e)); // v0.30
     } catch (e) { setStatus(e.message, 'bad'); }
   }
@@ -443,9 +445,10 @@
     const box = $('dailyList');
     if (!box) return;
     const rows = state.demo ? null : await X.readQueryTable('appts').catch(() => null);
-    if (!rows) { box.hidden = true; box.innerHTML = ''; return; }
+    if (!rows) { box.hidden = true; box.innerHTML = ''; state.daily = null; return; }
     const st = await queryStatus();
     const f = REC.dataFreshness(st, new Date());
+    state.daily = { rows: rows.length, at: st && st.at ? fmtStamp(new Date(st.at)) : '', text: f.text }; // v0.31: for the full-screen Import tab
     box.hidden = false;
     box.innerHTML = `<p><b>Daily NextGen list</b>: ${rows.length.toLocaleString()} rows${st && st.at ? `, refreshed ${esc(fmtStamp(new Date(st.at)))}` : ''}. <span class="${f.level === 'fresh' ? 'ok' : 'warn'}">${esc(f.text)}</span></p>
       <div class="actions"><button class="small primary" id="btnDaily">Use the daily NextGen list</button></div>`;
@@ -590,9 +593,10 @@
       .sort((a, b) => (b.needs - a.needs) || (AUTO_ORDER[a.conf] ?? 0) - (AUTO_ORDER[b.conf] ?? 0) || b.n - a.n || a.name.localeCompare(b.name));
     const box = $('payerList');
     box.hidden = !items.length;
-    if (!items.length) { box.innerHTML = ''; return; }
     const isLow = (it) => it.needs;
     const low = items.filter(isLow).length, rest = items.length - low;
+    renderPayerNotice(low);
+    if (!items.length) { box.innerHTML = ''; placePayerList(); return; }
     const keepOpen = box.querySelector('details') && box.querySelector('details').open;
     box.innerHTML = (low ? `<div class="needclass"><p class="warn"><b>${low} insurance name${low === 1 ? '' : 's'} need${low === 1 ? 's' : ''} manual classification.</b> Not matched confidently, labeled Review or with a label the add-in does not know, or Sohar disagrees with the mapping. Unclassified names go to discovery (or to both insurances when the last visit was billed differently). Pick the right Sohar payer once and it is remembered.</p><div class="needrows"></div></div>` : '')
       + (rest ? `<details class="more payerreview"${keepOpen ? ' open' : ''}><summary>Review auto-mapped payers (${rest})</summary>
@@ -676,6 +680,98 @@
       save.addEventListener('click', () => { const c = choices[+sel.value]; if (c.run) c.run(); });
       list.appendChild(wrap);
     }
+    placePayerList();
+  }
+
+  // ---------- v0.31: the Config section (bottom of the Admin tab; the full-screen Config tab draws the same) ----------
+  const CFG_UI = window.SoharConfigUI;
+  const extraConfigRows = () => (F ? F.PLAN_YEAR_CONFIG_ROWS : []);
+  /** Step 1 says how many payer names need a decision; the list itself is in Config > Payer mapping. */
+  function renderPayerNotice(low) {
+    const n = $('payerNotice');
+    if (!n) return;
+    n.hidden = !low;
+    n.innerHTML = low ? `<p class="warn"><b>${low} insurance name${low === 1 ? '' : 's'} need${low === 1 ? 's' : ''} manual classification.</b> <button class="link" id="btnGoPayers">Open Config, Payer mapping</button></p>` : '';
+    const b = $('btnGoPayers');
+    if (b) b.addEventListener('click', () => { const d = $('configSection'); d.open = true; $('payerList').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+  }
+  /** The payer list lives in the Config section's Payer mapping slot (moved out of the way while the section redraws). */
+  function placePayerList() {
+    const list = $('payerList'), slot = document.querySelector('#configBox [data-cfg-payers]');
+    if (!list || !slot) return;
+    if (list.parentNode !== slot) slot.appendChild(list);
+    let none = slot.querySelector('.cfg-none');
+    if (!none) { none = document.createElement('p'); none.className = 'hint cfg-none'; slot.insertBefore(none, list); }
+    none.textContent = list.hidden ? (state.patients ? 'No payer names need a decision in this report.' : 'Shows after the NextGen report is loaded.') : '';
+    none.hidden = !list.hidden;
+  }
+  /** Fee Payer Map and Estimate Codes rows for the read-only lists (neither has rates). */
+  function configLook() {
+    const f = state.fees;
+    const strip = (rows, cols) => (rows || []).map((r) => Object.fromEntries(cols.map((c) => [c, r[c] == null ? '' : String(r[c])])));
+    const fpm = f ? (PK ? PK.mergeFeePayerMap(f.payerMap || []) : f.payerMap) : [];
+    const codes = f ? (PK ? PK.mergeEstimateCodes(f.codes || [], F.ESTIMATE_CODE_SEEDS) : f.codes) : (F ? F.ESTIMATE_CODE_SEEDS : []);
+    return { feesOn: feesOn(), feePayerMap: strip(fpm, ['Payer', 'Sohar payerId', 'Fee Tab', 'Fee Payer', 'Confidence', 'Source']), estimateCodes: strip(codes, ['Event keyword', 'Codes', 'Note']) };
+  }
+  /** The model and lists the Config section draws (also sent to full screen). */
+  function configPayload() {
+    return { model: C.configModel((state.cfg && state.cfg.raw) || {}, extraConfigRows()), look: configLook(), payers: payerConfigItems() };
+  }
+  function renderConfig() {
+    const box = $('configBox');
+    if (!box || !CFG_UI) return;
+    const list = $('payerList');
+    if (list && box.contains(list)) $('configSection').appendChild(list); // keep it through the redraw
+    const p = configPayload();
+    box.innerHTML = CFG_UI.html(p.model, p.look);
+    CFG_UI.wire(box, (k, v) => guard(async () => { const t = await saveConfig(k, v); CFG_UI.say($('configBox'), t, true); }, 'configBox'), (sheet) => X.activate(sheet));
+    placePayerList();
+  }
+  /** One Config edit (pane or full screen): checked (core.configEdit), written, read back. Returns what was saved. */
+  async function saveConfig(setting, value) {
+    const e = C.configEdit(setting, value, extraConfigRows().map((r) => r.setting));
+    if (!e.ok) throw new Error(e.error);
+    await X.setConfigValue(setting, e.value);
+    const keep = state.cfg ? { scope: state.cfg.scope, asOf: state.cfg.asOf } : {};
+    state.cfg = { ...(await X.readConfig()), ...keep };
+    renderConfig();
+    return `Saved ${setting} = ${e.value}. It applies from the next build (Rebuild in step 1, or upload the report again).`;
+  }
+  /**
+   * The payers the Config section lists, as data for full screen: [{name, n, label, needs, guess, evidence, flag,
+   * choices: [{label, kind ('keep'|'suggest'|'use'|'not'), payerId, payerName}]}]. The same picks as the pane's dropdown.
+   */
+  function payerConfigItems() {
+    if (!state.payerMap || !state.rows) return [];
+    const idx = C.payerMapIndex(state.payerMap || []);
+    const learned = new Map((state.learning || []).map((r) => [r.key, r]));
+    const out = [];
+    for (const [name, pers] of payersInImport()) {
+      const h = idx.get(name.toLowerCase());
+      const conf = h ? String(h.confidence || '').toLowerCase() : '';
+      const lr = learned.get(name.toLowerCase()) || null;
+      const needs = !h || C.needsClassification(h.confidence, h.payerId) || !!(lr && lr.decision === 'flag') || !!(lr && lr.suggestion);
+      if (C.isVip(name) || C.isSelfPay(name) || !(needs || C.isAutoLabel(conf))) continue;
+      const choices = [];
+      if (h && h.payerId) choices.push({ label: `Keep ${h.payerName || h.payerId} (${h.payerId})`, kind: 'keep', payerId: h.payerId, payerName: h.payerName || '' });
+      const sg = lr && lr.suggestion;
+      if (sg) choices.push({ label: `Sohar suggests ${sg.payerName || sg.payerId} (${sg.payerId})`, kind: 'suggest', payerId: sg.payerId, payerName: sg.payerName || '' });
+      for (const c of C.suggestPayers(name, state.soharPayers || [], 8)) if (!choices.some((x) => x.payerId === c.payerId)) choices.push({ label: `${c.payerName} (${c.payerId})`, kind: 'use', payerId: c.payerId, payerName: c.payerName });
+      choices.push({ label: 'Not a payer (self-pay, VIP, a placeholder)', kind: 'not', payerId: '', payerName: '' });
+      out.push({ name, n: pers.size, label: h ? (h.confidence || 'No confidence') : 'Not mapped', needs, guess: h && h.payerId ? `${h.payerName || ''} ${h.payerId}`.trim() : '',
+        evidence: C.learningEvidence(lr) || '', flag: lr && lr.decision === 'flag' ? lr.note : '', choices });
+    }
+    return out.sort((a, b) => (b.needs - a.needs) || b.n - a.n || a.name.localeCompare(b.name));
+  }
+  /** A payer pick from full screen, written like the pane's (Payer Map + Payer Map Log, By Pane, a person's write). */
+  async function applyPayerChoice(name, ch) {
+    if (!name || !ch) throw new Error('Pick a payer first.');
+    const h = C.payerMapIndex(state.payerMap || []).get(String(name).toLowerCase()) || {};
+    const entry = ch.kind === 'not' ? { nextgenPayerName: name, payerId: '', payerName: '', confidence: 'Not a payer', notes: 'Marked in the add-in (full screen)' }
+      : ch.kind === 'keep' ? { nextgenPayerName: name, payerId: h.payerId, payerName: h.payerName, confidence: HUMAN_LABELS.has(String(h.confidence || '').toLowerCase()) ? h.confidence : 'Confirmed', notes: `Confirmed in the add-in (full screen; was ${h.confidence || 'blank'})` }
+      : { nextgenPayerName: name, payerId: ch.payerId, payerName: ch.payerName, confidence: 'Confirmed', notes: ch.kind === 'suggest' ? 'Suggested by Sohar results, confirmed in the add-in (full screen)' : 'Mapped in the add-in (full screen)' };
+    await writeMap([{ entry, evidence: entry.notes }], 'Pane', true);
+    await afterMap();
   }
 
   // ---------- step 3 ----------
@@ -712,8 +808,10 @@
         const feeRows = F ? (feesOn() ? F.FEE_CONFIG_ROWS : F.FEE_CONFIG_ROWS.slice(0, 1)) : [];
         // "MRN ids since": Sohar checks created before this time carry the Per Nbr as their id, later ones the MRN.
         const since = { setting: 'MRN ids since', value: utcStamp(new Date()), what: 'When this workbook started sending the MRN (not the Per Nbr) as the Sohar id. Sohar results created before then are matched by Per Nbr. Set by the add-in; do not change.' };
-        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS, START_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
-        if (!String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
+        // v0.31: the per-service-line re-verify rows, with the one-time migration from Re-verify days / Re-verify in new month.
+        const added = await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.reverifyConfigRows(state.cfg.raw), C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS, F ? F.PLAN_YEAR_CONFIG_ROWS : [], START_CONFIG_ROWS)).catch((e) => { console.warn('Config learning / re-verify rows not added', e); return []; });
+        const reread = (added || []).some((a) => /^Re-verify|^Include in import|^Plan-year/.test(a));
+        if (reread || !String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
       }
       const learn = state.cfg.learning || C.LEARN_DEFAULTS;
       state.payerMap = await X.readPayerMap();
@@ -780,14 +878,17 @@
       res.patients = sk.patients;
       if (sk.warn) sheetWarn.push(sk.warn);
       const nSkip = state.skipped.length;
-      const skipNote = nSkip ? `<p class="hint">${nSkip} skipped: verified within ${sk.days} days (listed in step 2).</p>` : '';
+      const nOut = (state.excluded || []).length;
+      const skipNote = (nSkip ? `<p class="hint">${nSkip} skipped: already covered by an eligible verification, or too early to re-verify (listed in step 2).</p>` : '')
+        + (nOut ? `<p class="hint">${nOut} left out: their service line is Off in Config <b>Include in import</b> (the 7 AM rotation covers them).</p>` : '');
       state.perToKey = res.perToKey || state.perToKey;
       renderPayers();
       state.patients = res.patients; state.review = res.review.concat(C.learningReviewRows(state.learning));
       const pt = state.cfg.payerTests || C.PAYER_TEST_DEFAULTS;
       state.exports = C.buildExports(res.patients, { ...state.cfg, guarantorRequests: state.guarantorActive, mappingDiscovery: pt.mappingDiscovery !== false });
       // v0.21: the Sohar Flow import (one row per patient, the Flow's own CSV template), from the same patients.
-      state.exports.flow = REC.flowImportRows(res.patients, state.cfg).rows;
+      state.flowCfg = await flowImportCfg();
+      state.exports.flow = REC.flowImportRows(res.patients, state.flowCfg).rows;
       await X.writePayerMapping(C.MAPPING_SHEET_COLS, state.exports.mapping).catch((e) => { console.error(e); sheetWarn.push(`Payer Mapping sheet not updated: ${e.message}`); });
       state.exports.payerTests = [];
       if (pt.on) {
@@ -828,14 +929,14 @@
       const nv = state.exports.verification.length, nd = state.exports.discovery.length;
       const nvp = new Set(state.exports.verification.map((r) => r.id)).size;
       $('btnDlVer').disabled = !nv; $('btnDlDisc').disabled = !nd;
-      const flowOut = REC.flowImportRows(state.patients || res.patients, state.cfg), nf = flowOut.rows.length;
+      const flowOut = REC.flowImportRows(state.patients || res.patients, state.flowCfg), nf = flowOut.rows.length;
       $('btnDlFlow').disabled = !nf;
-      $('fnFlow').textContent = `${nf} patient${nf === 1 ? '' : 's'}${flowOut.skipped.length ? `, ${flowOut.skipped.length} left out` : ''} · ${REC.flowImportFileName()}`;
+      $('fnFlow').textContent = `${nf} patient${nf === 1 ? '' : 's'}${flowOut.estimates ? `, ${flowOut.estimates} plan-year estimate${flowOut.estimates === 1 ? '' : 's'}` : ''}${flowOut.skipped.length ? `, ${flowOut.skipped.length} left out` : ''} · ${REC.flowImportFileName()}`;
       $('fnVer').textContent = `${nvp} patient${nvp === 1 ? '' : 's'}${nv > nvp ? ` (${nv} rows: ${nv - nvp} with two insurances)` : ''} · ${C.fileName('verification')}`;
       const ng = state.exports.discovery.filter((r) => /-G$/.test(r.id)).length;
       $('fnDisc').textContent = `${nd - ng} patient${nd - ng === 1 ? '' : 's'}${ng ? ` + ${ng} guarantor${ng === 1 ? '' : 's'}` : ''} · ${C.fileName('discovery')}`;
       renderExtraFiles();
-      renderSkipped(sk.days);
+      renderSkipped();
       if (!(opts && opts.deferRules)) await refreshRules();
     } finally {
       // The build stopped early (an error or an early return): log the Payer Map changes it already made.
@@ -855,9 +956,14 @@
    */
   async function applySkips(res, cfgFor) {
     const rc = (state.cfg && state.cfg.reverify) || C.REVERIFY_DEFAULTS;
-    state.skipped = []; state.requestedAnyway = [];
+    state.skipped = []; state.requestedAnyway = []; state.excluded = [];
     const pk = res.perToKey || state.perToKey;
-    const none = (warn) => ({ patients: res.patients, days: rc.days, warn });
+    // v0.31: Include in import Off still applies when nothing can be skipped (no history, Skip Off, a read error).
+    const none = (warn) => {
+      const o = C.applyReverifySkips(res.patients, [], { ...rc, skip: false });
+      state.excluded = o.excluded;
+      return { patients: o.patients, warn };
+    };
     let saved, refs, requests, gReq;
     try {
       saved = await X.readUploads();
@@ -876,15 +982,15 @@
     if (pr.dropped || requests.some((q) => !String(q.MRN || '').trim())) await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, pr.rows).catch((e) => console.warn('Re-verify Requests not pruned', e));
     state.reverifyRequests = pr.rows;
     const out = C.applyReverifySkips(res.patients, merged.results, { ...rc, today: new Date(), requests: pr.active });
-    state.skipped = out.skipped; state.requestedAnyway = out.requested;
-    return { patients: out.patients, days: rc.days, warn: '' };
+    state.skipped = out.skipped; state.requestedAnyway = out.requested; state.excluded = out.excluded;
+    return { patients: out.patients, warn: '' };
   }
 
   /**
    * Step 2: patients left out of the verification file because Sohar verified them eligible recently. Collapsed by
    * default. Clinics pick patients to re-verify anyway (Clinic tab, clinic files); the admin can only send all of them.
    */
-  function renderSkipped(days) {
+  function renderSkipped() {
     const box = $('skipBox');
     if (!box) return;
     const list = state.skipped || [], asked = state.requestedAnyway || [];
@@ -893,10 +999,10 @@
     const short = (d) => esc(String(d || '').slice(0, 5));
     const who = (s) => `<b>${esc(C.lasfir(s.last, s.first))}</b><br><span class="hint">${esc(C.idLabel({ MRN: s.mrn, 'Per Nbr': s.per }))}${s.location ? ` · ${esc(s.location)}` : ''}${s.partial ? ' · other insurance still sent' : ''}</span>`;
     const by = (s) => { const q = (state.reverifyRequests || []).find((r) => r.MRN === s.key); return q && q.By ? q.By : 'request'; };
-    box.innerHTML = (list.length ? `<details class="more skiplist"><summary><b>Skipped (verified recently): ${list.length}</b></summary>
-      <p class="hint">Sohar verified the same insurance eligible within ${esc(days)} days, so ${list.length === 1 ? 'this patient is' : 'these patients are'} not on the verification file. Clinics can ask for a patient on the Clinic tab or in their clinic file.</p>
+    box.innerHTML = (list.length ? `<details class="more skiplist"><summary><b>Skipped (covered or too early): ${list.length}</b></summary>
+      <p class="hint">An eligible Sohar verification of the same insurance already covers the next visit, or it is too early to re-verify (a check counts from the visit minus the Config window, and never before the 1st of the visit's month; TMS treatments weekly from Monday). ${list.length === 1 ? 'This patient is' : 'These patients are'} not on the verification file. Clinics can ask for a patient on the Clinic tab or in their clinic file.</p>
       <table class="watch"><thead><tr><th>Patient</th><th>Verified</th><th>Next check</th></tr></thead><tbody>${list.map((s) => `<tr>
-        <td>${who(s)}</td><td title="${esc(s.verified)}">${short(s.verified)}</td><td title="${esc(s.due)}">${short(s.due)}</td></tr>`).join('')}</tbody></table>
+        <td>${who(s)}</td><td title="${esc(s.verified)}">${short(s.verified)}</td><td title="${esc(s.reason)}">${s.due ? short(s.due) : 'covers visit'}</td></tr>`).join('')}</tbody></table>
       <div class="actions"><button class="small" id="btnReverifyAll">Re-verify all ${list.length} anyway</button><button class="link" id="btnSkipCsv">Save this list</button></div>
       </details>` : '')
       + (asked.length ? `<details class="more skiplist"><summary>Sent anyway on request: ${asked.length}</summary>
@@ -1180,7 +1286,7 @@
   const inScopePatients = () => (state.patients || []).filter((p) => p['In Scope'] === 'Yes');
   function rulesCfg() {
     const c = state.cfg || {};
-    return { today: new Date(), sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? c.reverifyDays : 7, reverifyNewMonth: !!(c.reverify && c.reverify.newMonth),
+    return { today: new Date(), sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? c.reverifyDays : 7, reverifyNewMonth: !!(c.reverify && c.reverify.newMonth), reverify: c.reverify,
       payerRules: state.payerRules || [], locationState: c.locationState || {} };
   }
 
@@ -1659,16 +1765,103 @@
   /** The Sohar Flow import (v0.21): REC.FLOW_IMPORT_COLS, one row per patient; says who was left out and why. */
   async function downloadFlowImport() {
     if (!state.patients) throw new Error('Upload the NextGen report first (step 1).');
-    const out = REC.flowImportRows(state.patients, state.cfg);
-    if (!out.rows.length) throw new Error('No patients for the Sohar Flow file (none in scope, or all verified recently).');
+    const out = REC.flowImportRows(state.patients, state.flowCfg || await flowImportCfg());
+    if (!out.rows.length) throw new Error('No patients for the Sohar Flow file (none in scope, or all already covered).');
     await saveCSV(REC.flowImportFileName(), REC.FLOW_IMPORT_COLS, out.rows, 'preflight');
     const why = new Map();
     for (const s of out.skipped) why.set(s.why, (why.get(s.why) || 0) + 1);
     const parts = [`${out.rows.length} patient${out.rows.length === 1 ? '' : 's'} in the Sohar Flow file.`];
     if (why.size) parts.push(`Left out: ${[...why].map(([w, n]) => `${n} ${w}`).join('; ')}.`);
-    if (!String((state.cfg && state.cfg.tin) || '').trim()) parts.push('Config TIN is blank, so the tin column is empty.');
-    note('preflight', parts.join(' '), why.size || !(state.cfg && state.cfg.tin) ? 'warn' : 'ok');
+    if (out.estimates) {
+      const noRates = out.rows.filter((r) => r.estimate === 'yes' && !r.rateTable).length;
+      parts.push(`${out.estimates} plan-year cost estimate${out.estimates === 1 ? '' : 's'} asked for (90792, 99214, 99215)${noRates ? `; ${noRates} with no contracted rates (${feesOn() ? 'map the payer on Fee Payer Map' : 'Config Fee estimates is Off'}), so Sohar cannot price ${noRates === 1 ? 'it' : 'them'}` : ''}.`);
+    }
+    note('preflight', parts.join(' '), why.size ? 'warn' : 'ok');
     markDone(2); setCurrent(3);
+  }
+
+  /**
+   * v0.31: what the Flow import needs besides the patients: estimate (fees.planYearEstimateDue through
+   * record.estimateDueFor, from Sohar Results, Verification History and Flow Results) and rateTable (fees.rateTableFor:
+   * the visit's fee tab, MD/NP, the chart payer plus the payers discovery finds most for the patient's state, from Payer
+   * Outcomes). Rates only while Config Fee estimates is On (the fee sheets are read only then). A read error leaves that
+   * part out (estimate: the Flow decides; rates: blank), never a guess.
+   */
+  async function flowImportCfg() {
+    const cfg = state.cfg || {};
+    const results = (await currentResults().catch(() => null)) || [];
+    const history = await currentHistory().catch(() => []);
+    const flow = await currentFlow().catch(() => []);
+    const today = new Date();
+    const planYear = F ? F.planYearEstimateDue : null;
+    let rates = null;
+    if (F && feesOn()) {
+      try {
+        const f = await loadFeeData();
+        if (f.schedule.length) {
+          const outcomes = state.outcomes || await X.readPayerOutcomes().catch(() => []);
+          const stateOf = new Map((state.patients || []).map((p) => [C.keyOf(p), String(p.State || '').toUpperCase()]));
+          rates = {
+            index: F.feeIndex(f.schedule, F.metaMatches(f.meta, f.schedule.length) ? F.readMeta(f.meta).tabSummary : []),
+            locationRows: PK ? PK.mergeFeeLocations(f.locations) : f.locations, homeRows: f.homes,
+            payerMap: PK ? PK.mergeFeePayerMap(f.payerMap) : f.payerMap, teleKeywords: cfg.teleKeywords || ['Tele'],
+            codes: F.planYearCodes(cfg.raw), common: F.discoveryPayers(outcomes, (k) => stateOf.get(k) || '', 8),
+          };
+        }
+      } catch (e) { console.warn('Flow rate table not built', e); rates = null; }
+    }
+    const soharName = (id) => { const p = (state.soharPayers || []).find((x) => String(x.payerId) === String(id)); return p ? p.payerName : ''; };
+    return {
+      specialty: cfg.specialty,
+      estimateOf: (p, v) => (planYear ? REC.estimateDueFor(p, v, { results, history, flow, today, planYear }) : false),
+      rateTableOf: (p, v) => {
+        if (!rates) return null;
+        const chartId = (v && v.payerId) || p['Sohar payerId'];
+        const payers = [{ payerId: chartId, payerName: (v && v.payerName) || soharName(chartId) || p['Primary Payer'] }]
+          .concat(rates.common.get(String(p.State || '').toUpperCase()) || []);
+        const x = p.x || {};
+        return F.rateTableFor({ location: x.location, provider: x.rendering, event: p['Next Event'] }, { ...rates, payers }).rateTable;
+      },
+    };
+  }
+
+  // ---------- v0.31: interactive HTML exports (record.htmlReport), saved like the other files ----------
+  const HTML_EXPORTS = {
+    patients: { label: 'Sohar Patients', title: 'Patients' },
+    results: { label: 'Sohar Results', title: 'Sohar results' },
+    history: { label: 'Sohar Verification History', title: 'Verification history' },
+    audits: { label: 'Sohar Account Audits', title: 'Account audits' },
+  };
+  /** The page for one export kind, from what the pane holds (sheet-safe columns only). */
+  async function htmlExportPage(kind) {
+    const pick = (cols, rows) => (rows || []).map((r) => Object.fromEntries(cols.map((c) => [c, C.cellOf(r, c) == null ? '' : C.cellOf(r, c)])));
+    let sections;
+    if (kind === 'patients') {
+      if (!state.patients) throw new Error('Upload the NextGen report first (step 1).');
+      const cols = REC.HTML_EXPORT_COLS.patients;
+      sections = [{ id: 'patients', title: 'Patients', cols, rows: pick(cols, state.patients.filter((p) => p['In Scope'] === 'Yes')), filters: ['Route', 'State', 'Confidence'], note: 'In-scope patients from the last build.' }];
+    } else if (kind === 'results') {
+      const rs = (await currentResults()) || [];
+      if (!rs.length) throw new Error('No Sohar results yet (step 3).');
+      const cols = REC.HTML_EXPORT_COLS.results;
+      sections = [{ id: 'results', title: 'Sohar results', cols, rows: pick(cols, rs), filters: ['Next Location', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'] }];
+    } else if (kind === 'history') {
+      const h = await X.readVerificationHistory();
+      if (!h.length) throw new Error('Verification History is empty: it fills as Sohar results and Flow results are uploaded.');
+      sections = [{ id: 'history', title: 'Verification history', cols: REC.VERIFICATION_HISTORY_COLS, rows: h.slice().reverse(), filters: ['Source', 'Kind', 'Sohar Status', 'Clinic', 'Policy Key'], note: 'Every check the add-in processed, newest first. Policy Key is the Sohar payerId and the member ID\'s last 4.' }];
+    } else if (kind === 'audits') {
+      const a = await currentAudits(true);
+      const hist = await X.readAccountAuditHistory().catch(() => []);
+      if (!(a.summary || []).length && !hist.length) throw new Error('No saved account audits yet.');
+      sections = [{ id: 'latest', title: 'Latest audit per patient', cols: AU.AUDIT_COLS, rows: a.summary || [], filters: ['Plan Year'] },
+        { id: 'runs', title: 'Every audit run', cols: AU.AUDIT_HISTORY_COLS, rows: hist.slice().reverse(), filters: ['Run By'] }];
+    } else throw new Error(`Unknown export: ${kind}`);
+    const ex = HTML_EXPORTS[kind];
+    return { name: REC.htmlReportFileName(ex.label), html: REC.htmlReport({ title: ex.title, subtitle: 'Sohar Eligibility', generated: fmtStamp(new Date()), version: VERSION, sections }) };
+  }
+  async function saveHtmlExport(kind, boxId) {
+    const p = await htmlExportPage(kind);
+    return saveBinary(p.name, new TextEncoder().encode(p.html), 'text/html;charset=utf-8', boxId, 'interactive web page');
   }
 
   // ---------- step 3: Sohar results ----------
@@ -1703,8 +1896,31 @@
     progress(`${flow.map((f) => f.name).join(', ')}: Sohar Flow results, ${m.read} visit${m.read === 1 ? '' : 's'}`);
     await X.writeFlowResults(REC.FLOW_SHEET_COLS, m.rows);
     state.flow = m.rows;
+    // v0.31: the Flow's checks go on Verification History too (Source Flow).
+    await appendHistory(REC.historyFromFlow(flow.flatMap((f) => REC.flowRecords(f.rows))), progress);
     const sandbox = flow.some((f) => /sandbox/i.test(f.name));
     return { rest, html: `<p class="ok">Sohar Flow: ${m.added} new visit${m.added === 1 ? '' : 's'}${m.replaced ? `, ${m.replaced} updated` : ''}; ${m.rows.length} saved. Cost estimates show at the top of each patient's record in full screen.${sandbox ? ' <b>Sandbox file: test results, not real coverage.</b>' : ''}</p>` };
+  }
+  /**
+   * v0.31: add checks to the hidden Verification History (record.mergeHistory: append-only, a re-read updates fields,
+   * sorted by Pulled At). A read error skips the save (the rows come again on the next upload), never an overwrite.
+   */
+  async function appendHistory(rows, say) {
+    if (!rows || !rows.length) return;
+    try {
+      const prev = await X.readVerificationHistory();
+      const m = REC.mergeHistory(prev, rows);
+      if (!m.added && !m.updated) { state.history = m.rows; return; }
+      await X.writeVerificationHistory(REC.VERIFICATION_HISTORY_COLS, m.rows);
+      state.history = m.rows;
+      if (say) say(`Verification History: ${m.added} new check${m.added === 1 ? '' : 's'}${m.updated ? `, ${m.updated} updated` : ''}; ${m.rows.length} kept.`);
+    } catch (e) { console.error(e); note('resultsResult', `Verification History not updated (the next upload adds these checks): ${e.message}`, 'warn'); }
+  }
+  /** Saved Verification History, read once per pane session (a read error is an empty list here, never saved). */
+  async function currentHistory(fresh) {
+    if (state.demo) return state.history || [];
+    if (fresh || !state.history) state.history = await X.readVerificationHistory().catch((e) => { console.error(e); return null; });
+    return state.history || [];
   }
   /**
    * Saved Flow results (hidden Flow Results sheet), read once per pane session. fresh (before a save): read again and
@@ -1831,12 +2047,16 @@
       const before = await X.readPayerOutcomes();
       const ledger = C.appendOutcomes(before, C.payerOutcomes(res.results, res.patients, fmtStamp(new Date())), state.perToKey);
       if (ledger.added || before.some((o) => !String(o.MRN || '').trim())) {
-        await X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, ledger.rows);
+        await X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, C.sortOutcomes(ledger.rows)); // v0.31: by date
         step(`${ledger.added} new Sohar outcome${ledger.added === 1 ? '' : 's'} recorded for payer learning.`);
       }
       newOutcomes = ledger.added;
       state.outcomes = ledger.rows;
     } catch (e) { console.error(e); note('resultsResult', `Payer Outcomes not updated (payer learning waits for the next upload): ${e.message}`, 'warn'); }
+    // v0.31: Verification History, every check kept with its date and Source (Import or Dashboard), per policy.
+    // The rotation's own import files (… (rotation).csv) are Source Rotation, so the morning run never looks like the import.
+    const rotIds = REC.rotationIds(list.map((f) => ({ name: f.name, records: C.readResultRows(f.rows).records })));
+    await appendHistory(REC.withSource(REC.historyFromResults(res.results), rotIds, 'Rotation'), step);
     // New outcomes can promote, demote or suggest payers: rebuild so the Payer Map, Patients and imports follow.
     // (The Sohar Results sheet picks up a changed mapping on the next refresh.)
     if (newOutcomes && state.patients) await build({ deferRules: true });
@@ -2023,6 +2243,7 @@
     renderFeeStatus();
   }
   function renderFeeStatus() {
+    renderConfig(); // v0.31: the Config section lists Fee Payer Map and Estimate Codes
     const box = $('feeStatus');
     if (!box) return;
     const f = state.fees;
@@ -2334,6 +2555,10 @@
       billing: await billingByKey(), data: await queryStatus(), ticketRows: await ticketRowsForView(),
       // v0.28: who picked their name in the pane (ticks, notes, code rules and audits record it) and the list to switch to.
       who: { name: who.name, users: whoList(), here: whoRead().used },
+      // v0.31: the Config tab (same section as the pane) and the Import tab's daily NextGen list.
+      config: configPayload(), daily: state.daily || null,
+      // v0.31: every check per policy (Verification History + the rotation's Patient History) for the patient view.
+      checks: { history: await currentHistory(), patient: state.demo ? [] : ((await X.readQueryTable('history').catch(() => null)) || []) },
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -2502,6 +2727,12 @@
       const next = AU.mergeAudits(await currentAudits(true), rec);
       await X.writeAccountAudits(AU.AUDIT_SHEET_COLS, AU.auditSheetRows(next));
       state.audits = next;
+      // v0.31: every run is kept on the hidden Account Audit History (Account Audits keeps the latest per patient).
+      try {
+        const hist = AU.appendAuditHistory(await X.readAccountAuditHistory(), rec.summary, new Date().toISOString(), m.by || who.name || rec.summary.By);
+        await X.writeAccountAuditHistory(AU.AUDIT_HISTORY_COLS, hist);
+        state.auditHistory = hist;
+      } catch (e) { console.warn('Account Audit History not updated', e); }
       // The lines are on Account Audits now; the old sheet is only a copy. Left for the next save if this fails.
       try { await X.dropAccountAuditLines(); } catch (e) { console.warn('old Account Audit Lines sheet not removed', e); }
       return rec.summary.Saved;
@@ -2540,6 +2771,8 @@
     });
   }
 
+  /** v0.31: a file sent from full screen ({name, text} or {name, base64}) as a File, so the pane's own upload paths read it. */
+  const fileOf = (f) => (f.text != null ? new File([f.text], f.name, { type: 'text/csv' }) : new File([base64Bytes(f.base64)], f.name));
   async function fromDialog(raw) {
     const m = take(raw);
     if (!m) return;
@@ -2594,6 +2827,37 @@
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
+    } else if (m.type === 'export-html') { // v0.31: an interactive HTML export asked for in full screen
+      try { const msg = await saveHtmlExport(m.kind, 'resultsResult'); await sendToDialog({ type: 'notice', ok: true, text: msg }); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
+    } else if (m.type === 'config-set') { // v0.31: an edit in the full-screen Config tab
+      try {
+        const text = await saveConfig(m.setting, m.value);
+        await sendToDialog({ type: 'config', config: configPayload(), notice: { ok: true, text } });
+      } catch (e) { await sendToDialog({ type: 'config', config: configPayload(), notice: { ok: false, text: `Not saved: ${e.message}` } }); throw e; }
+    } else if (m.type === 'payer-pick') {
+      try {
+        await applyPayerChoice(m.name, m.choice);
+        await sendToDialog({ ...(await payload('config')), notice: { ok: true, text: `Saved the Sohar payer for ${m.name}.` } });
+      } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Payer not saved: ${e.message}` }); throw e; }
+    } else if (m.type === 'goto') {
+      await X.activate(String(m.sheet || ''));
+    } else if (m.type === 'import-upload' || m.type === 'daily-list') { // v0.31: the full-screen Import tab, same path as step 1
+      try {
+        if (m.type === 'daily-list') await useDailyList();
+        else await uploadImport((m.files || []).slice(0, 1).map(fileOf));
+        const nf = (state.exports && state.exports.flow) ? state.exports.flow.length : 0;
+        await sendToDialog({ ...(await payload('import')), notice: { ok: true, text: `Report loaded: ${(state.patients || []).filter((p) => p['In Scope'] === 'Yes').length} patients in scope; ${nf} on the Flow file. ${$('wbStatus').textContent}` } });
+      } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
+    } else if (m.type === 'cred-upload' || m.type === 'ir-upload' || m.type === 'clinic-back') {
+      const files = (m.files || []).map(fileOf);
+      const box = { 'cred-upload': 'credStatus', 'ir-upload': 'irResult', 'clinic-back': 'clinicFilesNote' }[m.type];
+      try {
+        if (m.type === 'cred-upload') await uploadPayerRules(files);
+        else if (m.type === 'ir-upload') await uploadIr({ files, value: '' });
+        else await bringBackClinicFiles(files);
+        const text = ($(box) && $(box).innerText.trim()) || 'Done.';
+        await sendToDialog({ ...(await payload('config')), notice: { ok: true, text: text.slice(0, 600) } });
+      } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
     } else if (m.type === 'clinic-file') {
       await saveClinicFile(m.location);
       await sendToDialog({ type: 'notice', ok: true, text: `Clinic file for ${m.location} saved to Downloads (Excel on the web: see the pane for "Save in a new tab").` });
@@ -2772,6 +3036,9 @@
   // ---------- demo adapter (browser preview, synthetic data) ----------
   // Every name, MRN, member ID and auth code below is made up. Dates are relative to today so the demo stays current.
   function demoAdapter() {
+    // v0.31: Config edits from the Config section stay in memory in the browser preview.
+    const demoCfgRaw = {};
+    const demoCfgBase = () => ({ asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', payerTests: C.payerTestConfig({ 'Payer tests': /[?&]tests=1\b/.test(location.search) ? 'On' : 'Off' }), mrnSince: '', learning: C.learningConfig({}), fees: F ? F.feeConfig({ 'Fee estimates': feesDemo ? 'On' : 'Off' }) : { on: false } });
     const docSettings = { [W.USERS_SETTING]: [{ name: 'Sam O.', added: '' }, { name: 'Ana R.', added: '' }, { name: 'Jo K.', added: '' }] };
     const hdr = ['Appointment Pre-Check Complete', 'Res Name', 'Pat Sts', 'Portal Enrollment', 'Pat Name', 'Appt Date', 'Beg Tm', 'Event', 'Details', 'Loc Name',
       'Gender Identity', 'Current Gender', 'Preferred Pronoun', 'MRN', 'Status', 'Dur', 'Birth Dt', 'Rendering', 'End Tm', 'Per Nbr', 'Nxt Appt Dt', 'Nxt Beg Tm',
@@ -2939,6 +3206,9 @@
       async readPayerCredRules() { return credRules; }, async writePayerCredRules(c, r) { credRules = r; return r.length; },
       async readFee(kind) { return feeStore[kind] || []; }, async writeFee(kind, c, r) { feeStore[kind] = r; return r.length; },
       async readFlowResults() { return state.flow || []; }, async writeFlowResults(c, r) { state.flow = r; return r.length; },
+      // v0.31 history tables, in memory.
+      async readVerificationHistory() { return state.history || []; }, async writeVerificationHistory(c, r) { state.history = r; return r.length; },
+      async readAccountAuditHistory() { return state.auditHistory || []; }, async writeAccountAuditHistory(c, r) { state.auditHistory = r; return r.length; },
       async readPreCheck() { return state.precheck || []; }, async writePreCheck(c, r) { state.precheck = r; return r.length; },
       async readAccountAudits() { return (state.audits && state.audits.summary) || []; }, async readAccountAuditLines() { return (state.audits && state.audits.lines) || []; },
       // v0.26: one sheet holds summary and lines (saveAudit keeps state.audits as {summary, lines}).
@@ -2977,7 +3247,7 @@
       INBOX: { sheet: 'Clinic Work Inbox', table: 'tblClinicWorkInbox' },
       async readClinicInbox() { if (inbox === undefined) { const r = inboxFirstRead(); if (r.length) inbox = r; return r; } return inbox; },
       async createClinicInbox() { if (inbox) return false; inbox = []; return true; },
-      async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', payerTests: C.payerTestConfig({ 'Payer tests': /[?&]tests=1\b/.test(location.search) ? 'On' : 'Off' }), mrnSince: '', learning: C.learningConfig({}), fees: F ? F.feeConfig({ 'Fee estimates': feesDemo ? 'On' : 'Off' }) : { on: false } }; },
+      async readConfig() { return { ...demoCfgBase(), raw: { ...demoCfgRaw }, reverify: C.reverifyConfig(demoCfgRaw) }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },
       async upsertPayerMap(e, o) { return this.upsertPayerMapMany([e], o); },
@@ -2988,7 +3258,7 @@
         }
         return list.length;
       },
-      async replaceTable() {}, async setConfigValue() {}, async activate() {}, async templateCheck() { return []; }, async recoverAll() { return []; }, takeRecovered() { return []; },
+      async replaceTable() {}, async setConfigValue(k, v) { demoCfgRaw[k] = v; }, async activate() {}, async templateCheck() { return []; }, async recoverAll() { return []; }, takeRecovered() { return []; },
       // v0.28: document settings, in memory (made-up names). The demo workbook has one fixed key, so a pick lasts the day here too.
       getDoc(k) { return docSettings[k] ?? null; }, async setDoc(k, v) { if (v == null) delete docSettings[k]; else docSettings[k] = v; return true; },
       async refreshDoc() {}, docUrl() { return 'demo:sohar-eligibility'; },

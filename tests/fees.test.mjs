@@ -307,10 +307,10 @@ test('estimate codes: seeds marked default, review; longest keyword wins; units'
     'TMS Consult+Med Mgt In Person': '90792x1', 'TMS Consult+Med Mgt Telepsych': '90792x1', 'TMS Consult Telepsych Internal': '90792x1', 'TMS Consult In Person Internal': '90792x1',
     'Esk ConsultTelepsych': '90792x1', 'Esketamine Consult In Person': '90792x1', 'ESK Consult+Med Mgt Telepsych': '90792x1', 'IV Ketamine Consult Tele': '90792x1',
     'Tel MindfulOne Consult': '90792x1', 'IP MindfulOne Consult': '90792x1',
-    'IV Ketamine Treatment Start': '99215x1', 'IV Ketamine Follow Up': '99214x1',
+    'IV Ketamine Treatment Start': '99214x1', 'IV Ketamine Follow Up': '99214x1',
     'Telepsych': '99214x1', 'Med Management Telepsych': '99214x1', 'Med Management In-Office': '99214x1', 'Telepsych TMS F/U': '99214x1', 'TMS Follow Up': '99214x1',
-    'Kaiser TMS F/U Telepsych': '99214x1', 'Kaiser TMS F/U': '99214x1', 'Transition Telepsych Patient': '99214x1', 'Transition Appointment': '99214x1',
-    'Telepsych Only': '99214x1', 'Telepsych Adolescent F/u': '99214x1', 'Tel MindfulConnect': '99214x1', 'ADHD Testing Review Tele': '99214x1', 'ADHD Testing Review In Person': '99214x1',
+    'Kaiser TMS F/U Telepsych': '99214x1', 'Kaiser TMS F/U': '99214x1', 'Transition Telepsych Patient': '99215x1', 'Transition Appointment': '99215x1',
+    'Telepsych Only': '99214x1', 'Telepsych Adolescent F/u': '99214x1', 'Tel MindfulConnect': '99214x1', 'ADHD Testing Review Tele': '99215x1', 'ADHD Testing Review In Person': '99215x1',
     'ADHD Testing 30': '96136x1', 'Psychotherapy Individual 60': '90837x1', 'Therapy 60 min': '90837x1',
     MMI: '99214x1', MMT: '99214x1', TFU: '99214x1', TTF: '99214x1', Tel: '99214x1',
   };
@@ -866,7 +866,7 @@ test('v0.16 IVK: commercial = visit through benefits + medication; government = 
   const e23 = F.estimatePatient(c[23], p.tables);
   assert.deepEqual([e23.md.allowed, e23.md.patient, e23.np.patient, e23.basis], [151.11, 601.11, 601.11, 'Bayview · Self pay (Cash)'], 'Cash 99214 + $450 (infusion 8 or later)');
   assert.ok(F.estimateText(e23.md).includes('IV ketamine medication (self pay), infusion 8 or later: $450.00'));
-  assert.deepEqual([c[24].codes[0].code, c[24].medication.amount], ['99215', 400], 'Treatment Start: 99215, infusion 1');
+  assert.deepEqual([c[24].codes[0].code, c[24].medication.amount], ['99214', 400], 'Treatment Start: 99214 (v0.31), infusion 1');
   const e25 = F.estimatePatient(c[25], p.tables);
   assert.deepEqual([e25.md.patient, e25.md.medication.amount], [34.22, null], 'unknown infusion number: the medication is not in the total');
   assert.equal(p.counts.labeled, 1);

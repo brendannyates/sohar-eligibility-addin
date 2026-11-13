@@ -6,9 +6,9 @@
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; script-src 'self' https://appsforoffice.microsoft.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; form-action 'none';">
   <title>Sohar Eligibility</title>
-  <link rel="stylesheet" href="style.css?v=0.30.0">
-  <script src="theme.js?v=0.30.0"></script>
-  <link rel="stylesheet" href="dev-updates.css?v=0.30.0">
+  <link rel="stylesheet" href="style.css?v=0.31.0">
+  <script src="theme.js?v=0.31.0"></script>
+  <link rel="stylesheet" href="dev-updates.css?v=0.31.0">
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -69,7 +69,7 @@
           <div id="dailyList" class="result" hidden></div>
           <div id="reportWarn" class="callout bad" role="alert" hidden></div>
           <div id="scanResult" class="result" hidden></div>
-          <div id="payerList" class="result" hidden></div>
+          <div id="payerNotice" class="result" hidden></div>
           <div id="buildResult" class="result" hidden></div>
           <details class="more">
             <summary>Options</summary>
@@ -110,7 +110,7 @@
           </div>
           <div class="extrafile">
             <button class="primary filebtn alt" id="btnDlFlow" disabled><span>Sohar Flow file (Discovery vs NextGen)</span><span class="fname" id="fnFlow"></span></button>
-            <p class="hint">For the MHS Eligibility - Discovery vs NextGen Flow in Sohar, in its CSV template: one row per patient, discovery checked against the NextGen policy. Use it instead of the two files above, not with them. Cost estimates do not run from a CSV (the Flow's rate table has no CSV column). Config <b>TIN</b> and <b>Sohar provider group</b> fill their columns.</p>
+            <p class="hint">For the MHS Eligibility - Discovery vs NextGen Flow in Sohar, in its CSV template: one row per patient, discovery checked against the NextGen policy. Use it instead of the two files above, not with them. Cost estimates run from this file too: a policy due its once-a-plan-year estimate gets <b>estimate</b> = yes and a rate table for 90792, 99214 and 99215 (Config <b>Plan-year estimate codes</b>; rates from the fee schedule, so Config <b>Fee estimates</b> must be On). The provider group follows the patient's state; the Flow looks up the TIN.</p>
           </div>
           <div id="mapFile" class="extrafile" hidden>
             <button class="primary filebtn alt" id="btnDlMap" disabled><span>Payer mapping discovery</span><span class="fname" id="fnMap"></span></button>
@@ -252,10 +252,26 @@
         <button class="link" id="btnDlWork" disabled>Save results worklist</button>
         <button class="link" id="btnDlBen" disabled>Save benefits (old TMS format)</button>
       </div>
+      <p class="hint">Interactive web pages (search, filters, sorting, light and dark, Sohar links), for OneDrive or SharePoint only:</p>
+      <div class="actions">
+        <button class="link" data-html="patients">Patients</button>
+        <button class="link" data-html="results">Sohar results</button>
+        <button class="link" data-html="history">Verification history</button>
+        <button class="link" data-html="audits">Account audits</button>
+      </div>
+      <div id="htmlNote" class="result" hidden></div>
       <div class="actions">
         <button class="link" id="btnClearSaved">Clear saved Sohar results</button>
       </div>
       <p class="hint">Messages use LASFIR and MRN only. Send inside Outlook or Teams only.</p>
+    </details>
+
+    <!-- v0.31: Config, at the bottom of the Admin tab (the same section is the full-screen Config tab) -->
+    <details class="more section" id="configSection">
+      <summary>Config</summary>
+      <p class="hint">Re-verify rules per service line, what goes in the next import, the plan-year estimate codes, payer mapping and the fee lookups. Each change is saved to the Config sheet at once and used from the next build.</p>
+      <div id="configBox" class="result"></div>
+      <div id="payerList" class="result" hidden></div>
     </details>
     </section>
   </main>
@@ -266,17 +282,18 @@
     <p id="diag" class="fine"></p>
   </footer>
 
-  <script src="payer-rules.js?v=0.30.0"></script>
-  <script src="core.js?v=0.30.0"></script>
-  <script src="rules.js?v=0.30.0"></script>
-  <script src="fees.js?v=0.30.0"></script>
-  <script src="record.js?v=0.30.0"></script>
-  <script src="audit.js?v=0.30.0"></script>
-  <script src="xlsx.js?v=0.30.0"></script>
-  <script src="payer-knowledge.js?v=0.30.0"></script>
-  <script src="excel.js?v=0.30.0"></script>
-  <script src="who.js?v=0.30.0"></script>
-  <script src="dev-updates.js?v=0.30.0"></script>
-  <script src="app.js?v=0.30.0"></script>
+  <script src="payer-rules.js?v=0.31.0"></script>
+  <script src="core.js?v=0.31.0"></script>
+  <script src="rules.js?v=0.31.0"></script>
+  <script src="fees.js?v=0.31.0"></script>
+  <script src="record.js?v=0.31.0"></script>
+  <script src="audit.js?v=0.31.0"></script>
+  <script src="xlsx.js?v=0.31.0"></script>
+  <script src="payer-knowledge.js?v=0.31.0"></script>
+  <script src="excel.js?v=0.31.0"></script>
+  <script src="who.js?v=0.31.0"></script>
+  <script src="dev-updates.js?v=0.31.0"></script>
+  <script src="config-ui.js?v=0.31.0"></script>
+  <script src="app.js?v=0.31.0"></script>
 </body>
 </html>

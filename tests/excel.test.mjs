@@ -42,6 +42,7 @@ const clinicPayerNotes = (n, tag) => Array.from({ length: n }, (_, i) => ({ 'Nex
   Note: i % 3 ? '' : 'new card', By: 'Front desk', When: `2026-10-22T1${i % 10}:00:00.000Z` }));
 // v0.20 Sohar Flow results: made-up runs, LASFIR-style tags, no names.
 const flowRows = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(REC.FLOW_SHEET_COLS.map((c) => [c, c === 'Key' ? `${tag}-run-${i}` : c === 'MRN' ? `00800${i}` : `${tag} ${c} ${i}`])));
+const historyRows = (n, tag) => Array.from({ length: n }, (_, i) => Object.fromEntries(REC.VERIFICATION_HISTORY_COLS.map((c) => [c, c === 'Sohar ID' ? `${tag}-v-${i}` : c === 'MRN' ? `00810${i}` : `${tag} ${c} ${i}`])));
 const auditRows = (n, tag) => Array.from({ length: n }, (_, i) => ({ Key: `00900${i}`, MRN: `00900${i}`, LASFIR: 'TESPAT', Saved: `${tag} ${i}` }));
 const precheckRows = (n, tag) => Array.from({ length: n }, (_, i) => ({ Key: `00800${i}|11/0${(i % 9) + 1}/2026|9:00 AM`, MRN: `00800${i}`, 'Appt Date': `11/0${(i % 9) + 1}/2026`, Time: '9:00 AM', Item: 'precheck', Done: i % 2 ? 'Yes' : 'No', When: `${tag} ${i}` }));
 const clinicApplied = (n, tag) => Array.from({ length: n }, (_, i) => ({ Location: `${tag} Clinic`, Kind: 'Task done', Key: `00900${i}|Fix member ID in NextGen`, When: `2026-10-22T1${i % 10}:00:00.000Z` }));
@@ -264,13 +265,17 @@ test('readConfig: re-verify settings with defaults; ensureConfigRows adds the re
   m.seedTable('Config', 'tblConfig', ['Setting', 'Value', 'What it does'], [{ Setting: 'Re-verify days', Value: '10', 'What it does': 'mine' }]);
   m.seedTable('Location', 'tblLocationState', ['Location', 'State'], [{ Location: 'San Rafael', State: 'CA' }]);
   let cfg = await X.readConfig();
-  assert.deepEqual(cfg.reverify, { skip: true, days: 10, newMonth: false });
-  assert.equal(cfg.reverifyDays, 10, 'one setting shared by the skip rule and the clinic Re-verify flag');
-  assert.deepEqual(await X.ensureConfigRows(C.REVERIFY_CONFIG_ROWS), ['Skip recent verifications', 'Re-verify in new month']);
+  assert.deepEqual(cfg.reverify, C.reverifyConfig({}), 'v0.31: the old row alone changes nothing until it migrates');
+  // The one-time migration: 10 days becomes a 240 h window; the rows are added once, existing ones never change.
+  const added = await X.ensureConfigRows(C.reverifyConfigRows(cfg.raw));
+  assert.deepEqual(added, C.REVERIFY_CONFIG_ROWS.map((r) => r.setting));
   assert.equal(m.tableRows('tblConfig').find((r) => r.Setting === 'Re-verify days').Value, '10', 'existing row unchanged');
-  await X.setConfigValue('Re-verify in new month', 'On');
   cfg = await X.readConfig();
-  assert.equal(cfg.reverify.newMonth, true);
+  assert.equal(cfg.reverify.windowHours, 240);
+  assert.deepEqual(await X.ensureConfigRows(C.reverifyConfigRows(cfg.raw)), [], 'second run adds nothing');
+  await X.setConfigValue('Re-verify: TMS treatment', '4');
+  cfg = await X.readConfig();
+  assert.equal(cfg.reverify.lines['TMS treatment'], '4');
 });
 
 test('ensureConfigRows adds only missing settings, with the description, and never changes existing ones', async () => {
@@ -435,6 +440,9 @@ const CASES = {
   precheck: { write: (X, rows) => X.writePreCheck(REC.PRECHECK_COLS, rows), read: (X) => X.readPreCheck(), cols: REC.PRECHECK_COLS, make: precheckRows, sheet: 'Pre-Check', hidden: true },
   audits: { write: (X, rows) => X.writeAccountAudits(AU.AUDIT_SHEET_COLS, rows), read: (X) => X.readAccountAudits(), cols: AU.AUDIT_SHEET_COLS, make: auditRows, sheet: 'Account Audits', hidden: true },
   auditLines: { write: (X, rows) => X.writeAccountAuditLines(AU.AUDIT_LINE_COLS, rows), read: (X) => X.readAccountAuditLines(), cols: AU.AUDIT_LINE_COLS, make: auditRows, sheet: 'Account Audit Lines', hidden: true },
+  // v0.31 append-only history tables.
+  history: { write: (X, rows) => X.writeVerificationHistory(REC.VERIFICATION_HISTORY_COLS, rows), read: (X) => X.readVerificationHistory(), cols: REC.VERIFICATION_HISTORY_COLS, make: historyRows, sheet: 'Verification History', hidden: true },
+  auditHistory: { write: (X, rows) => X.writeAccountAuditHistory(AU.AUDIT_HISTORY_COLS, rows), read: (X) => X.readAccountAuditHistory(), cols: AU.AUDIT_HISTORY_COLS, make: auditRows, sheet: 'Account Audit History', hidden: true },
   clinicApplied: { write: (X, rows) => X.writeClinicWorkApplied(RL.CLINIC_APPLIED_COLS, rows), read: (X) => X.readClinicWorkApplied(), cols: RL.CLINIC_APPLIED_COLS, make: clinicApplied, sheet: 'Clinic Work Applied', hidden: true },
 };
 const KNOBS = { op: 'failAtOp', sync: 'failAtSync', kill: 'killAfterSync' };
@@ -495,7 +503,7 @@ test('fail-safe: reopening the pane after any failure recovers or keeps the old 
 // Payer learning tables (v0.10): the ledger grows past one chunk; the log and the rollup are rewritten from fewer rows.
 // Sohar Refs grows past one chunk (append-only); Re-verify Requests shrinks when requests are dropped.
 for (const [kase, nOld, nNew] of [['outcomes', 4, 1100], ['mapLog', 1100, 1103], ['learning', 1100, 3], ['refs', 4, 1100], ['requests', 1100, 2], ['credRules', 6, 40],
-  ['clinicNotes', 4, 1100], ['clinicPayerNotes', 30, 2], ['clinicApplied', 4, 1100], ['flow', 4, 600], ['precheck', 600, 3], ['audits', 3, 4], ['auditLines', 40, 1100]]) {
+  ['clinicNotes', 4, 1100], ['clinicPayerNotes', 30, 2], ['clinicApplied', 4, 1100], ['flow', 4, 600], ['precheck', 600, 3], ['audits', 3, 4], ['auditLines', 40, 1100], ['history', 4, 600], ['auditHistory', 3, 40]]) {
   test(`fail-safe: ${CASES[kase].sheet} survives a failure at every op, a failed sync, and Excel closing`, async () => {
     await sweep(kase, 'op', nOld, nNew);
     await sweep(kase, 'sync', nOld, nNew);

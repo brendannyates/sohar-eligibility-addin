@@ -1,6 +1,17 @@
 {
   "updates": [
     {
+      "id": "2026-11-12-eligibility-system",
+      "date": "2026-11-12",
+      "bullets": [
+        "Changed: A visit counts as verified when an eligible check of the same insurance was made in the 72 hours before it, and never before the 1st of the visit's month. TMS treatments are checked once a week, from Monday. A recent check that is too early now waits instead of being sent again.",
+        "New: Config at the bottom of the Admin tab, and a Config tab in full screen: the re-verify rule for each service line, which lines go in the next import, the plan-year estimate codes, payer mapping, and the Fee Payer Map and Estimate Codes lists.",
+        "New: The Sohar Flow file now asks for a cost estimate once per plan year (90792, 99214 and 99215) and carries the contracted rates, so estimates run from the CSV.",
+        "New: Every Sohar check and every account audit is kept with its date. The patient view lists checks by insurance, newest first, so an old policy's checks stay readable.",
+        "New: Full screen has an Import tab for the NextGen report, and saves patients, Sohar results, the check history and audits as web pages you can search and filter."
+      ]
+    },
+    {
       "id": "2026-11-11-central-workbook",
       "date": "2026-11-11",
       "bullets": [

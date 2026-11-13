@@ -875,7 +875,23 @@
     return { instamed: I, arietis: A, appointments: P };
   }
 
-  return { AUDIT_COLS, AUDIT_LINE_COLS, AUDIT_SHEET_COLS, auditSheetRows, auditsFromSheet, auditRecord, mergeAudits, savedFor, exportSpec, exportName,
+  // v0.31: every audit run, appended (hidden Account Audit History); Account Audits keeps the latest per patient.
+  const AUDIT_HISTORY_COLS = [...AUDIT_COLS, 'Run At', 'Run By'];
+  /**
+   * Saved Account Audit History rows + one run's summary (AUDIT_COLS): appended, never replaced, oldest first by Run At.
+   * runAt: an ISO time or a readable stamp; runBy: who ran it. The same patient and Saved stamp twice is one run.
+   */
+  function appendAuditHistory(prev, summary, runAt, runBy) {
+    const norm = (r) => Object.fromEntries(AUDIT_HISTORY_COLS.map((c) => [c, r[c] == null ? '' : r[c]]));
+    const rows = (prev || []).map(norm);
+    const next = norm({ ...(summary || {}), 'Run At': str(runAt) || str(summary && summary.Saved), 'Run By': str(runBy) || str(summary && summary.By) });
+    const same = (r) => str(r.Key) === str(next.Key) && str(r.Saved) === str(next.Saved);
+    if (str(next.Key) && !rows.some(same)) rows.push(next);
+    const t = (r) => { const x = Date.parse(str(r['Run At']).replace(/ UTC$/, 'Z')); return isNaN(x) ? 0 : x; };
+    return rows.map((r, i) => ({ r, i })).sort((a, b) => t(a.r) - t(b.r) || a.i - b.i).map((x) => x.r);
+  }
+
+  return { AUDIT_HISTORY_COLS, appendAuditHistory, AUDIT_COLS, AUDIT_LINE_COLS, AUDIT_SHEET_COLS, auditSheetRows, auditsFromSheet, auditRecord, mergeAudits, savedFor, exportSpec, exportName,
     detectKind, parseInstamed, demoRows, parseArietis, parseAppointments, identify, chargeCode, expectedFor, codeChecks, familyOf, classOf,
     matchPayments, subsetSum, learnBenefits, planYearOf, requote, runAudit, summaryText, dayOf, iso, us, usd, KEPT_RE, chargeRow, PR_PARTS };
 });

@@ -358,3 +358,15 @@ test('saving an audit on a workbook: one hidden Account Audits sheet; the old li
   assert.ok(back.lines.some((l) => l.Key === '700002' && l.Part === 'Payment'), 'the moved lines came along');
   assert.equal(await X.dropAccountAuditLines(), false, 'nothing to remove the second time');
 });
+
+// v0.31: every audit run is appended to Account Audit History; Account Audits keeps the latest per patient.
+test('appendAuditHistory: appended, never replaced, oldest first; the same run once', () => {
+  const s = (key, saved) => ({ Key: key, MRN: key, LASFIR: 'TESPAT', Saved: saved, By: 'Desk A', 'True Balance': '10.11' });
+  let h = AU.appendAuditHistory([], s('0900001', '11/10/2026 9:00 AM'), '2026-11-10T17:00:00.000Z', 'Desk A');
+  h = AU.appendAuditHistory(h, s('0900001', '11/12/2026 9:00 AM'), '2026-11-12T17:00:00.000Z', 'Desk B');
+  h = AU.appendAuditHistory(h, s('0900002', '11/11/2026 9:00 AM'), '2026-11-11T17:00:00.000Z', 'Desk A');
+  h = AU.appendAuditHistory(h, s('0900001', '11/12/2026 9:00 AM'), '2026-11-12T17:00:00.000Z', 'Desk B');
+  assert.deepEqual(h.map((r) => [r.Key, r['Run By']]), [['0900001', 'Desk A'], ['0900002', 'Desk A'], ['0900001', 'Desk B']]);
+  assert.deepEqual(Object.keys(h[0]), AU.AUDIT_HISTORY_COLS);
+  assert.deepEqual(AU.AUDIT_HISTORY_COLS.slice(-2), ['Run At', 'Run By']);
+});
