@@ -517,6 +517,34 @@ test('htmlReport: a self-contained page; no name, DOB or member ID column; Sohar
   for (const k of ['patients', 'results']) assert.ok(!REC.HTML_EXPORT_COLS[k].some((c) => /member id|^last name|^first name|^dob/i.test(c)), k);
 });
 
+test('htmlReport schedule: each day, one column per provider, cards in time order with status, bars and labelled links', () => {
+  const cols = REC.HTML_EXPORT_COLS.results;
+  const base = { 'Next Location': 'Castro', 'Next Event': 'MM F/U 30', Copay: '$30', 'Last Name': 'Hidden' };
+  const rows = [
+    { ...base, LASFIR: 'SYNAAA', MRN: '770001', 'Next Appt': '11/13/2026', 'Next Time': '1:30 PM', 'Next Provider': 'Wood', 'Sent As': 'Verification', 'Sohar Status': 'Eligible', Deductible: '$1,000', 'Deductible Remaining': '$250', 'OOP Max': '$5,000', 'OOP Remaining': '$0', 'Sohar Link': 'https://app.soharhealth.com/verifications/v-1' },
+    { ...base, LASFIR: 'SYNBBB', MRN: '770002', 'Next Appt': '11/13/2026', 'Next Time': '9:00 AM', 'Next Provider': 'Wood', 'Sent As': 'Discovery', 'Sohar Status': 'Ineligible', 'Work Queue': 'Coverage', Action: 'Run discovery', 'Sohar Link': 'https://app.soharhealth.com/discovery/d-2' },
+    { ...base, LASFIR: 'SYNBBB', MRN: '770002', 'Next Appt': '11/13/2026', 'Next Time': '9:00 AM', 'Next Provider': 'Wood', 'Sent As': 'Verification', 'Sohar Status': 'Eligible', 'Sohar Link': 'https://app.soharhealth.com/verifications/v-3' },
+    { ...base, LASFIR: 'SYNCCC', MRN: '770003', 'Next Appt': '11/14/2026', 'Next Time': '10:00 AM', 'Next Provider': 'Lau', 'Sohar Status': 'Pending' },
+  ];
+  const h = REC.htmlReport({ title: 'Sohar results', sections: [{ id: 'results', title: 'Sohar results', cols, rows, filters: ['Next Provider', 'Sohar Status'], view: REC.HTML_EXPORT_VIEWS.results }] });
+  assert.ok(!h.includes('Hidden'));
+  const days = h.match(/<h3>[^<]+/g);
+  assert.deepEqual(days, ['<h3>Fri 11/13', '<h3>Sat 11/14']);
+  const cards = h.match(/data-rows="[^"]+"/g);
+  assert.deepEqual(cards, ['data-rows="1 2"', 'data-rows="0"', 'data-rows="3"'], 'one card per visit, 9:00 before 1:30 PM, both checks on one card');
+  assert.ok(h.includes('>Discovery &#8599;</a>') && h.includes('>Verification &#8599;</a>'));
+  assert.ok(h.includes('$250 left of $1,000') && h.includes('Met ($5,000)'));
+  assert.match(h, /<div class="todo"><b>Coverage<\/b>: Run discovery<\/div>/);
+  assert.match(h, /<option value="Wood">Wood \(3\)<\/option>/);
+  assert.match(h, /data-v="schedule" aria-pressed="true"/);
+  assert.match(h, /<tr class="dt" data-d="0"/);
+  new Function(h.match(/<script>([\s\S]*)<\/script>/)[1]);
+  assert.equal(REC.statusTone('complete.ineligible'), 'bad');
+  assert.equal(REC.statusTone('Eligible'), 'ok');
+  assert.equal(REC.soharLinkLabel('https://app.soharhealth.com/x/1', { 'Sent As': 'Discovery' }), 'Discovery');
+  assert.equal(REC.benefitMeter('Deductible', '$0', '$0').includes('None'), true);
+});
+
 test("rotationIds / withSource: the rotation's own import files are Source Rotation (synthetic ids)", () => {
   const ids = REC.rotationIds([{ name: 'Sohar API Results - Verification 2026-11-12 (rotation).csv', records: [{ verificationId: 'v-rot-1' }, { requestId: 'd-rot-2' }] },
     { name: 'Sohar export.csv', records: [{ verificationId: 'v-imp-3' }] }]);

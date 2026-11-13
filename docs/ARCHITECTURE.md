@@ -251,6 +251,13 @@ lines 90792, 99214 and 99215 with `patientResponsibility`.
 The add-in's own exports are self-contained, interactive HTML pages in the add-in's design (tables, search, filters,
 light and dark, Sohar links), saved to OneDrive or SharePoint only. Sohar import files stay CSV, the format Sohar requires.
 
+Each page has a large search on the right (`/` focuses it), filters with counts and a Clear button, and sortable columns
+(dates, times and amounts sort as values; blanks sort last). Rows with a details view (`HTML_EXPORT_VIEWS` in record.js) open
+a panel with deductible and OOP max bars, the benefit fields, and Sohar links labelled Verification, Discovery or Cost estimate.
+Sohar results also has a Schedule view, the default: each day, one column per provider (Next Provider), one card per visit in
+time order. A card carries every check for that visit (status badge, payer, copay and coinsurance, bars, links) and any Work
+Queue action. The details and the schedule read only the columns the export keeps, so names, DOBs and member IDs never appear.
+
 ## 8. Privacy
 - **Sheets and CSVs:** LASFIR and MRN only. No names, DOBs or member IDs, except the Sohar import CSVs, which Sohar needs
   and which are saved to OneDrive only.

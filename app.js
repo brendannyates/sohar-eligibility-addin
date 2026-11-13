@@ -1844,11 +1844,11 @@
       const rs = (await currentResults()) || [];
       if (!rs.length) throw new Error('No Sohar results yet (step 3).');
       const cols = REC.HTML_EXPORT_COLS.results;
-      sections = [{ id: 'results', title: 'Sohar results', cols, rows: pick(cols, rs), filters: ['Next Location', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'] }];
+      sections = [{ id: 'results', title: 'Sohar results', cols, rows: pick(cols, rs), filters: ['Next Provider', 'Next Location', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'], view: REC.HTML_EXPORT_VIEWS.results, note: 'Schedule: each day, one column per provider. Open a card or a table row for the benefit details.' }];
     } else if (kind === 'history') {
       const h = await X.readVerificationHistory();
       if (!h.length) throw new Error('Verification History is empty: it fills as Sohar results and Flow results are uploaded.');
-      sections = [{ id: 'history', title: 'Verification history', cols: REC.VERIFICATION_HISTORY_COLS, rows: h.slice().reverse(), filters: ['Source', 'Kind', 'Sohar Status', 'Clinic', 'Policy Key'], note: 'Every check the add-in processed, newest first. Policy Key is the Sohar payerId and the member ID\'s last 4.' }];
+      sections = [{ id: 'history', title: 'Verification history', cols: REC.VERIFICATION_HISTORY_COLS, rows: h.slice().reverse(), filters: ['Source', 'Kind', 'Sohar Status', 'Clinic', 'Policy Key'], view: REC.HTML_EXPORT_VIEWS.history, note: 'Every check the add-in processed, newest first. Policy Key is the Sohar payerId and the member ID\'s last 4.' }];
     } else if (kind === 'audits') {
       const a = await currentAudits(true);
       const hist = await X.readAccountAuditHistory().catch(() => []);

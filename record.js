@@ -589,60 +589,250 @@
   }
 
   // ---------- interactive HTML exports (v0.31, docs/ARCHITECTURE.md section 7) ----------
-  // One self-contained page in the add-in's design (its tokens, light and dark), with search, per-column filters and
-  // sorting, and Sohar links. No network: the page's own CSP allows only its inline style and script. Sohar import
-  // files stay CSV. Callers pass sheet-safe columns only (LASFIR and MRN, never names, DOBs or member IDs).
+  // One self-contained page in the add-in's design (its tokens, light and dark): a large search on the right, filters with
+  // counts, sortable columns, a details row with benefit bars, Verification / Discovery links, and for Sohar results a
+  // Schedule view (each day, one column per provider). No network: the page's own CSP allows only its inline style and
+  // script. Sohar import files stay CSV. Callers pass sheet-safe columns only (LASFIR and MRN, never names, DOBs or member IDs).
   const HTML_EXPORT_COLS = {
     patients: ['LASFIR', 'MRN', 'State', 'Route', 'In Scope', 'Next Appt', 'Next Event', 'POS', 'Primary Payer', 'Sohar payerId', 'Confidence', 'Secondary Payer', 'Flags'],
-    results: ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'LASFIR', 'MRN', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Benefit Flag', 'Plan', 'Network',
-      'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining', 'NextGen Payer', 'Sohar Payer', 'Sohar payerId',
-      'Match', 'Sohar Link', 'Sohar Date'],
+    results: ['LASFIR', 'Next Appt', 'Next Time', 'Next Provider', 'Next Event', 'Next Location', 'MRN', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Benefit Flag',
+      'Plan', 'Network', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining', 'NextGen Payer',
+      'Sohar Payer', 'Sohar payerId', 'Match', 'Discovery Follow-up', 'Sohar Link', 'Sohar Date'],
+  };
+  const BENEFIT_BARS = [['Deductible', 'Deductible', 'Deductible Remaining'], ['OOP max', 'OOP Max', 'OOP Remaining']];
+  // Per export: details (fields and bars in the expandable row) and schedule (which columns place a card).
+  const HTML_EXPORT_VIEWS = {
+    results: {
+      details: { fields: ['Sent As', 'Sohar Status', 'Plan', 'Network', 'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'NextGen Payer', 'Sohar Payer',
+        'Sohar payerId', 'Match', 'Benefit Flag', 'Work Queue', 'Action', 'Discovery Follow-up', 'Sohar Date'], bars: BENEFIT_BARS },
+      schedule: { date: 'Next Appt', time: 'Next Time', column: 'Next Provider', person: 'LASFIR', id: 'MRN', visit: ['Next Event', 'Next Location'],
+        kind: 'Sent As', status: 'Sohar Status', payer: ['Sohar Payer', 'NextGen Payer'], queue: 'Work Queue', action: 'Action',
+        facts: [['Copay', 'Copay'], ['Coins', 'Coinsurance'], ['', 'Network'], ['', 'Benefit Flag']], bars: BENEFIT_BARS },
+    },
+    history: {
+      details: { fields: ['Pulled At', 'Kind', 'Sohar Status', 'Sohar Payer', 'Plan', 'Network', 'Coverage Level', 'Coverage Start', 'Coverage End', 'Copay',
+        'Coinsurance', 'Benefit Flag', 'Policy Key', 'Projected Patient Responsibility', 'Estimate Note', 'Source', 'Related Sohar IDs'], bars: BENEFIT_BARS },
+    },
   };
   const NO_EXPORT = /^(last name|first name|dob|date of birth|subscriber (first|last|dob)|member id|nextgen member id|sohar member id|chartmemberid|memberid|firstname|lastname|dateofbirth)$/i;
   const SOHAR_LINK = /^https:\/\/app\.soharhealth\.com\/[^\s"'<>]*$/i;
   const escH = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const REPORT_CSS = `:root{color-scheme:light;--page:#F3F4F1;--raised:#FFFFFF;--sunken:#F1F2EE;--line:#E3E6E1;--fg:#1B211F;--muted:#5E6863;--primary:#1E6B59;--on:#FFFFFF;--red:#B3261E;--amber:#8F5400;--blue:#2B5C8A}
+  const REPORT_CSS = String.raw`:root{color-scheme:light;--page:#F3F4F1;--raised:#FFFFFF;--sunken:#F1F2EE;--line:#E3E6E1;--fg:#1B211F;--muted:#5E6863;--primary:#1E6B59;--on:#FFFFFF;--red:#B3261E;--amber:#8F5400;--blue:#2B5C8A}
 :root[data-theme="dark"]{color-scheme:dark;--page:#131716;--raised:#1B2220;--sunken:#182019;--line:#2A3330;--fg:#ECEFED;--muted:#9BA59F;--primary:#6DC4A6;--on:#0E2A22;--red:#F19189;--amber:#E9B150;--blue:#8FB8E6}
 *{box-sizing:border-box}body{margin:0;font:400 14px/1.4 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--page)}
-header{display:flex;flex-wrap:wrap;gap:6px 12px;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);background:var(--raised)}
-h1{margin:0;font-size:17px;font-weight:600}h2{font-size:15px;margin:0 0 6px}.muted{color:var(--muted);font-size:12px}
-main{padding:14px 18px;display:grid;gap:18px}section{background:var(--raised);border:1px solid var(--line);border-radius:6px;padding:12px}
-.bar{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:6px 0 8px}input,select,button{font:inherit;font-size:12.5px;color:var(--fg);background:var(--sunken);border:1px solid var(--line);border-radius:4px;padding:4px 8px}
-button{cursor:pointer}button:hover,input:focus,select:focus{border-color:var(--primary);outline:none}.wrap{overflow:auto;max-height:70vh}
-table{border-collapse:collapse;width:100%;font-size:12px}th{position:sticky;top:0;background:var(--sunken);text-align:left;font-weight:600;color:var(--muted);padding:5px 6px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
-th[aria-sort="ascending"]::after{content:" \\25B2"}th[aria-sort="descending"]::after{content:" \\25BC"}td{padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
-tr:hover td{background:color-mix(in srgb,var(--primary) 6%,transparent)}a{color:var(--primary)}.n{font-variant-numeric:tabular-nums}
-.ok{color:var(--primary)}.bad{color:var(--red)}.warn{color:var(--amber)}footer{padding:10px 18px 18px;color:var(--muted);font-size:11.5px}`;
-  // The page's script: search, column filters, sort, light / dark. Plain text: no network, no eval.
-  const REPORT_JS = `(function(){var d=document,r=d.documentElement;try{var t=localStorage.getItem("soharTheme");r.dataset.theme=t==="dark"||(!t&&window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light"}catch(e){}
+:focus-visible{outline:2px solid var(--primary);outline-offset:2px}a{color:var(--primary)}.muted{color:var(--muted);font-size:12px}.n{font-variant-numeric:tabular-nums}
+header{display:flex;flex-wrap:wrap;gap:6px 12px;justify-content:space-between;align-items:center;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--raised)}
+h1{margin:0;font-size:17px;font-weight:600}h2{font-size:16px;margin:0;font-weight:600}
+main{padding:16px 20px;display:grid;gap:18px}section{background:var(--raised);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0}
+input,select,button{font:inherit;font-size:12.5px;color:var(--fg);background:var(--sunken);border:1px solid var(--line);border-radius:6px;padding:5px 9px}
+button{cursor:pointer}button:hover,input:focus,select:focus{border-color:var(--primary);outline:none}
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:10px 14px}.lead{flex:1 1 auto;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;min-width:0}
+.count{color:var(--muted);font-size:12.5px;font-variant-numeric:tabular-nums}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--sunken)}
+.seg button{border:0;border-radius:0;background:transparent;padding:8px 14px;font-weight:600;color:var(--muted)}.seg button[aria-pressed="true"]{background:var(--primary);color:var(--on)}
+.search{flex:0 1 460px;min-width:240px;position:relative;display:flex;align-items:center}
+.search input{width:100%;height:40px;font-size:14px;padding:0 36px;border-radius:8px;background:var(--raised)}
+.search svg{position:absolute;left:12px;width:16px;height:16px;fill:none;stroke:var(--muted);stroke-width:1.7;stroke-linecap:round;pointer-events:none}
+.search kbd{position:absolute;right:10px;font:600 11px/1 inherit;color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:3px 6px;pointer-events:none}
+.search input:focus+kbd,.search input:not(:placeholder-shown)+kbd{display:none}
+.note{margin:6px 0 0}.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0}
+.flt{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);background:var(--sunken);border:1px solid var(--line);border-radius:999px;padding:1px 4px 1px 11px}
+.flt select{border:0;background:transparent;padding:4px 4px;border-radius:999px;max-width:240px}.flt.on{border-color:var(--primary);color:var(--fg);background:color-mix(in srgb,var(--primary) 12%,transparent)}
+.clear{border-radius:999px;background:transparent;color:var(--primary);font-weight:600;border-color:transparent}.clear:hover{border-color:var(--primary)}
+.wrap{overflow:auto;max-height:72vh;border:1px solid var(--line);border-radius:6px}
+table{border-collapse:collapse;width:100%;font-size:12px}th{position:sticky;top:0;z-index:1;background:var(--sunken);text-align:left;font-weight:600;color:var(--muted);border-bottom:1px solid var(--line);white-space:nowrap;padding:0}
+th .sort{all:unset;box-sizing:border-box;display:block;width:100%;padding:7px 18px 7px 7px;cursor:pointer;position:relative}th .sort:hover{color:var(--fg)}th .sort:focus-visible{outline:2px solid var(--primary);outline-offset:-2px}
+th .sort::after{content:"\2195";position:absolute;right:5px;opacity:.35}th[aria-sort="ascending"] .sort::after{content:"\25B2";opacity:1;color:var(--primary)}th[aria-sort="descending"] .sort::after{content:"\25BC";opacity:1;color:var(--primary)}
+th[aria-sort]{color:var(--fg)}td{padding:6px 7px;border-bottom:1px solid var(--line);vertical-align:top;white-space:nowrap;background:var(--raised)}td.wr{white-space:normal;min-width:200px}tr[data-r]:hover td{background:color-mix(in srgb,var(--primary) 6%,var(--raised))}
+.c1{position:sticky;left:0;z-index:1;box-shadow:1px 0 0 var(--line)}.hd .c1{left:34px}td.tgc{position:sticky;left:0;z-index:1}th.tgc{left:0}th.c1,th.tgc{z-index:3}
+.tgc{width:34px;padding:4px 4px 4px 6px}.tg{width:24px;height:24px;padding:0;line-height:1;color:var(--muted)}.tg::before{content:"\25B8"}.tg[aria-expanded="true"]::before{content:"\25BE";color:var(--primary)}
+tr.dt>td{background:var(--sunken);padding:10px 12px 12px 40px;white-space:normal}tr.dt .panel{position:sticky;left:40px;width:min(1100px,calc(100vw - 110px))}
+.panel{display:grid;grid-template-columns:minmax(200px,280px) 1fr;gap:10px 22px;align-items:start}.panel+.panel{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+.panel dl{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px 16px;margin:0}.panel dt{font-size:11px;color:var(--muted)}.panel dd{margin:0;overflow-wrap:anywhere}
+.meters{display:grid;gap:9px}.meter{display:grid;gap:3px}.ml{display:flex;justify-content:space-between;gap:8px;font-size:11.5px}.ml span:first-child{color:var(--muted)}
+.track{height:6px;border-radius:3px;background:var(--line);overflow:hidden}.track i{display:block;height:100%;background:var(--blue)}.meter.met .track i{background:var(--primary)}
+.links{display:flex;flex-wrap:wrap;gap:4px 12px}.lk{font-weight:600;text-decoration:none;white-space:nowrap}.lk:hover{text-decoration:underline}.panel .links{grid-column:1/-1}
+.badge{display:inline-block;font-size:11px;font-weight:600;padding:1px 8px;border-radius:999px;border:1px solid var(--line);background:var(--sunken);color:var(--muted);max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.badge.ok{color:var(--primary);border-color:color-mix(in srgb,var(--primary) 45%,transparent);background:color-mix(in srgb,var(--primary) 10%,transparent)}
+.badge.bad{color:var(--red);border-color:color-mix(in srgb,var(--red) 45%,transparent);background:color-mix(in srgb,var(--red) 9%,transparent)}
+.badge.warn{color:var(--amber);border-color:color-mix(in srgb,var(--amber) 45%,transparent);background:color-mix(in srgb,var(--amber) 10%,transparent)}
+.day{margin:14px 0 4px}.day h3{display:flex;gap:10px;align-items:baseline;margin:0 0 8px;font-size:14px;font-weight:600}
+.cols{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(260px,1fr);gap:12px;overflow-x:auto;padding-bottom:6px}
+.pcol{background:var(--sunken);border:1px solid var(--line);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.pcol h4{display:flex;justify-content:space-between;gap:8px;margin:0 2px;font-size:12.5px;font-weight:600}
+.card{background:var(--raised);border:1px solid var(--line);border-left:3px solid var(--line);border-radius:6px;padding:8px 10px;display:grid;gap:6px;font-size:12.5px;min-width:0}
+.card.ok{border-left-color:var(--primary)}.card.bad{border-left-color:var(--red)}.card.warn{border-left-color:var(--amber)}
+.top{display:flex;gap:8px;align-items:baseline}.tm{font-weight:600;font-variant-numeric:tabular-nums;min-width:62px}.who{font-weight:700;letter-spacing:.03em}.top .muted{margin-left:auto}
+.todo{background:color-mix(in srgb,var(--amber) 12%,transparent);border-radius:4px;padding:4px 7px;font-size:12px}.todo b{color:var(--amber)}
+.chk{display:grid;gap:5px;border-top:1px dashed var(--line);padding-top:6px}.ch{display:flex;flex-wrap:wrap;gap:4px 6px;align-items:center}.kind{font-size:11.5px;color:var(--muted)}
+.facts{color:var(--muted);font-size:11.5px}.card details summary{cursor:pointer;color:var(--muted);font-size:11.5px}.card details .panel{display:block;margin-top:6px}.card details .meters,.card details .links{display:none}
+.empty{padding:18px 4px;text-align:center}.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+footer{padding:10px 20px 20px;color:var(--muted);font-size:11.5px}
+@media (max-width:700px){.search{flex-basis:100%}.panel{grid-template-columns:1fr}}
+@media print{.seg,.search,.filters,#theme,.tg{display:none}.wrap{max-height:none;overflow:visible;border:0}body{background:#fff}}`;
+  // The page's script: search, filters, sort, details rows, table / schedule, light / dark. Plain text: no network, no eval.
+  const REPORT_JS = String.raw`(function(){var d=document,r=d.documentElement,each=function(l,f){Array.prototype.forEach.call(l,f)};
+try{var t=localStorage.getItem("soharTheme");r.dataset.theme=t==="dark"||(!t&&window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light"}catch(e){}
 d.getElementById("theme").addEventListener("click",function(){r.dataset.theme=r.dataset.theme==="dark"?"light":"dark";try{localStorage.setItem("soharTheme",r.dataset.theme)}catch(e){}});
-Array.prototype.forEach.call(d.querySelectorAll("section[data-sec]"),function(s){var rows=Array.prototype.slice.call(s.querySelectorAll("tbody tr")),q=s.querySelector("[data-q]"),fs=s.querySelectorAll("[data-f]"),cnt=s.querySelector("[data-n]");
-function apply(){var v=(q.value||"").toLowerCase(),n=0;rows.forEach(function(tr){var ok=!v||tr.textContent.toLowerCase().indexOf(v)>=0;Array.prototype.forEach.call(fs,function(f){if(ok&&f.value!==""&&tr.children[+f.dataset.f].textContent!==f.value)ok=false});tr.hidden=!ok;if(ok)n++});cnt.textContent=n+" of "+rows.length}
-q.addEventListener("input",apply);Array.prototype.forEach.call(fs,function(f){f.addEventListener("change",apply)});
-Array.prototype.forEach.call(s.querySelectorAll("th"),function(th,i){th.addEventListener("click",function(){var asc=th.getAttribute("aria-sort")!=="ascending";Array.prototype.forEach.call(s.querySelectorAll("th"),function(h){h.removeAttribute("aria-sort")});th.setAttribute("aria-sort",asc?"ascending":"descending");
-var key=function(tr){var x=tr.children[i].textContent.trim(),m=x.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);if(m)return m[3]+m[1].padStart(2,"0")+m[2].padStart(2,"0")+x.slice(10);var n=parseFloat(x.replace(/[$,%]/g,""));return /^[-$\\d.,% ]+$/.test(x)&&!isNaN(n)?n:x.toLowerCase()};
-rows.sort(function(a,b){var x=key(a),y=key(b);if(typeof x==="number"&&typeof y==="number")return asc?x-y:y-x;x=String(x);y=String(y);return asc?x.localeCompare(y):y.localeCompare(x)});var tb=s.querySelector("tbody");rows.forEach(function(tr){tb.appendChild(tr)})})});apply()})})();`;
+d.addEventListener("keydown",function(e){var a=d.activeElement;if(e.key==="/"&&!(a&&/^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName))){var q=d.querySelector("[data-q]");if(q){e.preventDefault();q.focus()}}});
+function key(tr,i){var c=tr.cells[i],x=c?c.textContent.trim():"",m;if(x==="")return null;
+m=x.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);if(m)return m[3]+("0"+m[1]).slice(-2)+("0"+m[2]).slice(-2)+x.slice(m[0].length);if(/^\d{4}-\d{2}-\d{2}/.test(x))return x;
+m=x.match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap])\.?m?\.?$/i)||x.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);if(m){var h=+m[1];if(m[3])h=h%12+(/p/i.test(m[3])?12:0);return h*60+(+m[2])}
+var n=parseFloat(x.replace(/[$,%\s]/g,""));return /^[-$\d.,%\s]+$/.test(x)&&!isNaN(n)?n:x.toLowerCase()}
+each(d.querySelectorAll("section[data-sec]"),function(s){var tb=s.querySelector("tbody"),rows=Array.prototype.slice.call(tb.querySelectorAll("tr[data-r]")),det={},
+q=s.querySelector("[data-q]"),fs=s.querySelectorAll("select[data-f]"),cnt=s.querySelector("[data-n]"),clr=s.querySelector("[data-clear]"),empty=s.querySelector("[data-empty]"),
+cards=s.querySelectorAll(".card[data-rows]"),seg=s.querySelectorAll("[data-v]"),view="table";
+each(tb.querySelectorAll("tr[data-d]"),function(x){det[x.dataset.d]=x});
+function apply(){var v=(q.value||"").trim().toLowerCase(),n=0,c=0,vis={},on=!!v;
+each(fs,function(f){var a=f.value!=="";f.parentNode.classList.toggle("on",a);if(a)on=true});
+rows.forEach(function(tr){var ok=!v||tr.textContent.toLowerCase().indexOf(v)>=0;each(fs,function(f){if(ok&&f.value!==""&&tr.cells[+f.dataset.f].textContent!==f.value)ok=false});
+tr.hidden=!ok;var dt=det[tr.dataset.r],b=tr.querySelector(".tg");if(dt)dt.hidden=!ok||!b||b.getAttribute("aria-expanded")!=="true";if(ok){n++;vis[tr.dataset.r]=1}});
+each(cards,function(k){var ok=k.dataset.rows.split(" ").some(function(i){return vis[i]});k.hidden=!ok;if(ok)c++});
+each(s.querySelectorAll(".pcol"),function(p){var m=p.querySelectorAll(".card:not([hidden])").length;p.hidden=!m;p.querySelector("[data-pc]").textContent=m});
+each(s.querySelectorAll(".day"),function(y){var m=y.querySelectorAll(".card:not([hidden])").length;y.hidden=!m;y.querySelector("[data-dc]").textContent=m+(m===1?" visit":" visits")});
+var sc=view==="schedule";cnt.textContent=sc?c+" of "+cards.length+(cards.length===1?" visit":" visits"):n+" of "+rows.length+(rows.length===1?" row":" rows");
+if(clr)clr.hidden=!on;empty.hidden=sc?c>0:n>0}
+function setView(x){view=x;each(seg,function(b){b.setAttribute("aria-pressed",b.dataset.v===x?"true":"false")});each(s.querySelectorAll("[data-view]"),function(p){p.hidden=p.dataset.view!==x});try{localStorage.setItem("soharView",x)}catch(e){}apply()}
+q.addEventListener("input",apply);each(fs,function(f){f.addEventListener("change",apply)});
+if(clr)clr.addEventListener("click",function(){q.value="";each(fs,function(f){f.value=""});apply();q.focus()});
+each(seg,function(b){b.addEventListener("click",function(){setView(b.dataset.v)})});
+each(tb.querySelectorAll(".tg"),function(b){b.addEventListener("click",function(){var o=b.getAttribute("aria-expanded")!=="true",dt=det[b.closest("tr").dataset.r];b.setAttribute("aria-expanded",o?"true":"false");if(dt)dt.hidden=!o})});
+each(s.querySelectorAll("th[data-c]"),function(th){th.querySelector(".sort").addEventListener("click",function(){var i=+th.dataset.c,asc=th.getAttribute("aria-sort")!=="ascending";
+each(s.querySelectorAll("th[data-c]"),function(h){h.removeAttribute("aria-sort")});th.setAttribute("aria-sort",asc?"ascending":"descending");
+rows.sort(function(a,b){var x=key(a,i),y=key(b,i);if(x===null||y===null)return x===y?0:x===null?1:-1;if(typeof x==="number"&&typeof y==="number")return asc?x-y:y-x;x=String(x);y=String(y);return asc?x.localeCompare(y):y.localeCompare(x)});
+rows.forEach(function(tr){tb.appendChild(tr);var dt=det[tr.dataset.r];if(dt)tb.appendChild(dt)})})});
+if(seg.length){var sv="schedule";try{sv=localStorage.getItem("soharView")||sv}catch(e){}setView(sv==="table"?"table":"schedule")}else apply()})})();`;
+  const numOf = (v) => { const t = str(v).replace(/[$,\s]/g, ''); return /^-?\d+(\.\d+)?$/.test(t) ? parseFloat(t) : null; };
+  const moneyOf = (n) => `$${Math.round(n).toLocaleString('en-US')}`;
+  /** ok / bad / warn / '' for a Sohar status. */
+  function statusTone(s) {
+    const t = str(s).toLowerCase();
+    if (!t) return '';
+    if (/inelig|inactive|error|fail|not found|terminat|denied|no coverage|invalid/.test(t)) return 'bad';
+    if (/pending|progress|queued|submitted|processing/.test(t)) return 'warn';
+    return /eligib|active|complete|verified/.test(t) ? 'ok' : '';
+  }
+  /** "Verification", "Discovery" or "Cost estimate", from the Sohar URL (then the row's Sent As / Kind). */
+  function soharLinkLabel(url, row) {
+    const p = str(url).toLowerCase();
+    if (/discover/.test(p)) return 'Discovery';
+    if (/estimate|cost/.test(p)) return 'Cost estimate';
+    if (/verif/.test(p)) return 'Verification';
+    return /discover/i.test(str(row && (row['Sent As'] || row.Kind))) ? 'Discovery' : 'Sohar';
+  }
+  const soharA = (u, row) => `<a class="lk" href="${escH(u)}" target="_blank" rel="noopener noreferrer">${soharLinkLabel(u, row)} &#8599;</a>`;
+  /** A labelled bar: how much of the total is met, and what's left. '' when the row has neither figure. */
+  function benefitMeter(label, total, left) {
+    const T = numOf(total), L = numOf(left);
+    if (T == null && L == null) return '';
+    const met = T != null && L != null ? Math.max(0, Math.min(T, T - L)) : null;
+    const pct = T > 0 && met != null ? Math.round((met / T) * 100) : 0;
+    const done = T !== 0 && L != null && L <= 0;
+    const txt = T === 0 ? 'None' : done ? `Met${T != null ? ` (${moneyOf(T)})` : ''}` : L != null && T != null ? `${moneyOf(L)} left of ${moneyOf(T)}` : L != null ? `${moneyOf(L)} left` : moneyOf(T);
+    return `<div class="meter${done ? ' met' : ''}"><div class="ml"><span>${escH(label)}</span><span class="n">${escH(txt)}</span></div><div class="track" role="img" aria-label="${escH(`${label}: ${txt}`)}"><i style="width:${done ? 100 : pct}%"></i></div></div>`;
+  }
+  const DOW = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  /** {key, label} for MM/DD/YYYY or YYYY-MM-DD; null otherwise. */
+  function reportDay(v) {
+    const t = str(v);
+    let m = t.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/), y, mo, dd;
+    if (m) [y, mo, dd] = [+m[3], +m[1], +m[2]];
+    else if ((m = t.match(/^(\d{4})-(\d{2})-(\d{2})/))) [y, mo, dd] = [+m[1], +m[2], +m[3]];
+    else return null;
+    return { key: y * 10000 + mo * 100 + dd, label: `${DOW[new Date(y, mo - 1, dd).getDay()]} ${mo}/${dd}` };
+  }
+  /** Minutes after midnight for "9:00 AM" / "14:30"; late for anything else, so it sorts last. */
+  function reportMinutes(v) {
+    const m = str(v).match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap])?/i);
+    if (!m) return 1e6;
+    let h = +m[1];
+    if (m[3]) h = (h % 12) + (/p/i.test(m[3]) ? 12 : 0);
+    return h * 60 + +m[2];
+  }
   /**
    * A self-contained interactive HTML page. o: {title, subtitle, generated (text), version, sections: [{id, title, cols,
-   * rows, filters (column names with a dropdown), note}]}. Columns that would carry a name, DOB or member ID are dropped.
-   * Cells holding a Sohar URL become links. Returns the HTML text.
+   * rows, filters (column names with a dropdown), note, view ({details, schedule}, see HTML_EXPORT_VIEWS)}]}. Columns that
+   * would carry a name, DOB or member ID are dropped, and the details and schedule read only the columns kept. Cells holding
+   * a Sohar URL become Verification / Discovery links. Returns the HTML text.
    */
   function htmlReport(o) {
     const c = o || {};
     const secs = (c.sections || []).map((s, si) => {
       const cols = (s.cols || []).filter((k) => !NO_EXPORT.test(str(k)));
+      const has = (k) => !!k && cols.includes(k);
+      const g = (r, k) => (has(k) ? str(r[k]) : '');
       const rows = s.rows || [];
-      const cell = (v) => { const t = str(v); return SOHAR_LINK.test(t) ? `<a href="${escH(t)}" target="_blank" rel="noopener noreferrer">Sohar</a>` : escH(t); };
+      const sid = escH(s.id || `s${si}`);
+      const view = s.view || {}, det = view.details, sp = view.schedule && has(view.schedule.date) ? view.schedule : null;
+      const off = det ? 1 : 0;
+      const linksOf = (r) => cols.map((k) => str(r[k])).filter((u) => SOHAR_LINK.test(u)).map((u) => soharA(u, r)).join('');
+      const meters = (r, bars) => (bars || []).filter(([, a, b]) => has(a) || has(b)).map(([l, a, b]) => benefitMeter(l, g(r, a), g(r, b))).join('');
+      const panel = (r) => {
+        const f = (det.fields || []).filter(has).map((k) => [k, str(r[k])]).filter(([, v]) => v);
+        const m = meters(r, det.bars), l = linksOf(r);
+        return `<div class="panel"><div class="meters">${m || '<span class="muted">No deductible or OOP figures.</span>'}</div><dl>${f.map(([k, v]) => `<div><dt>${escH(k)}</dt><dd>${escH(v)}</dd></div>`).join('')}</dl>${l ? `<div class="links">${l}</div>` : ''}</div>`;
+      };
+      const cell = (r, v) => { const t = str(v); return SOHAR_LINK.test(t) ? soharA(t, r) : escH(t); };
       const isNum = (k) => /amount|balance|copay|deductible|oop|remaining|max|responsibility|est |paid|billed|share/i.test(k);
-      const filters = (s.filters || []).filter((k) => cols.includes(k)).map((k) => {
-        const i = cols.indexOf(k), vals = [...new Set(rows.map((r) => str(r[k])).filter(Boolean))].sort().slice(0, 300);
-        return `<label class="muted">${escH(k)} <select data-f="${i}"><option value="">All</option>${vals.map((v) => `<option>${escH(v)}</option>`).join('')}</select></label>`;
+      const tdc = (k, i) => [i === 0 ? 'c1' : '', isNum(k) ? 'n' : '', /action|flag|note|detail|follow-up|reason|task/i.test(k) ? 'wr' : ''].filter(Boolean).join(' ');
+      const filters = (s.filters || []).filter(has).map((k) => {
+        const counts = new Map();
+        for (const r of rows) { const v = str(r[k]); if (v) counts.set(v, (counts.get(v) || 0) + 1); }
+        const vals = [...counts.keys()].sort().slice(0, 300);
+        return `<label class="flt">${escH(k)}<select data-f="${cols.indexOf(k) + off}"><option value="">All</option>${vals.map((v) => `<option value="${escH(v)}">${escH(v)} (${counts.get(v)})</option>`).join('')}</select></label>`;
       }).join('');
-      return `<section data-sec="${si}" id="${escH(s.id || `s${si}`)}"><h2>${escH(s.title)}</h2>${s.note ? `<p class="muted">${escH(s.note)}</p>` : ''}
-<div class="bar"><input type="search" data-q placeholder="Search" aria-label="Search ${escH(s.title)}">${filters}<span class="muted" data-n></span></div>
-<div class="wrap"><table><thead><tr>${cols.map((k) => `<th scope="col">${escH(k)}</th>`).join('')}</tr></thead><tbody>
-${rows.map((r) => `<tr>${cols.map((k) => `<td${isNum(k) ? ' class="n"' : ''}>${cell(r[k])}</td>`).join('')}</tr>`).join('\n')}
-</tbody></table></div></section>`;
+      const who = (r, i) => escH(str(r.LASFIR) || `row ${i + 1}`);
+      const body = rows.map((r, i) => `<tr data-r="${i}">${det ? `<td class="tgc"><button type="button" class="tg" aria-expanded="false" aria-controls="${sid}-d${i}" aria-label="Details for ${who(r, i)}"></button></td>` : ''}${cols.map((k, ci) => `<td${tdc(k, ci) ? ` class="${tdc(k, ci)}"` : ''}>${cell(r, r[k])}</td>`).join('')}</tr>`
+        + (det ? `<tr class="dt" data-d="${i}" id="${sid}-d${i}" hidden><td colspan="${cols.length + 1}">${panel(r)}</td></tr>` : '')).join('\n');
+      const table = `<div class="wrap"><table${det ? ' class="hd"' : ''}><thead><tr>${det ? '<th class="tgc"><span class="sr">Details</span></th>' : ''}${cols.map((k, i) => `<th scope="col" data-c="${i + off}"${i === 0 ? ' class="c1"' : ''}><button type="button" class="sort">${escH(k)}</button></th>`).join('')}</tr></thead><tbody>
+${body}
+</tbody></table></div>`;
+      let schedule = '';
+      if (sp) {
+        const visits = new Map();
+        rows.forEach((r, i) => {
+          const k = [g(r, sp.date), g(r, sp.time), g(r, sp.column), g(r, sp.id) || g(r, sp.person) || `#${i}`].join('|');
+          if (!visits.has(k)) visits.set(k, { r, idx: [] });
+          visits.get(k).idx.push(i);
+        });
+        const days = new Map();
+        for (const v of visits.values()) {
+          const day = reportDay(g(v.r, sp.date)) || { key: 99999999, label: 'No upcoming visit' };
+          if (!days.has(day.key)) days.set(day.key, { label: day.label, cols: new Map() });
+          const col = g(v.r, sp.column) || 'No provider', D = days.get(day.key);
+          if (!D.cols.has(col)) D.cols.set(col, []);
+          D.cols.get(col).push(v);
+        }
+        const card = (v) => {
+          const rs = v.idx.map((i) => rows[i]);
+          const queue = rs.map((r) => g(r, sp.queue)).find(Boolean) || '', action = rs.map((r) => g(r, sp.action)).find(Boolean) || '';
+          const tones = rs.map((r) => statusTone(g(r, sp.status)));
+          const tone = queue ? 'warn' : ['ok', 'bad', 'warn'].find((t) => tones.includes(t)) || '';
+          const visit = (sp.visit || []).map((k) => g(v.r, k)).filter(Boolean).join(' · ');
+          const checks = rs.map((r) => {
+            const st = g(r, sp.status), payer = (sp.payer || []).map((k) => g(r, k)).find(Boolean) || '';
+            const facts = (sp.facts || []).map(([l, k]) => [l, g(r, k)]).filter(([, x]) => x).map(([l, x]) => escH(l ? `${l} ${x}` : x)).join(' · ');
+            const m = meters(r, sp.bars), l = linksOf(r);
+            return `<div class="chk"><div class="ch"><span class="badge ${statusTone(st)}">${escH(st || 'No result')}</span>${g(r, sp.kind) ? `<span class="kind">${escH(g(r, sp.kind))}</span>` : ''}${payer ? `<span>${escH(payer)}</span>` : ''}</div>`
+              + `${facts ? `<div class="facts">${facts}</div>` : ''}${m ? `<div class="meters">${m}</div>` : ''}${l ? `<div class="links">${l}</div>` : ''}</div>`;
+          }).join('');
+          return `<article class="card ${tone}" data-rows="${v.idx.join(' ')}"><div class="top"><span class="tm">${escH(g(v.r, sp.time) || '—')}</span><span class="who">${escH(g(v.r, sp.person))}</span><span class="muted">${escH(g(v.r, sp.id))}</span></div>`
+            + `${visit ? `<div class="muted">${escH(visit)}</div>` : ''}${queue ? `<div class="todo"><b>${escH(queue)}</b>${action ? `: ${escH(action)}` : ''}</div>` : ''}${checks}`
+            + `${det ? `<details><summary>Details</summary>${rs.map(panel).join('')}</details>` : ''}</article>`;
+        };
+        const byTime = (a, b) => reportMinutes(g(a.r, sp.time)) - reportMinutes(g(b.r, sp.time)) || g(a.r, sp.person).localeCompare(g(b.r, sp.person));
+        schedule = [...days.entries()].sort((a, b) => a[0] - b[0]).map(([, D]) => `<div class="day"><h3>${escH(D.label)}<span class="muted" data-dc></span></h3><div class="cols">`
+          + [...D.cols.entries()].sort((a, b) => (a[0] === 'No provider') - (b[0] === 'No provider') || a[0].localeCompare(b[0]))
+            .map(([name, vs]) => `<div class="pcol"><h4><span>${escH(name)}</span><span class="muted" data-pc></span></h4>${vs.sort(byTime).map(card).join('')}</div>`).join('')
+          + '</div></div>').join('\n');
+      }
+      const seg = sp ? '<div class="seg" role="group" aria-label="View"><button type="button" data-v="schedule" aria-pressed="true">Schedule</button><button type="button" data-v="table" aria-pressed="false">Table</button></div>' : '';
+      return `<section data-sec="${si}" id="${sid}" aria-labelledby="${sid}-h">
+<div class="bar"><div class="lead"><h2 id="${sid}-h">${escH(s.title)}</h2><span class="count" data-n aria-live="polite"></span></div>${seg}
+<label class="search"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="5"></circle><path d="M11 11l4 4"></path></svg><input type="search" data-q placeholder="Search LASFIR, MRN, payer, status" aria-label="Search ${escH(s.title)}"><kbd>/</kbd></label></div>
+${s.note ? `<p class="muted note">${escH(s.note)}</p>` : ''}<div class="filters">${filters}<button type="button" class="clear" data-clear hidden>Clear</button></div>
+<div data-view="table"${sp ? ' hidden' : ''}>${table}</div>${sp ? `\n<div data-view="schedule">${schedule}</div>` : ''}
+<p class="empty muted" data-empty hidden>Nothing matches. Clear the search or filters.</p></section>`;
     }).join('\n');
     return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -955,5 +1145,5 @@ ${rows.map((r) => `<tr>${cols.map((k) => `<td${isNum(k) ? ' class="n"' : ''}>${c
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,
     addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName,
     // v0.31
-    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, rotationIds, withSource, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor, HTML_EXPORT_COLS, htmlReport, htmlReportFileName };
+    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, rotationIds, withSource, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor, HTML_EXPORT_COLS, HTML_EXPORT_VIEWS, htmlReport, htmlReportFileName, statusTone, soharLinkLabel, benefitMeter };
 });
