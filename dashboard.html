@@ -32,6 +32,7 @@
   </header>
 
   <nav class="tabs" role="tablist" aria-label="Views">
+    <button role="tab" data-tab="import">Import</button>
     <button role="tab" data-tab="prep" aria-selected="true">Prep by appointment</button>
     <button role="tab" data-tab="benefits">Benefits &amp; OOP</button>
     <button role="tab" data-tab="worklist">Worklist</button>
@@ -41,6 +42,7 @@
     <button role="tab" data-tab="learning">Payer learning</button>
     <button role="tab" data-tab="messages">Messages</button>
     <button role="tab" data-tab="upload">Upload &amp; save</button>
+    <button role="tab" data-tab="config">Config</button>
   </nav>
 
   <main class="dash-main">
@@ -284,6 +286,47 @@
       </div>
     </section>
 
+    <!-- v0.31: Import (the pane's step 1, same path) -->
+    <section class="panel" data-panel="import" hidden>
+      <div class="cols2">
+        <div>
+          <h2>Upload the NextGen report</h2>
+          <p class="hint">The Appointments Listing (.xlsx or .csv, straight from NextGen). The pane copies it onto the very hidden Import sheet and rebuilds the patient list and the Sohar import files, the same as step 1 there.</p>
+          <input type="file" id="fileImportFs" accept=".csv,.xlsx,.xlsm" hidden>
+          <div id="dropImportFs" class="drop" tabindex="0" role="button" aria-label="Upload the NextGen Appointments Listing">Drop the Appointments Listing here, or <u>choose the file</u></div>
+          <div id="dailyFs" class="callout" hidden></div>
+          <p id="impState" class="hint" role="status" aria-live="polite"></p>
+        </div>
+        <div>
+          <h2>Then</h2>
+          <p class="hint">Save the Sohar import files on the Upload &amp; save tab (verification and discovery, or the Flow file), upload them to Sohar, and drop what Sohar sends back there. Re-verify rules and what goes in each import are on the Config tab.</p>
+          <div id="impSummary"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- v0.31: Config (the same section as the bottom of the pane's Admin tab; every write goes through the pane) -->
+    <section class="panel" data-panel="config" hidden>
+      <div class="cols2">
+        <div id="cfgFs"><p class="hint">Waiting for data from the pane…</p></div>
+        <div>
+          <h2>Esketamine payer rules</h2>
+          <p class="hint">Import <b>Payer Credential Rules.csv</b> from the Add-In Manifests folder in OneDrive; it replaces the editable <b>Payer Credential Rules</b> sheet.</p>
+          <input type="file" id="fileCredFs" accept=".csv,.xlsx,.xlsm" hidden>
+          <div id="dropCredFs" class="drop slim" tabindex="0" role="button" aria-label="Import the payer credential rules">Drop the payer credential rules here, or <u>choose the file</u></div>
+          <h2>IR Portal cross-check</h2>
+          <p class="hint">The IR Portal workbook (its <b>Filtered</b> tab) or a CSV of it. Insurance items are matched to the Sohar results and written to <b>IR Cross-Ref</b>.</p>
+          <input type="file" id="fileIrFs" accept=".csv,.xlsx,.xlsm" hidden>
+          <div id="dropIrFs" class="drop slim" tabindex="0" role="button" aria-label="Upload the IR Portal file">Drop the IR Portal file here, or <u>choose the file</u></div>
+          <h2>Bring back clinic files</h2>
+          <p class="hint">Re-verify anyway ticks go on the next verification file; tasks done, notes and payer notes are saved in the workbook. Clinic files contain PHI: MHS OneDrive or Teams only.</p>
+          <input type="file" id="fileClinicFs" accept=".xlsx,.xlsm" multiple hidden>
+          <div id="dropClinicFs" class="drop slim" tabindex="0" role="button" aria-label="Bring back clinic files">Drop clinic files here, or <u>choose files</u></div>
+          <p id="cfgState" class="hint" role="status" aria-live="polite"></p>
+        </div>
+      </div>
+    </section>
+
     <section id="detail" class="detail" hidden></section>
   </main>
 
@@ -296,6 +339,7 @@
   <script src="audit.js?v=0.30.0"></script>
   <script src="who.js?v=0.30.0"></script>
   <script src="dev-updates.js?v=0.30.0"></script>
+  <script src="config-ui.js?v=0.30.0"></script>
   <script src="dashboard.js?v=0.30.0"></script>
 </body>
 </html>

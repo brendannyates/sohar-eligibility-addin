@@ -444,9 +444,10 @@
     const box = $('dailyList');
     if (!box) return;
     const rows = state.demo ? null : await X.readQueryTable('appts').catch(() => null);
-    if (!rows) { box.hidden = true; box.innerHTML = ''; return; }
+    if (!rows) { box.hidden = true; box.innerHTML = ''; state.daily = null; return; }
     const st = await queryStatus();
     const f = REC.dataFreshness(st, new Date());
+    state.daily = { rows: rows.length, at: st && st.at ? fmtStamp(new Date(st.at)) : '', text: f.text }; // v0.31: for the full-screen Import tab
     box.hidden = false;
     box.innerHTML = `<p><b>Daily NextGen list</b>: ${rows.length.toLocaleString()} rows${st && st.at ? `, refreshed ${esc(fmtStamp(new Date(st.at)))}` : ''}. <span class="${f.level === 'fresh' ? 'ok' : 'warn'}">${esc(f.text)}</span></p>
       <div class="actions"><button class="small primary" id="btnDaily">Use the daily NextGen list</button></div>`;
@@ -2512,6 +2513,8 @@
       billing: await billingByKey(), data: await queryStatus(), ticketRows: await ticketRowsForView(),
       // v0.28: who picked their name in the pane (ticks, notes, code rules and audits record it) and the list to switch to.
       who: { name: who.name, users: whoList(), here: whoRead().used },
+      // v0.31: the Config tab (same section as the pane) and the Import tab's daily NextGen list.
+      config: configPayload(), daily: state.daily || null,
     };
     if (feesOn()) base.fees = feePayload(); // fee estimates (v0.11): only when On
     return base;
@@ -2724,6 +2727,8 @@
     });
   }
 
+  /** v0.31: a file sent from full screen ({name, text} or {name, base64}) as a File, so the pane's own upload paths read it. */
+  const fileOf = (f) => (f.text != null ? new File([f.text], f.name, { type: 'text/csv' }) : new File([base64Bytes(f.base64)], f.name));
   async function fromDialog(raw) {
     const m = take(raw);
     if (!m) return;
@@ -2778,6 +2783,35 @@
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
+    } else if (m.type === 'config-set') { // v0.31: an edit in the full-screen Config tab
+      try {
+        const text = await saveConfig(m.setting, m.value);
+        await sendToDialog({ type: 'config', config: configPayload(), notice: { ok: true, text } });
+      } catch (e) { await sendToDialog({ type: 'config', config: configPayload(), notice: { ok: false, text: `Not saved: ${e.message}` } }); throw e; }
+    } else if (m.type === 'payer-pick') {
+      try {
+        await applyPayerChoice(m.name, m.choice);
+        await sendToDialog({ ...(await payload('config')), notice: { ok: true, text: `Saved the Sohar payer for ${m.name}.` } });
+      } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: `Payer not saved: ${e.message}` }); throw e; }
+    } else if (m.type === 'goto') {
+      await X.activate(String(m.sheet || ''));
+    } else if (m.type === 'import-upload' || m.type === 'daily-list') { // v0.31: the full-screen Import tab, same path as step 1
+      try {
+        if (m.type === 'daily-list') await useDailyList();
+        else await uploadImport((m.files || []).slice(0, 1).map(fileOf));
+        const nf = (state.exports && state.exports.flow) ? state.exports.flow.length : 0;
+        await sendToDialog({ ...(await payload('import')), notice: { ok: true, text: `Report loaded: ${(state.patients || []).filter((p) => p['In Scope'] === 'Yes').length} patients in scope; ${nf} on the Flow file. ${$('wbStatus').textContent}` } });
+      } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
+    } else if (m.type === 'cred-upload' || m.type === 'ir-upload' || m.type === 'clinic-back') {
+      const files = (m.files || []).map(fileOf);
+      const box = { 'cred-upload': 'credStatus', 'ir-upload': 'irResult', 'clinic-back': 'clinicFilesNote' }[m.type];
+      try {
+        if (m.type === 'cred-upload') await uploadPayerRules(files);
+        else if (m.type === 'ir-upload') await uploadIr({ files, value: '' });
+        else await bringBackClinicFiles(files);
+        const text = ($(box) && $(box).innerText.trim()) || 'Done.';
+        await sendToDialog({ ...(await payload('config')), notice: { ok: true, text: text.slice(0, 600) } });
+      } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
     } else if (m.type === 'clinic-file') {
       await saveClinicFile(m.location);
       await sendToDialog({ type: 'notice', ok: true, text: `Clinic file for ${m.location} saved to Downloads (Excel on the web: see the pane for "Save in a new tab").` });
