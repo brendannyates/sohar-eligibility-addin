@@ -712,8 +712,10 @@
         const feeRows = F ? (feesOn() ? F.FEE_CONFIG_ROWS : F.FEE_CONFIG_ROWS.slice(0, 1)) : [];
         // "MRN ids since": Sohar checks created before this time carry the Per Nbr as their id, later ones the MRN.
         const since = { setting: 'MRN ids since', value: utcStamp(new Date()), what: 'When this workbook started sending the MRN (not the Per Nbr) as the Sohar id. Sohar results created before then are matched by Per Nbr. Set by the add-in; do not change.' };
-        await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.REVERIFY_CONFIG_ROWS, C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS, START_CONFIG_ROWS)).catch((e) => console.warn('Config learning / re-verify rows not added', e));
-        if (!String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
+        // v0.31: the per-service-line re-verify rows, with the one-time migration from Re-verify days / Re-verify in new month.
+        const added = await X.ensureConfigRows(C.LEARNING_CONFIG_ROWS.concat(C.reverifyConfigRows(state.cfg.raw), C.PAYER_TEST_CONFIG_ROWS, [since], feeRows, REC.PRECHECK_CONFIG_ROWS, REC.FLOW_IMPORT_CONFIG_ROWS, START_CONFIG_ROWS)).catch((e) => { console.warn('Config learning / re-verify rows not added', e); return []; });
+        const reread = (added || []).some((a) => /^Re-verify|^Include in import|^Plan-year/.test(a));
+        if (reread || !String(state.cfg.mrnSince || '').trim()) state.cfg = await X.readConfig().then((c) => ({ ...c, scope: state.cfg.scope, asOf: state.cfg.asOf })).catch(() => ({ ...state.cfg, mrnSince: since.value }));
       }
       const learn = state.cfg.learning || C.LEARN_DEFAULTS;
       state.payerMap = await X.readPayerMap();
@@ -780,7 +782,9 @@
       res.patients = sk.patients;
       if (sk.warn) sheetWarn.push(sk.warn);
       const nSkip = state.skipped.length;
-      const skipNote = nSkip ? `<p class="hint">${nSkip} skipped: verified within ${sk.days} days (listed in step 2).</p>` : '';
+      const nOut = (state.excluded || []).length;
+      const skipNote = (nSkip ? `<p class="hint">${nSkip} skipped: already covered by an eligible verification, or too early to re-verify (listed in step 2).</p>` : '')
+        + (nOut ? `<p class="hint">${nOut} left out: their service line is Off in Config <b>Include in import</b> (the 7 AM rotation covers them).</p>` : '');
       state.perToKey = res.perToKey || state.perToKey;
       renderPayers();
       state.patients = res.patients; state.review = res.review.concat(C.learningReviewRows(state.learning));
@@ -835,7 +839,7 @@
       const ng = state.exports.discovery.filter((r) => /-G$/.test(r.id)).length;
       $('fnDisc').textContent = `${nd - ng} patient${nd - ng === 1 ? '' : 's'}${ng ? ` + ${ng} guarantor${ng === 1 ? '' : 's'}` : ''} · ${C.fileName('discovery')}`;
       renderExtraFiles();
-      renderSkipped(sk.days);
+      renderSkipped();
       if (!(opts && opts.deferRules)) await refreshRules();
     } finally {
       // The build stopped early (an error or an early return): log the Payer Map changes it already made.
@@ -855,9 +859,14 @@
    */
   async function applySkips(res, cfgFor) {
     const rc = (state.cfg && state.cfg.reverify) || C.REVERIFY_DEFAULTS;
-    state.skipped = []; state.requestedAnyway = [];
+    state.skipped = []; state.requestedAnyway = []; state.excluded = [];
     const pk = res.perToKey || state.perToKey;
-    const none = (warn) => ({ patients: res.patients, days: rc.days, warn });
+    // v0.31: Include in import Off still applies when nothing can be skipped (no history, Skip Off, a read error).
+    const none = (warn) => {
+      const o = C.applyReverifySkips(res.patients, [], { ...rc, skip: false });
+      state.excluded = o.excluded;
+      return { patients: o.patients, warn };
+    };
     let saved, refs, requests, gReq;
     try {
       saved = await X.readUploads();
@@ -876,15 +885,15 @@
     if (pr.dropped || requests.some((q) => !String(q.MRN || '').trim())) await X.writeReverifyRequests(C.REVERIFY_REQUEST_COLS, pr.rows).catch((e) => console.warn('Re-verify Requests not pruned', e));
     state.reverifyRequests = pr.rows;
     const out = C.applyReverifySkips(res.patients, merged.results, { ...rc, today: new Date(), requests: pr.active });
-    state.skipped = out.skipped; state.requestedAnyway = out.requested;
-    return { patients: out.patients, days: rc.days, warn: '' };
+    state.skipped = out.skipped; state.requestedAnyway = out.requested; state.excluded = out.excluded;
+    return { patients: out.patients, warn: '' };
   }
 
   /**
    * Step 2: patients left out of the verification file because Sohar verified them eligible recently. Collapsed by
    * default. Clinics pick patients to re-verify anyway (Clinic tab, clinic files); the admin can only send all of them.
    */
-  function renderSkipped(days) {
+  function renderSkipped() {
     const box = $('skipBox');
     if (!box) return;
     const list = state.skipped || [], asked = state.requestedAnyway || [];
@@ -893,10 +902,10 @@
     const short = (d) => esc(String(d || '').slice(0, 5));
     const who = (s) => `<b>${esc(C.lasfir(s.last, s.first))}</b><br><span class="hint">${esc(C.idLabel({ MRN: s.mrn, 'Per Nbr': s.per }))}${s.location ? ` · ${esc(s.location)}` : ''}${s.partial ? ' · other insurance still sent' : ''}</span>`;
     const by = (s) => { const q = (state.reverifyRequests || []).find((r) => r.MRN === s.key); return q && q.By ? q.By : 'request'; };
-    box.innerHTML = (list.length ? `<details class="more skiplist"><summary><b>Skipped (verified recently): ${list.length}</b></summary>
-      <p class="hint">Sohar verified the same insurance eligible within ${esc(days)} days, so ${list.length === 1 ? 'this patient is' : 'these patients are'} not on the verification file. Clinics can ask for a patient on the Clinic tab or in their clinic file.</p>
+    box.innerHTML = (list.length ? `<details class="more skiplist"><summary><b>Skipped (covered or too early): ${list.length}</b></summary>
+      <p class="hint">An eligible Sohar verification of the same insurance already covers the next visit, or it is too early to re-verify (a check counts from the visit minus the Config window, and never before the 1st of the visit's month; TMS treatments weekly from Monday). ${list.length === 1 ? 'This patient is' : 'These patients are'} not on the verification file. Clinics can ask for a patient on the Clinic tab or in their clinic file.</p>
       <table class="watch"><thead><tr><th>Patient</th><th>Verified</th><th>Next check</th></tr></thead><tbody>${list.map((s) => `<tr>
-        <td>${who(s)}</td><td title="${esc(s.verified)}">${short(s.verified)}</td><td title="${esc(s.due)}">${short(s.due)}</td></tr>`).join('')}</tbody></table>
+        <td>${who(s)}</td><td title="${esc(s.verified)}">${short(s.verified)}</td><td title="${esc(s.reason)}">${s.due ? short(s.due) : 'covers visit'}</td></tr>`).join('')}</tbody></table>
       <div class="actions"><button class="small" id="btnReverifyAll">Re-verify all ${list.length} anyway</button><button class="link" id="btnSkipCsv">Save this list</button></div>
       </details>` : '')
       + (asked.length ? `<details class="more skiplist"><summary>Sent anyway on request: ${asked.length}</summary>
@@ -1180,7 +1189,7 @@
   const inScopePatients = () => (state.patients || []).filter((p) => p['In Scope'] === 'Yes');
   function rulesCfg() {
     const c = state.cfg || {};
-    return { today: new Date(), sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? c.reverifyDays : 7, reverifyNewMonth: !!(c.reverify && c.reverify.newMonth),
+    return { today: new Date(), sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? c.reverifyDays : 7, reverifyNewMonth: !!(c.reverify && c.reverify.newMonth), reverify: c.reverify,
       payerRules: state.payerRules || [], locationState: c.locationState || {} };
   }
 

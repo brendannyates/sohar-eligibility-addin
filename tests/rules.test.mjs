@@ -210,15 +210,18 @@ test('R8: secondary may cover; stronger with Medicare', () => {
   assert.ok(codes(R.patientFlags(pat({}, { secPayer: 'Cigna' }), [fresh()], CFG)).includes('SECONDARY'));
 });
 
-test('R9: re-verify 8 and 7 days flag (approved 2026-10-20: due at Re-verify days), 6 does not, none flags, no upcoming visit no flag', () => {
+test('R9: the v0.31 freshness rule (max(visit - 72 h, the 1st)); none flags, no upcoming visit no flag', () => {
+  // Visit Tue 10/20 09:00 PT: covered by an eligible check from Sat 10/17 09:00 PT (16:00Z).
   const p = pat({}, { appointments: [appt({ event: 'TMS Follow Up' })] });
   const at = (d) => [fresh({ 'Sohar Date': d })];
-  let f = R.patientFlags(p, at('2026-10-07T20:00:00Z'), CFG).find((x) => x.code === 'REVERIFY');
+  const on = { ...CFG, today: new Date('2026-10-18T19:00:00Z') };
+  let f = R.patientFlags(p, at('2026-10-13T17:00:00Z'), on).find((x) => x.code === 'REVERIFY');
   assert.ok(f);
   assert.equal(f.link, R.REVERIFY_URL);
-  assert.match(f.detail, /8 days ago/);
-  assert.match(R.patientFlags(p, at('2026-10-08'), CFG).find((x) => x.code === 'REVERIFY').detail, /7 days ago/);
-  assert.ok(!codes(R.patientFlags(p, at('10/09/2026'), CFG)).includes('REVERIFY'));
+  assert.match(f.detail, /Last Sohar verification 10\/13\/2026 \(5 days ago\)/);
+  assert.ok(R.patientFlags(p, at('2026-10-17T15:59:00Z'), on).find((x) => x.code === 'REVERIFY'), 'a minute before the cover date');
+  assert.ok(!codes(R.patientFlags(p, at('2026-10-17T16:00:00Z'), on)).includes('REVERIFY'), 'covered');
+  assert.ok(!codes(R.patientFlags(p, at('2026-10-13T17:00:00Z'), CFG)).includes('REVERIFY'), 'on 10/15 the cover date has not come: no flag yet');
   f = R.patientFlags(p, [], CFG).find((x) => x.code === 'REVERIFY');
   assert.match(f.detail, /No Sohar verification/);
   // discovery rows and "Not in Sohar file" don't count as a verification
@@ -228,30 +231,32 @@ test('R9: re-verify 8 and 7 days flag (approved 2026-10-20: due at Re-verify day
   assert.ok(codes(R.patientFlags({ 'Per Nbr': '9', 'Next Appt': '10/30/2026' }, [], CFG)).includes('REVERIFY'));
 });
 
-test('R9 shares core.reverifyCheck: not eligible, new month, coverage end, per insurance sent', () => {
+test('R9 shares core.reverifyCheck: not eligible, the 1st, TMS weekly, coverage end, per insurance sent', () => {
   const rv = (p, rows, cfg = CFG) => R.patientFlags(p, rows, cfg).find((x) => x.code === 'REVERIFY');
   const p = pat({}, { appointments: [appt({ date: '10/20/2026' })] });
   // A recent ineligible or pending result is never "current".
   assert.match(rv(p, [fresh({ 'Sohar Date': '2026-10-14', 'Sohar Status': 'complete.ineligible' })]).detail, /came back complete\.ineligible/);
   assert.ok(rv(p, [fresh({ 'Sohar Date': '2026-10-14', 'Sohar Status': 'pending' })]));
   // Coverage ending before the visit.
-  assert.match(rv(p, [fresh({ 'Sohar Date': '2026-10-14', 'Coverage End': '10/18/2026' })]).detail, /coverage ends 10\/18\/2026/);
-  // Next visit in a new month within 7 days: due; further out: not yet.
+  const on = { ...CFG, today: new Date('2026-10-18T19:00:00Z') };
+  assert.match(rv(p, [fresh({ 'Sohar Date': '2026-10-17T18:00:00Z', 'Coverage End': '10/18/2026' })], on).detail, /coverage ends 10\/18\/2026/);
+  // A visit on 11/02: a check on 10/31 never covers it; from the 1st the flag shows.
   const nov = pat({}, { appointments: [appt({ date: '11/02/2026' })] });
-  const late = { ...CFG, today: new Date(2026, 9, 30) };
-  assert.match(rv(nov, [fresh({ 'Sohar Date': '2026-10-28' })], late).detail, /new month/);
-  const nov9 = pat({}, { appointments: [appt({ date: '11/09/2026' })] });
-  assert.equal(rv(nov9, [fresh({ 'Sohar Date': '2026-10-28' })], late), undefined);
-  // Re-verify in new month On: any month change re-verifies.
-  assert.ok(rv(nov9, [fresh({ 'Sohar Date': '2026-10-28' })], { ...late, reverifyNewMonth: true }));
+  assert.equal(rv(nov, [fresh({ 'Sohar Date': '2026-10-31T18:00:00Z' })], { ...CFG, today: new Date('2026-10-31T20:00:00Z') }), undefined, 'not yet on 10/31');
+  assert.ok(rv(nov, [fresh({ 'Sohar Date': '2026-10-31T18:00:00Z' })], { ...CFG, today: new Date('2026-11-01T18:00:00Z') }), 'due on the 1st');
+  // TMS treatment: weekly. Thu 10/22 session; a check on Mon 10/19 covers it, Sunday's does not.
+  const tms = pat({}, { appointments: [appt({ date: '10/22/2026', event: 'TMS Treatment' })] });
+  const thu = { ...CFG, today: new Date('2026-10-21T19:00:00Z') };
+  assert.equal(rv(tms, [fresh({ 'Sohar Date': '2026-10-19T17:00:00Z' })], thu), undefined);
+  assert.ok(rv(tms, [fresh({ 'Sohar Date': '2026-10-18T17:00:00Z' })], thu));
   // With verifyRows: only a result for the same payerId + member ID counts.
   const vr = { payerId: '94036', payerName: 'Blue Shield of California', memberId: 'BS-1', source: 'guarantor', nextgenPayer: 'Blue Shield CA' };
   const pv = pat({}, { appointments: [appt({})], verifyRows: [vr] });
-  const same = fresh({ 'Sohar Date': '2026-10-14', 'Sohar payerId': '94036', 'Sohar Member ID': 'bs1' });
-  assert.equal(rv(pv, [same]), undefined, 'same policy, eligible yesterday');
-  assert.ok(rv(pv, [{ ...same, 'Sohar Member ID': 'BS-2' }]), 'different member ID');
-  assert.ok(rv(pv, [{ ...same, 'Sohar payerId': '99999' }]), 'different payerId');
-  assert.ok(rv(pv, [{ ...same, Match: 'Name only. Confirm.' }]), 'a name-only match never counts');
+  const same = fresh({ 'Sohar Date': '2026-10-17T18:00:00Z', 'Sohar payerId': '94036', 'Sohar Member ID': 'bs1' });
+  assert.equal(rv(pv, [same], on), undefined, 'same policy, inside the window');
+  assert.ok(rv(pv, [{ ...same, 'Sohar Member ID': 'BS-2' }], on), 'different member ID');
+  assert.ok(rv(pv, [{ ...same, 'Sohar payerId': '99999' }], on), 'different payerId');
+  assert.ok(rv(pv, [{ ...same, Match: 'Name only. Confirm.' }], on), 'a name-only match never counts');
 });
 
 test('R4/R3: VIP and two insurances pills', () => {
@@ -282,6 +287,8 @@ test('flags sort by pill order', () => {
 });
 
 // ---------- allFlags / reviewRows ----------
+// v0.31: patient 1's coverage ends before the visit, so R9 flags it (an eligible check from 10/01 for a 10/21 visit only
+// waits for its cover date on 10/15).
 function sample() {
   const a = pat({ 'Per Nbr': '1', 'Last Name': 'Alpha', 'First Name': 'Anna', 'Primary Payer': 'Kaiser Foundation Northern California', 'Secondary Payer': 'Aetna' },
     { finClass: 'Kaiser', appointments: [appt({ date: '10/21/2026', loc: 'San Rafael' })], location: 'San Rafael' });
@@ -289,7 +296,7 @@ function sample() {
   const c = pat({ 'Per Nbr': '3', 'Last Name': 'Charlie', 'First Name': 'Cy' }, { appointments: [appt({ date: '10/18/2026', loc: 'Newport Beach' })] });
   const d = pat({ 'Per Nbr': '4', 'In Scope': 'No' }, { appointments: [appt({ loc: 'San Rafael' })] });
   const results = [
-    fresh({ 'Per Nbr': '1', 'Sohar Date': '2026-10-01', 'OOP Status': 'Met', 'Copay': '$30', 'Choose in NextGen': 'Kaiser Foundation Northern California', Action: 'Eligible. No action.' }),
+    fresh({ 'Per Nbr': '1', 'Sohar Date': '2026-10-01', 'Coverage End': '10/20/2026', 'OOP Status': 'Met', 'Copay': '$30', 'Choose in NextGen': 'Kaiser Foundation Northern California', Action: 'Eligible. No action.' }),
     fresh({ 'Per Nbr': '2', 'Sohar Date': '2026-10-14', 'Deductible Status': 'Approaching', 'Deductible Remaining': '$100', 'Sohar Link': 'https://example.invalid/v/2' }),
     fresh({ 'Per Nbr': '2', 'Sohar Date': '2026-10-12', 'Sohar Status': 'complete.ineligible' }),
   ];

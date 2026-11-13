@@ -325,11 +325,14 @@
       out.push(mk('DUAL', `Sent both to verification: ${vrows.map((v) => `${str(v.nextgenPayer) || str(v.payerName)}${v.source ? ` (${v.source})` : ''}`).join(' and ')}. The Sohar results decide which to choose in NextGen.`));
     }
 
-    // R9 Re-verify: the same due rule as the build's skip window (core.reverifyCheck), per insurance sent (verifyRows),
-    // else from any verification. Due when missing, not eligible, Re-verify days or more old, coverage ending before the
-    // visit, or a next visit in a new month within Re-verify days (Re-verify in new month: any month change).
+    // R9 Re-verify: the same freshness rule as the build (v0.31 core.reverifyCheck: max(visit - window, the 1st), per
+    // service line), per insurance sent (verifyRows), else from any verification. Due when missing, not eligible,
+    // coverage ending before the visit, or an eligible check that does not cover the visit once its cover date has come.
+    // cfg.reverify: core.reverifyConfig (defaults when absent; the old Re-verify days settings no longer apply).
     if (up.length) {
-      const opts = { today, nextAppt: up[0]._d, days: c.reverifyDays != null ? +c.reverifyDays : 7, newMonth: !!c.reverifyNewMonth };
+      const rc = c.reverify && c.reverify.lines ? c.reverify : C.reverifyConfig({});
+      const now = c.today instanceof Date && !isNaN(c.today) ? c.today : today;
+      const opts = { ...rc, now, visit: { date: up[0]._d, time: str(up[0].time) }, line: C.visitLine(up[0].event) };
       const checks = vrows.length ? vrows.map((v) => C.reverifyCheck(rows, v, opts)) : [C.reverifyCheck(rows, null, opts)];
       const due = checks.find((k) => k.due);
       if (due) {
@@ -749,7 +752,7 @@
   const CELL_MAX = 32000; // Excel holds 32,767 characters a cell, and xlsx.js cuts a longer one silently
   // Never in the file. Subscriber First / Last / DOB are the guarantor when "Use guarantor as subscriber" is on.
   const PHI_COLS = ['Last Name', 'First Name', 'DOB', 'Zip', 'Subscriber First', 'Subscriber Last', 'Subscriber DOB'];
-  const SE_DEFAULTS = { sfhpProviders: [], reverifyDays: 7, reverifyNewMonth: false, approachingPct: 0.2, locationState: {}, defaultState: '' };
+  const SE_DEFAULTS = { sfhpProviders: [], reverifyDays: 7, reverifyNewMonth: false, approachingPct: 0.2, locationState: {}, defaultState: '', reverify: C.reverifyConfig({}) };
   const isOn = (v) => /^(on|yes|y|true|1|x)$/i.test(str(v));
   const workKind = (k) => Object.keys(WORK_KINDS).find((n) => low(WORK_KINDS[n]) === low(k)) || '';
   const workId = (kind, key) => `${kind}|${kind === 'payer' ? low(key) : str(key)}`;
@@ -843,6 +846,8 @@
       sfhpProviders: c.sfhpProviders || [], reverifyDays: c.reverifyDays != null ? +c.reverifyDays : 7,
       reverifyNewMonth: !!(c.reverifyNewMonth != null ? c.reverifyNewMonth : c.reverify && c.reverify.newMonth),
       approachingPct: c.approachingPct != null ? +c.approachingPct : 0.2, locationState: c.locationState || {}, defaultState: str(c.defaultState),
+      // v0.31: the freshness rule (core.reverifyConfig) the R9 flag uses.
+      reverify: c.reverify && c.reverify.lines ? { skip: c.reverify.skip, windowHours: c.reverify.windowHours, onFirst: c.reverify.onFirst, lines: c.reverify.lines, include: c.reverify.include } : SE_DEFAULTS.reverify,
     };
     const out = {};
     for (const k of Object.keys(SE_DEFAULTS)) if (JSON.stringify(v[k]) !== JSON.stringify(SE_DEFAULTS[k])) out[k] = v[k];
@@ -1276,7 +1281,7 @@
     });
     const results = pk.results || [];
     const tags = new Map(patients.map((p) => [keyOf(p), str(p.LASFIR)]));
-    const cfg = { today, sfhpProviders: st.sfhpProviders, reverifyDays: st.reverifyDays, reverifyNewMonth: !!st.reverifyNewMonth,
+    const cfg = { today, sfhpProviders: st.sfhpProviders, reverifyDays: st.reverifyDays, reverifyNewMonth: !!st.reverifyNewMonth, reverify: st.reverify,
       payerRules: pk.payerRules || [], locationState: st.locationState };
     const all = allFlags(patients, results, cfg);
     const rows = clinicRows(loc, patients, results, all, today, { anyVisit: true });
@@ -1610,6 +1615,8 @@
     LEDGER_COLS, PATIENT_HISTORY_COLS, COPAY_ACTIVITY_COLS, CARD_ON_FILE_COLS, NEEDS_CHECK_COLS, LOOKUP_LOG_COLS, CLINIC_CONSENT_COLS, DESK_COLLECTION_COLS,
     SE2_SHEETS, SE_APPT_COLS, SE_EST_COLS, SE_HISTORY_COLS, SE_COPAY_COLS, SE_FEE_RULE_COLS, CLINIC_DAY_COLS, HISTORY_DEFAULTS, WORK_KINDS,
     clinicDay, feeTables, coverageWord, mrnKey, money,
+    // v0.31: the service line of one visit (Provider, TMS treatment, ESK, IVK) for the freshness rule.
+    serviceLine: C.visitLine, SERVICE_LINES: C.SERVICE_LINES,
     // v0.30 clinic workbook (Start Here + appointment list)
     CLINIC_APPT_KEEP, START_SHEETS, clinicApptRows, clinicStartPack, lasfirOfName,
   };

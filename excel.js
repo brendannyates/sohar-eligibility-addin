@@ -198,6 +198,7 @@
     const raw = cfg['As-of date'];
     if (raw !== '' && raw != null) asOf = root.SoharCore.parseDate(raw);
     return {
+      raw: cfg, // v0.31: the Config rows as {Setting: Value} (re-verify migration, the Config section)
       asOf, scope, locationState: loc,
       defaultState: String(cfg['Default state'] || '').trim(),
       reportUploaded: String(cfg['Report uploaded'] ?? '').trim(), // v0.20: when the NextGen report was last uploaded (UTC stamp)

@@ -264,13 +264,17 @@ test('readConfig: re-verify settings with defaults; ensureConfigRows adds the re
   m.seedTable('Config', 'tblConfig', ['Setting', 'Value', 'What it does'], [{ Setting: 'Re-verify days', Value: '10', 'What it does': 'mine' }]);
   m.seedTable('Location', 'tblLocationState', ['Location', 'State'], [{ Location: 'San Rafael', State: 'CA' }]);
   let cfg = await X.readConfig();
-  assert.deepEqual(cfg.reverify, { skip: true, days: 10, newMonth: false });
-  assert.equal(cfg.reverifyDays, 10, 'one setting shared by the skip rule and the clinic Re-verify flag');
-  assert.deepEqual(await X.ensureConfigRows(C.REVERIFY_CONFIG_ROWS), ['Skip recent verifications', 'Re-verify in new month']);
+  assert.deepEqual(cfg.reverify, C.reverifyConfig({}), 'v0.31: the old row alone changes nothing until it migrates');
+  // The one-time migration: 10 days becomes a 240 h window; the rows are added once, existing ones never change.
+  const added = await X.ensureConfigRows(C.reverifyConfigRows(cfg.raw));
+  assert.deepEqual(added, C.REVERIFY_CONFIG_ROWS.map((r) => r.setting));
   assert.equal(m.tableRows('tblConfig').find((r) => r.Setting === 'Re-verify days').Value, '10', 'existing row unchanged');
-  await X.setConfigValue('Re-verify in new month', 'On');
   cfg = await X.readConfig();
-  assert.equal(cfg.reverify.newMonth, true);
+  assert.equal(cfg.reverify.windowHours, 240);
+  assert.deepEqual(await X.ensureConfigRows(C.reverifyConfigRows(cfg.raw)), [], 'second run adds nothing');
+  await X.setConfigValue('Re-verify: TMS treatment', '4');
+  cfg = await X.readConfig();
+  assert.equal(cfg.reverify.lines['TMS treatment'], '4');
 });
 
 test('ensureConfigRows adds only missing settings, with the description, and never changes existing ones', async () => {
