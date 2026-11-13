@@ -3,7 +3,10 @@
 // every source address lives in the pPaths query, which Brendan fills in his own workbook.
 import { writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-const R = createRequire(import.meta.url)('../../rules.js');
+const req = createRequire(import.meta.url);
+const R = req('../../rules.js');
+// v0.32: the ledger also keeps the rotation's cost estimate id and link (record.js LEDGER_LINK_COLS; rules.js is shared with CTT).
+const LEDGER = R.LEDGER_COLS.concat(req('../../record.js').LEDGER_LINK_COLS);
 const here = (f) => new URL(f, import.meta.url);
 const list = (cols) => `{${cols.map((c) => `"${c.replace(/"/g, '""')}"`).join(', ')}}`;
 const head = (name, table, sheet, cols, what) => `// ${name}: ${what}
@@ -71,10 +74,10 @@ in
     Times
 `,
 
-  'qLedger.pq': head('qLedger', 'tblEligibilityChecks', 'Eligibility Checks', R.LEDGER_COLS,
+  'qLedger.pq': head('qLedger', 'tblEligibilityChecks', 'Eligibility Checks', LEDGER,
     "the eligibility-check rotation's ledger (Eligibility Checks.csv), one row per visit. Allowed stays here and never goes to a clinic file.") + `let
 ${HELPERS}
-    Cols = ${list(R.LEDGER_COLS)},
+    Cols = ${list(LEDGER)},
     Src = ReadCsv(Web.Contents(pPaths[EligibilityChecksCsv])),
     Keep = Table.SelectRows(Src, each Txt([MRN]) <> ""),
     Days = Table.TransformColumns(Keep, {{"Appt Date", IsoDay, type text}, {"MRN", Txt, type text}}),

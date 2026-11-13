@@ -1,6 +1,17 @@
 {
   "updates": [
     {
+      "id": "2026-11-13-rotation-estimates",
+      "date": "2026-11-13",
+      "bullets": [
+        "New: Every verification, discovery and cost estimate the morning eligibility run did now shows on Sohar Results, in Verification History and in the patient view, so clinics missing from the uploaded NextGen report (Austin, for one) appear too. They are marked Source Rotation.",
+        "New: Every booked visit has an estimate: Sohar's cost estimate on the first visit with a code, then the PR calculator (contracted rate, copay, coinsurance) for later visits as the deductible is used. The patient view's Benefits projection shows where the deductible and OOP max get met.",
+        "Changed: Estimates say where they came from: Sohar Cost Estimate, or PR Calculator Estimate when Sohar could not run one.",
+        "Changed: One web page export with everything (appointments and estimates, Sohar results, cost estimates, history, patients, audits) for all clinics or the clinic you pick. It has a large search on the right, Clinic and Service line dropdowns, and a menu on every column to sort A to Z or Z to A and filter.",
+        "Changed: The pane opens faster: sheets that already hold the same rows are left alone."
+      ]
+    },
+    {
       "id": "2026-11-12-eligibility-system",
       "date": "2026-11-12",
       "bullets": [

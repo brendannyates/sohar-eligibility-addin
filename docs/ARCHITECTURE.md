@@ -268,6 +268,24 @@ latest per-code quotes). Sohar's own dashboard export of Flow runs has run IDs o
 `receiver.js runs --export` and upload the CSV that writes. The rotation estimates a policy only when it has no Sohar estimate
 yet this plan year; one from before v0.31 (one code) counts, and a fee-math fallback (no fee column, rate or TIN) is retried.
 
+**v0.32 (11/13): rotation checks, every visit priced, one page.**
+- **Rotation checks** (`record.ledgerResults`): each Sohar check on Power Query's `tblEligibilityChecks` (Verification ID, else
+  Discovery ID) becomes one Sohar Results row, Source `Rotation`, on the patient's soonest visit from today, unless the Import
+  already matched that Sohar ID or link. They reach Sohar Results, Verification History, the patient view and the exports,
+  never NextGen tasks, payer outcomes, payer learning, flags or clinic files (`importResults()` in `app.js`). `qLedger.pq` also
+  keeps `Cost Estimate ID` and `Cost Estimate Link` (`record.LEDGER_LINK_COLS`; `rules.js` is shared with CTT, so not there).
+- **Estimate source** (`record.estimateSourceOf`): `Sohar Cost Estimate`, or `PR Calculator Estimate` when the note says the
+  rotation or the add-in priced it with fee math.
+- **Every booked visit priced** (`record.visitPlan`, `quotesByMrn`): per patient in visit order, the code from `fees.visitCode`;
+  Sohar's quote for that code on the first visit with it; every later visit through `fees.estimateMath` (the ledger's Allowed or
+  the fee context's contracted rate, copay, coinsurance, code rules) against the deductible and OOP max left after the visits
+  before it. A quote equal to the copay means copay only. On January 1 (or the plan anniversary when Reset Basis is Plan) both
+  start over and quotes are re-priced. The patient view's projection uses these rows (`record.projectionFromPlan`).
+- **One page** (`htmlExportPage('all', clinic)`): tabs for Appointments, Sohar results, Cost estimates, Verification history,
+  Patients and Account audits; one search right-aligned in the header for every tab; Clinic and Service line dropdowns
+  (`HTML_GLOBAL_FILTERS`); a menu on every column header (sort A to Z / Z to A, filter by values or text). The pane and full
+  screen pick All clinics or one before saving.
+
 ## 8. Privacy
 - **Sheets and CSVs:** LASFIR and MRN only. No names, DOBs or member IDs, except the Sohar import CSVs, which Sohar needs
   and which are saved to OneDrive only.

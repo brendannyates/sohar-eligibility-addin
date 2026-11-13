@@ -6,12 +6,13 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 const R = createRequire(import.meta.url)('../rules.js');
+const REC = createRequire(import.meta.url)('../record.js');
 const read = (f) => readFileSync(new URL(`../docs/powerquery/${f}`, import.meta.url), 'utf8');
 
 test('each query file names its table, and the shared column lists match rules.js', () => {
   const want = { 'qNGAppts.pq': 'tblNGAppts', 'qLedger.pq': 'tblEligibilityChecks', 'qHistory.pq': 'tblPatientHistory', 'qCards.pq': 'tblCardOnFile',
     'qCopays.pq': 'tblCopayActivity', 'qOpenTickets.pq': 'tblOpenTickets', 'qBalances.pq': 'tblPatientBalances' };
-  const cols = { 'qLedger.pq': R.LEDGER_COLS, 'qHistory.pq': R.PATIENT_HISTORY_COLS, 'qCards.pq': R.CARD_ON_FILE_COLS, 'qCopays.pq': R.COPAY_ACTIVITY_COLS };
+  const cols = { 'qLedger.pq': R.LEDGER_COLS.concat(REC.LEDGER_LINK_COLS), 'qHistory.pq': R.PATIENT_HISTORY_COLS, 'qCards.pq': R.CARD_ON_FILE_COLS, 'qCopays.pq': R.COPAY_ACTIVITY_COLS };
   for (const [f, table] of Object.entries(want)) {
     const s = read(f);
     assert.ok(s.split('\n').some((l) => l.startsWith(`// Output: ${table} `)), `${f} -> ${table}`);

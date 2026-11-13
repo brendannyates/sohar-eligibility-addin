@@ -561,7 +561,7 @@ test('plan-year estimates: the rotation\'s Flow Results file is a Flow file, kee
   assert.equal(REC.historyFromFlow([{ ...recs[0], 'Run Status': 'complete' }])[0].Source, 'Rotation', 'a Flow Results row keeps its own Source');
   const results = [{ MRN: '770001', 'Next Appt': '11/16/2026', LASFIR: 'SYNAAA' }, { MRN: '0770001', 'Next Appt': '11/20/2026' }, { MRN: '770002', 'Next Appt': '11/17/2026' }];
   const out = REC.withEstimates(results, recs.concat({ ...recs[0], MRN: '770001', 'Appt Date': '11/16/2026', 'Sohar Est Patient': '999', File: 'Flow sandbox.csv' }));
-  assert.equal(out[0]['Est Code'], '99214'); assert.equal(out[0]['Est Patient'], '$35.00'); assert.equal(out[0]['Est 99215'], '$48.00'); assert.equal(out[0]['Estimate Source'], 'Rotation');
+  assert.equal(out[0]['Est Code'], '99214'); assert.equal(out[0]['Est Patient'], '$35.00'); assert.equal(out[0]['Est 99215'], '$48.00'); assert.equal(out[0]['Estimate Source'], 'Sohar Cost Estimate');
   assert.equal(out[1]['Est Patient'], '', 'another visit: no own-code share'); assert.equal(out[1]['Est 90792'], '$52.10', 'but the plan-year quotes show');
   assert.equal(out[2]['Est Patient'], ''); assert.equal(out[2]['Est 99214'], '', 'a row with no estimate fills nothing');
   for (const c of REC.ESTIMATE_RESULT_COLS) assert.ok(c in out[2]);
