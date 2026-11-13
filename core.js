@@ -2334,6 +2334,10 @@
    * Append-only: previous rows stay; fresh rows are added unless their Key is already there. A row saved before v0.12
    * keeps its patient as MRN (its Per Nbr as a PER- key, converted with perToKey when given).
    */
+  /** v0.31: Payer Outcomes rows by Sohar Date, oldest first (stable; unreadable dates first). */
+  function sortOutcomes(rows) {
+    return (rows || []).map((r, i) => ({ r, i })).sort((a, b) => (outcomeTime(a.r) - outcomeTime(b.r)) || a.i - b.i).map((x) => x.r);
+  }
   function appendOutcomes(previous, fresh, perToKey) {
     const seen = new Set(), rows = [];
     const norm = (r) => Object.fromEntries(PAYER_OUTCOME_COLS.map((c) => [c, c === 'MRN' ? migrateKey(savedKey(r), perToKey) : r[c] == null ? '' : r[c]]));
@@ -3400,7 +3404,7 @@
     normHeader, detectHeader, parseDate, fmtDate, fmtTime, timeMins, soharTime, excelSerialToDate, parseName,
     payerMapIndex, lookupPayer, suggestPayers, buildPatients, buildExports, toCSV, parseCSV, summarize,
     VERIFIABLE, CONFIDENT, AUTO_LABELS, isAutoLabel, needsClassification, confirmedNames, autoMatchPayer, autoTokens, AUTO_MEDIUM, finClassPayerIndex, matchVerifyRow, isVip, isSelfPay,
-    LEARN_DEFAULTS, LEARNING_CONFIG_ROWS, learningConfig, mergeNotes, PAYER_OUTCOME_COLS, verificationSignal, payerOutcomes, appendOutcomes,
+    LEARN_DEFAULTS, LEARNING_CONFIG_ROWS, learningConfig, mergeNotes, PAYER_OUTCOME_COLS, verificationSignal, payerOutcomes, appendOutcomes, sortOutcomes,
     learnPayers, learnFinClasses, planLearning, learningEvidence, PAYER_LEARNING_COLS, payerLearningRows, learningReviewRows,
     PAYER_MAP_LOG_COLS, mapChangeLog, sheetEditLog, DEMOTE_MARK, FLAG_ACK, flagAckNote, groupOutcomes,
     SOHAR_REF_COLS, refsOf, refIndex, appendRefs, noIdentifierReviewRows,

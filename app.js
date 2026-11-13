@@ -1712,8 +1712,31 @@
     progress(`${flow.map((f) => f.name).join(', ')}: Sohar Flow results, ${m.read} visit${m.read === 1 ? '' : 's'}`);
     await X.writeFlowResults(REC.FLOW_SHEET_COLS, m.rows);
     state.flow = m.rows;
+    // v0.31: the Flow's checks go on Verification History too (Source Flow).
+    await appendHistory(REC.historyFromFlow(flow.flatMap((f) => REC.flowRecords(f.rows))), progress);
     const sandbox = flow.some((f) => /sandbox/i.test(f.name));
     return { rest, html: `<p class="ok">Sohar Flow: ${m.added} new visit${m.added === 1 ? '' : 's'}${m.replaced ? `, ${m.replaced} updated` : ''}; ${m.rows.length} saved. Cost estimates show at the top of each patient's record in full screen.${sandbox ? ' <b>Sandbox file: test results, not real coverage.</b>' : ''}</p>` };
+  }
+  /**
+   * v0.31: add checks to the hidden Verification History (record.mergeHistory: append-only, a re-read updates fields,
+   * sorted by Pulled At). A read error skips the save (the rows come again on the next upload), never an overwrite.
+   */
+  async function appendHistory(rows, say) {
+    if (!rows || !rows.length) return;
+    try {
+      const prev = await X.readVerificationHistory();
+      const m = REC.mergeHistory(prev, rows);
+      if (!m.added && !m.updated) { state.history = m.rows; return; }
+      await X.writeVerificationHistory(REC.VERIFICATION_HISTORY_COLS, m.rows);
+      state.history = m.rows;
+      if (say) say(`Verification History: ${m.added} new check${m.added === 1 ? '' : 's'}${m.updated ? `, ${m.updated} updated` : ''}; ${m.rows.length} kept.`);
+    } catch (e) { console.error(e); note('resultsResult', `Verification History not updated (the next upload adds these checks): ${e.message}`, 'warn'); }
+  }
+  /** Saved Verification History, read once per pane session (a read error is an empty list here, never saved). */
+  async function currentHistory(fresh) {
+    if (state.demo) return state.history || [];
+    if (fresh || !state.history) state.history = await X.readVerificationHistory().catch((e) => { console.error(e); return null; });
+    return state.history || [];
   }
   /**
    * Saved Flow results (hidden Flow Results sheet), read once per pane session. fresh (before a save): read again and
@@ -1840,12 +1863,14 @@
       const before = await X.readPayerOutcomes();
       const ledger = C.appendOutcomes(before, C.payerOutcomes(res.results, res.patients, fmtStamp(new Date())), state.perToKey);
       if (ledger.added || before.some((o) => !String(o.MRN || '').trim())) {
-        await X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, ledger.rows);
+        await X.writePayerOutcomes(C.PAYER_OUTCOME_COLS, C.sortOutcomes(ledger.rows)); // v0.31: by date
         step(`${ledger.added} new Sohar outcome${ledger.added === 1 ? '' : 's'} recorded for payer learning.`);
       }
       newOutcomes = ledger.added;
       state.outcomes = ledger.rows;
     } catch (e) { console.error(e); note('resultsResult', `Payer Outcomes not updated (payer learning waits for the next upload): ${e.message}`, 'warn'); }
+    // v0.31: Verification History, every check kept with its date and Source (Import or Dashboard), per policy.
+    await appendHistory(REC.historyFromResults(res.results), step);
     // New outcomes can promote, demote or suggest payers: rebuild so the Payer Map, Patients and imports follow.
     // (The Sohar Results sheet picks up a changed mapping on the next refresh.)
     if (newOutcomes && state.patients) await build({ deferRules: true });
@@ -2511,6 +2536,12 @@
       const next = AU.mergeAudits(await currentAudits(true), rec);
       await X.writeAccountAudits(AU.AUDIT_SHEET_COLS, AU.auditSheetRows(next));
       state.audits = next;
+      // v0.31: every run is kept on the hidden Account Audit History (Account Audits keeps the latest per patient).
+      try {
+        const hist = AU.appendAuditHistory(await X.readAccountAuditHistory(), rec.summary, new Date().toISOString(), m.by || who.name || rec.summary.By);
+        await X.writeAccountAuditHistory(AU.AUDIT_HISTORY_COLS, hist);
+        state.auditHistory = hist;
+      } catch (e) { console.warn('Account Audit History not updated', e); }
       // The lines are on Account Audits now; the old sheet is only a copy. Left for the next save if this fails.
       try { await X.dropAccountAuditLines(); } catch (e) { console.warn('old Account Audit Lines sheet not removed', e); }
       return rec.summary.Saved;
@@ -2948,6 +2979,9 @@
       async readPayerCredRules() { return credRules; }, async writePayerCredRules(c, r) { credRules = r; return r.length; },
       async readFee(kind) { return feeStore[kind] || []; }, async writeFee(kind, c, r) { feeStore[kind] = r; return r.length; },
       async readFlowResults() { return state.flow || []; }, async writeFlowResults(c, r) { state.flow = r; return r.length; },
+      // v0.31 history tables, in memory.
+      async readVerificationHistory() { return state.history || []; }, async writeVerificationHistory(c, r) { state.history = r; return r.length; },
+      async readAccountAuditHistory() { return state.auditHistory || []; }, async writeAccountAuditHistory(c, r) { state.auditHistory = r; return r.length; },
       async readPreCheck() { return state.precheck || []; }, async writePreCheck(c, r) { state.precheck = r; return r.length; },
       async readAccountAudits() { return (state.audits && state.audits.summary) || []; }, async readAccountAuditLines() { return (state.audits && state.audits.lines) || []; },
       // v0.26: one sheet holds summary and lines (saveAudit keeps state.audits as {summary, lines}).

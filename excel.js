@@ -101,6 +101,9 @@
     tblFeeScheduleLog: { sheet: 'Fee Schedule Log', hidden: true },
     // v0.30: financial notes staff write in the patient view (record.FINANCIAL_NOTE_COLS). MRNs: hidden.
     tblFinancialNotes: { sheet: 'Financial Notes', hidden: true },
+    // v0.31: every Sohar check the add-in processed (record.VERIFICATION_HISTORY_COLS; append-only by passing old rows back)
+    // and every account audit run (audit.AUDIT_HISTORY_COLS). LASFIR, MRN, Policy Key (no member IDs): hidden.
+    tblVerificationHistory: { sheet: 'Verification History', hidden: true }, tblAccountAuditHistory: { sheet: 'Account Audit History', hidden: true },
   };
   // Fee estimate tables by short name (app.js uses readFee / writeFee with these).
   const FEE_TABLES = { schedule: 'tblFeeSchedule', meta: 'tblFeeMeta', locations: 'tblFeeLocations', homes: 'tblProviderHome',
@@ -776,6 +779,12 @@
   const writeDeskCollections = (cols, rows) => writeAddinTable('Desk Collections', 'tblDeskCollections', cols, rows, false); // hidden: OWNED
   const readFeeScheduleLog = () => readOwned('tblFeeScheduleLog');
   const writeFeeScheduleLog = (cols, rows) => writeAddinTable('Fee Schedule Log', 'tblFeeScheduleLog', cols, rows, false); // hidden: OWNED
+  // v0.31: append-only history tables. Callers pass every earlier row plus the new ones (record.mergeHistory,
+  // audit.appendAuditHistory); a read error stops the save, so a failed read never becomes an empty sheet.
+  const readVerificationHistory = () => readOwned('tblVerificationHistory');
+  const writeVerificationHistory = (cols, rows) => writeAddinTable('Verification History', 'tblVerificationHistory', cols, rows, false); // hidden: OWNED
+  const readAccountAuditHistory = () => readOwned('tblAccountAuditHistory');
+  const writeAccountAuditHistory = (cols, rows) => writeAddinTable('Account Audit History', 'tblAccountAuditHistory', cols, rows, false); // hidden: OWNED
   const readFinancialNotes = () => readOwned('tblFinancialNotes');
   const writeFinancialNotes = (cols, rows) => writeAddinTable('Financial Notes', 'tblFinancialNotes', cols, rows, false); // hidden: OWNED
 
@@ -1083,7 +1092,7 @@
     readPayerMetricHistory, writePayerMetricHistory, writeGuarantorThemes, readClinicRequests, writeClinicRequests, readPayerCredRules, writePayerCredRules,
     readClinicNotes, writeClinicNotes, readClinicPayerNotes, writeClinicPayerNotes, readClinicWorkApplied, writeClinicWorkApplied,
     INBOX, readClinicInbox, createClinicInbox, FLOW_TABLES, readFlowTable, createFlowTables, QUERY_TABLES, readQueryTable, readQueryStatus,
-    readFinancialNotes, writeFinancialNotes,
+    readFinancialNotes, writeFinancialNotes, readVerificationHistory, writeVerificationHistory, readAccountAuditHistory, writeAccountAuditHistory,
     readClinicConsents, writeClinicConsents, readDeskCollections, writeDeskCollections, readFeeScheduleLog, writeFeeScheduleLog, writeImportRows, importXlsx, lockNameSheets, tidyTabs, TIDY_SHEETS, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
     writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

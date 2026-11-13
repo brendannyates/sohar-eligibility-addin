@@ -176,3 +176,12 @@ test('v0.30: financial notes and the clinic appointment list carry no name or DO
     assert.deepEqual(cols.map((c) => c.replace(/\s*\((cht guar|lst enc)\)$/i, '')).filter((c) => NAME_COLS.includes(c) || /name|dob|birth|guar|pol nbr|other id/i.test(c)).filter((c) => !/^payer name$/i.test(c) && c !== 'Res Name' && c !== 'Loc Name'), [], `${k} has no name, DOB, guarantor or member columns`);
   }
 });
+
+test('v0.31 history sheets: no name, DOB or member ID column; MRN, LASFIR and a Policy Key', () => {
+  const REC = createRequire(import.meta.url)('../record.js'), AU = createRequire(import.meta.url)('../audit.js');
+  for (const cols of [REC.VERIFICATION_HISTORY_COLS, AU.AUDIT_HISTORY_COLS]) {
+    assert.deepEqual(cols.filter((c) => NAME_COLS.includes(c) || /member id/i.test(c)), []);
+    assert.ok(cols.includes('MRN') && cols.includes('LASFIR'));
+  }
+  assert.ok(REC.VERIFICATION_HISTORY_COLS.includes('Policy Key'));
+});
