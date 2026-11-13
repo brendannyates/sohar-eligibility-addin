@@ -256,3 +256,22 @@ light and dark, Sohar links), saved to OneDrive or SharePoint only. Sohar import
   and which are saved to OneDrive only.
 - **TINs:** only in Sohar (provider groups and the Flow template). Never in this repo, Config or a CSV.
 - **Contracted rates:** only in hidden fee sheets and in the `rateTable` sent to Sohar. Never in a commit.
+
+## 9. Add-in implementation notes (v0.31)
+Where the add-in had to choose something this contract leaves open. Each is a question for Brendan, and the code says so.
+
+- **An eligible check older than the cover date** is not re-sent early. The visit is "not yet" (left out, next check on
+  or after the cover date), because a check before max(T − window, the 1st) would not cover the visit anyway. No check
+  on file, an ineligible or failed result, or coverage ending before the visit is sent now, whatever the date.
+- **Migration** of `Re-verify days` / `Re-verify in new month`: a changed value carries over (10 days becomes 240 hours;
+  On stays On). The old defaults (7 days, Off) take the new defaults (72 hours, On); taken literally they would have
+  turned the 11/12 rules off in every workbook that never changed them.
+- **Visit time**: Next Appt plus that appointment's time, Pacific wall clock; no time is 00:00.
+- **Source** of a check from step 3 (Sohar's CSV outputs): `Import` when it matched by id (MRN, Per Nbr or Sohar ref),
+  `Dashboard` otherwise (a member ID match: a check run outside the batch).
+- **Flow `estimate`** is `yes` or `no`. With no eligible verification on file it is `yes`: the Flow estimates only an
+  eligible picked policy, so it decides. `rateTable` is filled only for `yes` rows and only while Config `Fee estimates`
+  is On (the add-in reads the fee sheets only then); otherwise the cell is blank.
+- **Codes**: `fees.visitCode` is the section 4 table. The Estimate Codes sheet still prices ESK, TMS and MT / MTR for the
+  patient-view calculator (v0.26); only the plan-year line ignores them. The built-in `payer-knowledge.js` block still
+  has a learned "IV Ketamine Treatment Start" = 99215 row: fix it on the master's Estimate Codes sheet and regenerate.
