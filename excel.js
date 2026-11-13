@@ -161,6 +161,30 @@
     return !p.real.isNullObject ? p.real : !p.stg.isNullObject ? p.stg : null;
   }
   const recovered = new Set(); // sheets whose interrupted save was finished, for the pane to report
+  const unchangedSheets = new Set(); // sheets a save left alone because they already held the same rows, for the pane to report
+
+  /**
+   * True when table t already holds exactly these headers and rows (cell text compared), so a save can stop without
+   * touching the sheet. Each open rebuilds the same output, and rewriting it was most of the load time. The row count
+   * is checked first, then the body is read in READ_CHUNK blocks, stopping at the first difference. An empty save
+   * matches a table whose one body row is blank. Any edit on the sheet (a cell, a header, a row) means false.
+   */
+  async function sameRows(ctx, t, cols, values) {
+    const h = t.getHeaderRowRange(); h.load('values,columnCount');
+    const b = t.getDataBodyRange(); b.load('rowIndex,columnIndex,rowCount,columnCount');
+    await ctx.sync();
+    if (h.columnCount !== cols.length || h.values[0].some((x, j) => String(x) !== cols[j])) return false;
+    const want = values.length ? values : [cols.map(() => '')];
+    if (b.rowCount !== want.length) return false;
+    const txt = (v) => (v == null ? '' : String(v));
+    for (let i = 0; i < want.length; i += READ_CHUNK) {
+      const rg = t.worksheet.getRangeByIndexes(b.rowIndex + i, b.columnIndex, Math.min(READ_CHUNK, want.length - i), cols.length);
+      rg.load('values');
+      await ctx.sync();
+      if (rg.values.some((r, k) => r.some((v, j) => txt(v) !== txt(want[i + k][j])))) return false;
+    }
+    return true;
+  }
 
   /** Table rows as objects. Throws if the table is missing, unless missingOk (then []). Other errors always throw. */
   async function readTable(tableName, missingOk) {
@@ -371,9 +395,13 @@
       const ws = t.worksheet;
       t.clearFilters(); // a filtered table can't have its rows deleted and shifted reliably
       const hdr = t.getHeaderRowRange(); hdr.load('rowIndex,columnIndex,columnCount');
-      const body = t.getDataBodyRange(); body.load('rowCount');
+      const body = t.getDataBodyRange(); body.load('rowCount'); ws.load('name');
       await ctx.sync();
       if (hdr.columnCount !== cols.length) throw new Error(`${tableName} has ${hdr.columnCount} columns; this version of the add-in expects ${cols.length}. Use the matching template.`);
+      // Everything is written as text so member IDs and ZIPs keep leading zeros.
+      const values = rows.map((r) => cols.map((c) => { const v = cellOf(r, c); return v == null ? '' : v; }));
+      // Same headers and rows already in the table: nothing to clear or write.
+      if (await sameRows(ctx, t, cols, values)) { unchangedSheets.add(ws.name); return; }
       // Same columns, older names (v0.12: Review "Per Nbr" is "MRN"): rename the header cells in place.
       hdr.load('values');
       await ctx.sync();
@@ -384,8 +412,6 @@
       body.clear(Excel.ClearApplyTo.contents);
       if (body.rowCount > 1) body.getRow(1).getBoundingRect(body.getLastRow()).delete(Excel.DeleteShiftDirection.up);
       await ctx.sync();
-      // Everything is written as text so member IDs and ZIPs keep leading zeros.
-      const values = rows.map((r) => cols.map((c) => { const v = cellOf(r, c); return v == null ? '' : v; }));
       if (!values.length) { t.getDataBodyRange().numberFormat = [cols.map(() => '@')]; await ctx.sync(); return; }
       const canResize = Office.context.requirements.isSetSupported('ExcelApi', '1.13');
       if (canResize) {
@@ -920,6 +946,19 @@
       let oldTableSheetId = null;
       if (!p.real.isNullObject) { const w = p.real.worksheet; w.load('id'); await ctx.sync().catch(unchanged('checking the workbook')); oldTableSheetId = w.id; }
 
+      // Same rows already in place (no leftovers, the table on its own sheet): keep the sheet, only put its
+      // visibility right and activate it if asked. No sheet is added, deleted or renamed.
+      if (!p.real.isNullObject && p.stg.isNullObject && p.stage.isNullObject && !p.ws.isNullObject && oldTableSheetId === p.ws.id
+        && await sameRows(ctx, p.real, cols, values).catch(unchanged('checking the workbook'))) {
+        const ws = wb.worksheets.getItem(sheetName);
+        if (own.hidden && p.ws.visibility !== visOf(own.hidden)) ws.visibility = visOf(own.hidden);
+        const vis = own.hidden ? visOf(own.hidden) : p.ws.visibility;
+        if (activate && vis === Excel.SheetVisibility.visible) ws.activate();
+        await ctx.sync().catch(unchanged('checking the workbook'));
+        unchangedSheets.add(sheetName);
+        return;
+      }
+
       // Leftovers from an unfinished save are partial or superseded (the real table is intact): sweep them, by name
       // in this same batch (see sweepStage), so a sheet another window has just swapped into place is never hit.
       if (!p.stage.isNullObject && p.stage.id !== oldTableSheetId) {
@@ -1037,6 +1076,8 @@
   }
   /** Sheets whose interrupted save was finished since the last call (by a read, a save or recoverAll). */
   function takeRecovered() { const out = [...recovered]; recovered.clear(); return out; }
+  /** Sheets that saves since the last call left alone (same rows already there), then cleared. */
+  function takeUnchanged() { const out = [...unchangedSheets]; unchangedSheets.clear(); return out; }
 
   async function setConfigValue(setting, value) {
     return run(async (ctx) => {
@@ -1094,5 +1135,5 @@
     INBOX, readClinicInbox, createClinicInbox, FLOW_TABLES, readFlowTable, createFlowTables, QUERY_TABLES, readQueryTable, readQueryStatus,
     readFinancialNotes, writeFinancialNotes, readVerificationHistory, writeVerificationHistory, readAccountAuditHistory, writeAccountAuditHistory,
     readClinicConsents, writeClinicConsents, readDeskCollections, writeDeskCollections, readFeeScheduleLog, writeFeeScheduleLog, writeImportRows, importXlsx, lockNameSheets, tidyTabs, TIDY_SHEETS, readXlsxRows, writeResults, writeTasks, writeExport, writeIr, readIr, readTasks,
-    writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, canInsertWorkbook, setConfigValue, activate, templateCheck };
+    writeDiscoveryVerify, readDiscoveryVerify, writeVerifyFailed, readVerifyFailed,writeBenefits, readUploads, writeUploads, readIrUploads, writeIrUploads, tableRowCount, setTaskDone, recoverAll, takeRecovered, takeUnchanged, canInsertWorkbook, setConfigValue, activate, templateCheck };
 })(typeof self !== 'undefined' ? self : this);

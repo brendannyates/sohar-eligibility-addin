@@ -221,6 +221,7 @@
   /** Scan the Import sheet, build the patient list and Sohar imports, then re-match saved Sohar and IR uploads. */
   async function refreshAll() {
     if (state.fees) state.fees.loaded = false; // fee estimates (On only): pick up edits made on the fee sheets
+    if (X.takeUnchanged) X.takeUnchanged(); // count only this refresh's saves left alone (stampUpdated)
     // state.step names the step running, so an error says where loading stopped (errText).
     step('reading the payer credential rules'); await loadPayerRules(); // esketamine payer credential rules: pick up edits made on the sheet
     step('reading the clinic notes'); await loadClinicNotes();
@@ -256,7 +257,10 @@
     const more = X.takeRecovered ? X.takeRecovered() : [];
     const note = [state.recoveredNote, more.length ? `An earlier save of ${more.join(', ')} was interrupted; the add-in finished it. Nothing was lost.` : ''].filter(Boolean).join(' ');
     state.recoveredNote = '';
-    setStatus(`${note ? `${note} ` : ''}Updated ${now}: ${what}.`, note ? 'warn' : 'ok');
+    // v0.32: sheets that already held the same rows were left alone instead of rebuilt.
+    const same = X.takeUnchanged ? X.takeUnchanged().length : 0;
+    const kept = same ? ` ${same} sheet${same === 1 ? '' : 's'} already up to date, not rewritten.` : '';
+    setStatus(`${note ? `${note} ` : ''}Updated ${now}: ${what}.${kept}`, note ? 'warn' : 'ok');
   }
   /** "2026-10-20 18:05 UTC": readable on the Config sheet, never turned into a date by Excel, parsed by core.soharTime. */
   function utcStamp(d) { return `${d.toISOString().slice(0, 16).replace('T', ' ')} UTC`; }
