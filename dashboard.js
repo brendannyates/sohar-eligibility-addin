@@ -1721,6 +1721,8 @@
   $('drop').addEventListener('dragleave', () => $('drop').classList.remove('over'));
   $('drop').addEventListener('drop', (e) => { e.preventDefault(); $('drop').classList.remove('over'); upload(e.dataTransfer.files); });
   document.querySelectorAll('[data-save]').forEach((b) => b.addEventListener('click', () => save(b.dataset.save)));
+  // v0.31: interactive HTML exports, built and saved by the pane from the workbook.
+  document.querySelectorAll('[data-html]').forEach((b) => b.addEventListener('click', () => toPane({ type: 'export-html', kind: b.dataset.html })));
   $('btnFee').addEventListener('click', () => $('fileFee').click());
   $('fileFee').addEventListener('change', (e) => { uploadFee(e.target.files); e.target.value = ''; });
   $('btnCopy').addEventListener('click', async () => {

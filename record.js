@@ -576,6 +576,76 @@
     return r ? str(r['Reset Basis']) : '';
   }
 
+  // ---------- interactive HTML exports (v0.31, docs/ARCHITECTURE.md section 7) ----------
+  // One self-contained page in the add-in's design (its tokens, light and dark), with search, per-column filters and
+  // sorting, and Sohar links. No network: the page's own CSP allows only its inline style and script. Sohar import
+  // files stay CSV. Callers pass sheet-safe columns only (LASFIR and MRN, never names, DOBs or member IDs).
+  const HTML_EXPORT_COLS = {
+    patients: ['LASFIR', 'MRN', 'State', 'Route', 'In Scope', 'Next Appt', 'Next Event', 'POS', 'Primary Payer', 'Sohar payerId', 'Confidence', 'Secondary Payer', 'Flags'],
+    results: ['Next Appt', 'Next Time', 'Next Event', 'Next Location', 'LASFIR', 'MRN', 'Sent As', 'Sohar Status', 'Work Queue', 'Action', 'Benefit Flag', 'Plan', 'Network',
+      'Coverage Start', 'Coverage End', 'Copay', 'Coinsurance', 'Deductible', 'Deductible Remaining', 'OOP Max', 'OOP Remaining', 'NextGen Payer', 'Sohar Payer', 'Sohar payerId',
+      'Match', 'Sohar Link', 'Sohar Date'],
+  };
+  const NO_EXPORT = /^(last name|first name|dob|date of birth|subscriber (first|last|dob)|member id|nextgen member id|sohar member id|chartmemberid|memberid|firstname|lastname|dateofbirth)$/i;
+  const SOHAR_LINK = /^https:\/\/app\.soharhealth\.com\/[^\s"'<>]*$/i;
+  const escH = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const REPORT_CSS = `:root{color-scheme:light;--page:#F3F4F1;--raised:#FFFFFF;--sunken:#F1F2EE;--line:#E3E6E1;--fg:#1B211F;--muted:#5E6863;--primary:#1E6B59;--on:#FFFFFF;--red:#B3261E;--amber:#8F5400;--blue:#2B5C8A}
+:root[data-theme="dark"]{color-scheme:dark;--page:#131716;--raised:#1B2220;--sunken:#182019;--line:#2A3330;--fg:#ECEFED;--muted:#9BA59F;--primary:#6DC4A6;--on:#0E2A22;--red:#F19189;--amber:#E9B150;--blue:#8FB8E6}
+*{box-sizing:border-box}body{margin:0;font:400 14px/1.4 "Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;color:var(--fg);background:var(--page)}
+header{display:flex;flex-wrap:wrap;gap:6px 12px;justify-content:space-between;align-items:center;padding:14px 18px;border-bottom:1px solid var(--line);background:var(--raised)}
+h1{margin:0;font-size:17px;font-weight:600}h2{font-size:15px;margin:0 0 6px}.muted{color:var(--muted);font-size:12px}
+main{padding:14px 18px;display:grid;gap:18px}section{background:var(--raised);border:1px solid var(--line);border-radius:6px;padding:12px}
+.bar{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;margin:6px 0 8px}input,select,button{font:inherit;font-size:12.5px;color:var(--fg);background:var(--sunken);border:1px solid var(--line);border-radius:4px;padding:4px 8px}
+button{cursor:pointer}button:hover,input:focus,select:focus{border-color:var(--primary);outline:none}.wrap{overflow:auto;max-height:70vh}
+table{border-collapse:collapse;width:100%;font-size:12px}th{position:sticky;top:0;background:var(--sunken);text-align:left;font-weight:600;color:var(--muted);padding:5px 6px;border-bottom:1px solid var(--line);cursor:pointer;white-space:nowrap}
+th[aria-sort="ascending"]::after{content:" \\25B2"}th[aria-sort="descending"]::after{content:" \\25BC"}td{padding:5px 6px;border-bottom:1px solid var(--line);vertical-align:top}
+tr:hover td{background:color-mix(in srgb,var(--primary) 6%,transparent)}a{color:var(--primary)}.n{font-variant-numeric:tabular-nums}
+.ok{color:var(--primary)}.bad{color:var(--red)}.warn{color:var(--amber)}footer{padding:10px 18px 18px;color:var(--muted);font-size:11.5px}`;
+  // The page's script: search, column filters, sort, light / dark. Plain text: no network, no eval.
+  const REPORT_JS = `(function(){var d=document,r=d.documentElement;try{var t=localStorage.getItem("soharTheme");r.dataset.theme=t==="dark"||(!t&&window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches)?"dark":"light"}catch(e){}
+d.getElementById("theme").addEventListener("click",function(){r.dataset.theme=r.dataset.theme==="dark"?"light":"dark";try{localStorage.setItem("soharTheme",r.dataset.theme)}catch(e){}});
+Array.prototype.forEach.call(d.querySelectorAll("section[data-sec]"),function(s){var rows=Array.prototype.slice.call(s.querySelectorAll("tbody tr")),q=s.querySelector("[data-q]"),fs=s.querySelectorAll("[data-f]"),cnt=s.querySelector("[data-n]");
+function apply(){var v=(q.value||"").toLowerCase(),n=0;rows.forEach(function(tr){var ok=!v||tr.textContent.toLowerCase().indexOf(v)>=0;Array.prototype.forEach.call(fs,function(f){if(ok&&f.value!==""&&tr.children[+f.dataset.f].textContent!==f.value)ok=false});tr.hidden=!ok;if(ok)n++});cnt.textContent=n+" of "+rows.length}
+q.addEventListener("input",apply);Array.prototype.forEach.call(fs,function(f){f.addEventListener("change",apply)});
+Array.prototype.forEach.call(s.querySelectorAll("th"),function(th,i){th.addEventListener("click",function(){var asc=th.getAttribute("aria-sort")!=="ascending";Array.prototype.forEach.call(s.querySelectorAll("th"),function(h){h.removeAttribute("aria-sort")});th.setAttribute("aria-sort",asc?"ascending":"descending");
+var key=function(tr){var x=tr.children[i].textContent.trim(),m=x.match(/^(\\d{1,2})\\/(\\d{1,2})\\/(\\d{4})/);if(m)return m[3]+m[1].padStart(2,"0")+m[2].padStart(2,"0")+x.slice(10);var n=parseFloat(x.replace(/[$,%]/g,""));return /^[-$\\d.,% ]+$/.test(x)&&!isNaN(n)?n:x.toLowerCase()};
+rows.sort(function(a,b){var x=key(a),y=key(b);if(typeof x==="number"&&typeof y==="number")return asc?x-y:y-x;x=String(x);y=String(y);return asc?x.localeCompare(y):y.localeCompare(x)});var tb=s.querySelector("tbody");rows.forEach(function(tr){tb.appendChild(tr)})})});apply()})})();`;
+  /**
+   * A self-contained interactive HTML page. o: {title, subtitle, generated (text), version, sections: [{id, title, cols,
+   * rows, filters (column names with a dropdown), note}]}. Columns that would carry a name, DOB or member ID are dropped.
+   * Cells holding a Sohar URL become links. Returns the HTML text.
+   */
+  function htmlReport(o) {
+    const c = o || {};
+    const secs = (c.sections || []).map((s, si) => {
+      const cols = (s.cols || []).filter((k) => !NO_EXPORT.test(str(k)));
+      const rows = s.rows || [];
+      const cell = (v) => { const t = str(v); return SOHAR_LINK.test(t) ? `<a href="${escH(t)}" target="_blank" rel="noopener noreferrer">Sohar</a>` : escH(t); };
+      const isNum = (k) => /amount|balance|copay|deductible|oop|remaining|max|responsibility|est |paid|billed|share/i.test(k);
+      const filters = (s.filters || []).filter((k) => cols.includes(k)).map((k) => {
+        const i = cols.indexOf(k), vals = [...new Set(rows.map((r) => str(r[k])).filter(Boolean))].sort().slice(0, 300);
+        return `<label class="muted">${escH(k)} <select data-f="${i}"><option value="">All</option>${vals.map((v) => `<option>${escH(v)}</option>`).join('')}</select></label>`;
+      }).join('');
+      return `<section data-sec="${si}" id="${escH(s.id || `s${si}`)}"><h2>${escH(s.title)}</h2>${s.note ? `<p class="muted">${escH(s.note)}</p>` : ''}
+<div class="bar"><input type="search" data-q placeholder="Search" aria-label="Search ${escH(s.title)}">${filters}<span class="muted" data-n></span></div>
+<div class="wrap"><table><thead><tr>${cols.map((k) => `<th scope="col">${escH(k)}</th>`).join('')}</tr></thead><tbody>
+${rows.map((r) => `<tr>${cols.map((k) => `<td${isNum(k) ? ' class="n"' : ''}>${cell(r[k])}</td>`).join('')}</tr>`).join('\n')}
+</tbody></table></div></section>`;
+    }).join('\n');
+    return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'">
+<meta name="robots" content="noindex"><title>${escH(c.title)}</title><style>${REPORT_CSS}</style></head>
+<body><header><div><h1>${escH(c.title)}</h1><div class="muted">${escH([c.subtitle, c.generated ? `Saved ${c.generated}` : '', c.version ? `Sohar Eligibility v${c.version}` : ''].filter(Boolean).join(' · '))}</div></div>
+<button id="theme" type="button" aria-label="Light or dark">Light / dark</button></header>
+<main>${secs}</main>
+<footer>LASFIR and MRN only. Contains PHI: keep it in MHS OneDrive or SharePoint, shared with invited people only. Never on a public site.</footer>
+<script>${REPORT_JS}</script></body></html>
+`;
+  }
+  /** "Sohar Results 2026-11-12.html" (local date). */
+  const htmlReportFileName = (label, d) => `${str(label).replace(/[\\/:*?"<>|]+/g, ' ').trim()} ${C.localDate(d)}.html`;
+
   /** "Sohar Ready Import - Flow 2026-10-30.csv" (local date), like the other import files. */
   const flowImportFileName = (d) => `Sohar Ready Import - Flow ${C.localDate(d)}.csv`;
 
@@ -873,5 +943,5 @@
     PRECHECK_HEADERS, PRECHECK_ITEMS, PRECHECK_COLS, PRECHECK_CONFIG_ROWS, NOTE_MAX, visitKey, adminNames, reportVisits, precheckItems, patientNotes, setPrecheck,
     addPatientNote, prunePrecheck, freshness, FLOW_IMPORT_COLS, FLOW_IMPORT_CONFIG_ROWS, flowImportRows, flowImportFileName,
     // v0.31
-    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor };
+    PROVIDER_GROUPS, VERIFICATION_HISTORY_COLS, HISTORY_SOURCES, policyKey, historyFromResults, historyFromFlow, mergeHistory, policyTimeline, resetBasisFor, estimateDueFor, HTML_EXPORT_COLS, htmlReport, htmlReportFileName };
 });

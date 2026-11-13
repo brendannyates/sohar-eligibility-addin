@@ -365,6 +365,7 @@
     dropZone('dropResults', 'fileResults', (files) => guard(() => uploadResults(files), 'resultsResult'));
     $('btnCopyMsg').addEventListener('click', () => guard(() => copyAdminMessage('action'), 'resultsResult'));
     $('btnCopyBen').addEventListener('click', () => guard(() => copyAdminMessage('benefits'), 'benBox'));
+    document.querySelectorAll('[data-html]').forEach((b) => b.addEventListener('click', () => guard(() => saveHtmlExport(b.dataset.html, 'htmlNote'), 'htmlNote'))); // v0.31
     $('btnDlWork').addEventListener('click', () => guard(async () => saveCSV(C.fileName('worklist'), C.RESULTS_COLS, (await currentResults()) || [], 'resultsResult'), 'resultsResult'));
     $('btnDlBen').addEventListener('click', () => guard(async () => saveCSV(C.fileName('benefits'), C.BENEFITS_EXPORT_COLS, C.benefitsExport((await currentResults()) || []), 'benBox'), 'benBox'));
     $('btnDlDiscVer').addEventListener('click', () => guard(downloadDiscoveryVerify, 'resultsResult'));
@@ -1824,6 +1825,45 @@
     };
   }
 
+  // ---------- v0.31: interactive HTML exports (record.htmlReport), saved like the other files ----------
+  const HTML_EXPORTS = {
+    patients: { label: 'Sohar Patients', title: 'Patients' },
+    results: { label: 'Sohar Results', title: 'Sohar results' },
+    history: { label: 'Sohar Verification History', title: 'Verification history' },
+    audits: { label: 'Sohar Account Audits', title: 'Account audits' },
+  };
+  /** The page for one export kind, from what the pane holds (sheet-safe columns only). */
+  async function htmlExportPage(kind) {
+    const pick = (cols, rows) => (rows || []).map((r) => Object.fromEntries(cols.map((c) => [c, C.cellOf(r, c) == null ? '' : C.cellOf(r, c)])));
+    let sections;
+    if (kind === 'patients') {
+      if (!state.patients) throw new Error('Upload the NextGen report first (step 1).');
+      const cols = REC.HTML_EXPORT_COLS.patients;
+      sections = [{ id: 'patients', title: 'Patients', cols, rows: pick(cols, state.patients.filter((p) => p['In Scope'] === 'Yes')), filters: ['Route', 'State', 'Confidence'], note: 'In-scope patients from the last build.' }];
+    } else if (kind === 'results') {
+      const rs = (await currentResults()) || [];
+      if (!rs.length) throw new Error('No Sohar results yet (step 3).');
+      const cols = REC.HTML_EXPORT_COLS.results;
+      sections = [{ id: 'results', title: 'Sohar results', cols, rows: pick(cols, rs), filters: ['Next Location', 'Sent As', 'Sohar Status', 'Work Queue', 'Benefit Flag'] }];
+    } else if (kind === 'history') {
+      const h = await X.readVerificationHistory();
+      if (!h.length) throw new Error('Verification History is empty: it fills as Sohar results and Flow results are uploaded.');
+      sections = [{ id: 'history', title: 'Verification history', cols: REC.VERIFICATION_HISTORY_COLS, rows: h.slice().reverse(), filters: ['Source', 'Kind', 'Sohar Status', 'Clinic', 'Policy Key'], note: 'Every check the add-in processed, newest first. Policy Key is the Sohar payerId and the member ID\'s last 4.' }];
+    } else if (kind === 'audits') {
+      const a = await currentAudits(true);
+      const hist = await X.readAccountAuditHistory().catch(() => []);
+      if (!(a.summary || []).length && !hist.length) throw new Error('No saved account audits yet.');
+      sections = [{ id: 'latest', title: 'Latest audit per patient', cols: AU.AUDIT_COLS, rows: a.summary || [], filters: ['Plan Year'] },
+        { id: 'runs', title: 'Every audit run', cols: AU.AUDIT_HISTORY_COLS, rows: hist.slice().reverse(), filters: ['Run By'] }];
+    } else throw new Error(`Unknown export: ${kind}`);
+    const ex = HTML_EXPORTS[kind];
+    return { name: REC.htmlReportFileName(ex.label), html: REC.htmlReport({ title: ex.title, subtitle: 'Sohar Eligibility', generated: fmtStamp(new Date()), version: VERSION, sections }) };
+  }
+  async function saveHtmlExport(kind, boxId) {
+    const p = await htmlExportPage(kind);
+    return saveBinary(p.name, new TextEncoder().encode(p.html), 'text/html;charset=utf-8', boxId, 'interactive web page');
+  }
+
   // ---------- step 3: Sohar results ----------
   async function uploadResults(files) {
     files = [...files];
@@ -2783,6 +2823,8 @@
         await sendToDialog({ type: 'notice', ok: false, text: e.message });
         throw e;
       }
+    } else if (m.type === 'export-html') { // v0.31: an interactive HTML export asked for in full screen
+      try { const msg = await saveHtmlExport(m.kind, 'resultsResult'); await sendToDialog({ type: 'notice', ok: true, text: msg }); } catch (e) { await sendToDialog({ type: 'notice', ok: false, text: e.message }); throw e; }
     } else if (m.type === 'config-set') { // v0.31: an edit in the full-screen Config tab
       try {
         const text = await saveConfig(m.setting, m.value);

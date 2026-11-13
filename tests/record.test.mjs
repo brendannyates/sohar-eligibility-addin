@@ -501,3 +501,18 @@ test('estimateDueFor: the policy\'s latest verification and its Verification His
   assert.equal(REC.estimateDueFor({ MRN: '760009', 'Primary Payer': 'Synth Mutual' }, null, ctx).due, true, 'nothing on file: the Flow decides');
   assert.equal(REC.estimateDueFor({ MRN: '760009', 'Primary Payer': 'TriWest Healthcare Alliance' }, null, ctx).due, false);
 });
+
+test('htmlReport: a self-contained page; no name, DOB or member ID column; Sohar links; escaped cells; no network', () => {
+  const rows = [{ LASFIR: 'SYNPAT', MRN: '770001', 'Last Name': 'Hidden', 'Sohar Member ID': 'SYN999', 'Sohar Link': 'https://app.soharhealth.com/verifications/v-1', Note: '<b>x</b>', Deductible: '500' }];
+  const h = REC.htmlReport({ title: 'Test', generated: 'now', version: '0.31.0', sections: [{ title: 'Rows', cols: ['LASFIR', 'MRN', 'Last Name', 'Sohar Member ID', 'Sohar Link', 'Note', 'Deductible'], rows, filters: ['LASFIR', 'Last Name'] }] });
+  assert.match(h, /^<!DOCTYPE html>/);
+  assert.ok(!h.includes('Hidden') && !h.includes('SYN999') && !h.includes('Last Name') && !h.includes('Member ID'), 'name and member ID columns are dropped');
+  assert.ok(h.includes('href="https://app.soharhealth.com/verifications/v-1"'));
+  assert.ok(h.includes('&lt;b&gt;x&lt;/b&gt;') && !h.includes('<b>x</b>'));
+  assert.match(h, /Content-Security-Policy" content="default-src 'none'/);
+  assert.ok(!/https?:\/\/(?!app\.soharhealth\.com)/.test(h.replace(/http-equiv/g, '')), 'no other URL in the page');
+  assert.ok(!/fetch\(|XMLHttpRequest|<link /.test(h));
+  new Function(h.match(/<script>([\s\S]*)<\/script>/)[1]); // the page's script parses
+  assert.match(REC.htmlReportFileName('Sohar Results', new Date(2026, 10, 12)), /^Sohar Results 2026-11-12\.html$/);
+  for (const k of ['patients', 'results']) assert.ok(!REC.HTML_EXPORT_COLS[k].some((c) => /member id|^last name|^first name|^dob/i.test(c)), k);
+});
