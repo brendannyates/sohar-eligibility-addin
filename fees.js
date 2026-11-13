@@ -659,12 +659,18 @@
    * v0.26: an Estimate Codes row still holding the v0.16-v0.25 intervention default (codes "none", the seed's Source and
    * note) takes the current seed's codes. Rows anyone edited are left as they are. {rows, changed}.
    */
+  // v0.31: seed rows from v0.26-v0.30 nobody edited (keyword, codes, note) take the current seed.
+  const V030_SEEDS = () => [['IV ketamine treatment start', '99215 x1', `${IVK_NOTE}; infusion 1`],
+    ['transition', '99214 x1', 'Transition visit; confirm it is 30 minutes'], ['ADHD testing review', '99214 x1', 'ADHD testing review; confirm it is 30 minutes']];
   function upgradeInterventionSeeds(rows) {
     const OLD = new Set([TMS_NOTE, MT_NOTE, MTR_NOTE, ESK_NOTE]);
     const now = new Map(ESTIMATE_CODE_SEEDS.map((r) => [keyOf(r['Event keyword']), r]));
+    const old30 = new Map(V030_SEEDS().map(([k, c, n]) => [keyOf(k), { c, n }]));
     let changed = 0;
     const out = (rows || []).map((r) => {
       const seed = now.get(keyOf(r['Event keyword']));
+      const o30 = old30.get(keyOf(r['Event keyword']));
+      if (seed && o30 && str(r.Source) === SEED_NOTE && str(r.Codes) === o30.c && str(r.Note) === o30.n) { changed++; return { ...r, Codes: seed.Codes, Note: seed.Note }; }
       if (!seed || str(r.Source) !== SEED_NOTE || str(r.Codes).toLowerCase() !== 'none' || !OLD.has(str(r.Note))) return r;
       changed++;
       return { ...r, Codes: seed.Codes, Note: seed.Note };
@@ -709,15 +715,16 @@
     ['intake', '90792 x1', 'New patient intake'], ['new patient', '90792 x1', 'New patient intake'], ['new', '90792 x1', 'New patient'],
     ['consult', '90792 x1', 'Consult'], ['ConsultTelepsych', '90792 x1', 'Consult'], ['consult med mgt', '90792 x1', 'Consult with med management'],
     ['TMS consult', '90792 x1', 'TMS consult'], ['esketamine consult', '90792 x1', 'Esketamine consult'], ['IV ketamine consult', '90792 x1', 'IV ketamine consult'],
-    // IV ketamine, self pay and commercial: 99215 at the first infusion, 99214 after, plus the medication.
-    ['IV ketamine treatment start', '99215 x1', `${IVK_NOTE}; infusion 1`], ['IV ketamine', '99214 x1', IVK_NOTE], ['IVK', '99214 x1', IVK_NOTE],
+    // IV ketamine, self pay and commercial: 99214 (v0.31: also at the first infusion), plus the medication.
+    ['IV ketamine treatment start', '99214 x1', `${IVK_NOTE}; infusion 1`], ['IV ketamine', '99214 x1', IVK_NOTE], ['IVK', '99214 x1', IVK_NOTE],
     // Any 30-minute visit.
     ['telepsych', '99214 x1', VISIT_30], ['Tel', '99214 x1', VISIT_30], ['med management', '99214 x1', 'Med management (MMI, MMT)'],
     ['med mgt', '99214 x1', 'Med management'], ['MMI', '99214 x1', 'Med management in office'], ['MMT', '99214 x1', 'Med management telepsych'],
     ['follow up', '99214 x1', 'Follow-up visit'], ['F/U', '99214 x1', 'Follow-up visit'], ['TMS follow up', '99214 x1', 'TMS follow-up visit (TFU)'],
     ['TMS F/U', '99214 x1', 'TMS follow-up visit (TTF)'], ['TFU', '99214 x1', 'TMS follow-up visit'], ['TTF', '99214 x1', 'Telepsych TMS follow-up visit'],
-    ['transition', '99214 x1', 'Transition visit; confirm it is 30 minutes'],
-    ['ADHD testing review', '99214 x1', 'ADHD testing review; confirm it is 30 minutes'],
+    // v0.31 (Brendan, 11/12): transition and ADHD testing review are 60-minute visits.
+    ['transition', '99215 x1', 'Transition visit, 60 minutes'],
+    ['ADHD testing review', '99215 x1', 'ADHD testing review, 60 minutes'],
     ['ADHD testing', '96136 x1', 'ADHD testing, first 30 minutes; add 96139 for each extra 30'],
     ['therapy 60', '90837 x1', 'Psychotherapy, 60 minutes'], ['psychotherapy individual 60', '90837 x1', 'Psychotherapy, 60 minutes'],
   ]);
@@ -1553,6 +1560,182 @@
   };
   const demoSchedule = () => parseFeeSchedule(DEMO_WORKBOOK);
 
+  // ---------- v0.31: the plan-year estimate (docs/ARCHITECTURE.md section 4) ----------
+  // Once per policy per plan year, for every patient, the Flow quotes the same three codes, so PR and coinsurance read
+  // as fee-schedule figures. Each visit then shows its own line (visitCode).
+  const PLAN_YEAR_CODES = ['90792', '99214', '99215'];
+  const PLAN_YEAR_CONFIG_ROWS = [
+    { setting: 'Plan-year estimate codes', value: PLAN_YEAR_CODES.join('; '), what: 'The codes the Sohar Flow quotes once per policy per plan year (rateTable and the Est columns of Flow Results). Default 90792; 99214; 99215.' },
+  ];
+  /** Config {Setting: Value} -> the plan-year codes (5-character CPT / HCPCS codes, ; or , separated), else the default. */
+  function planYearCodes(cfg) {
+    const raw = str(cfg && cfg['Plan-year estimate codes']);
+    const codes = raw.split(/[;,\s]+/).map((c) => c.toUpperCase()).filter((c) => CODE_RE.test(c));
+    return codes.length ? [...new Set(codes)] : PLAN_YEAR_CODES.slice();
+  }
+  // VA, TriWest and TRICARE (and CHAMPVA): $0 expected, never estimated.
+  const NO_ESTIMATE_PAYER_RE = /veterans?'?\s*affairs|\bva\b|tri\s*-?west|tri\s*-?care|champva/i;
+  const KAISER_VA_RE = /kaiser|\bkp\b|veterans?'?\s*affairs|\bva\b|tri\s*-?west|champva/i;
+  const VISIT_NONE_NOTE = 'verification only; the tracker BIDF is the reference';
+  /**
+   * The plan-year line a visit shows (section 4). line: core.visitLine (worked out from the event when blank).
+   * Returns {code ('' = none), none, medication (IVK: add the self-pay medication), note}.
+   */
+  function visitCode(event, line, payer) {
+    const ln = line || C.visitLine(event);
+    const ev = ` ${keyOf(event)} `;
+    const none = (note) => ({ code: '', none: true, medication: false, note });
+    if (ln === 'ESK') return none(`Esketamine session: ${VISIT_NONE_NOTE}`);
+    if (ln === 'TMS treatment') return none(`TMS treatment session: ${VISIT_NONE_NOTE}`);
+    if (ln === 'IVK') {
+      if (KAISER_VA_RE.test(str(payer))) return none(`IV ketamine on ${str(payer)}: no estimate`);
+      return { code: '99214', none: false, medication: true, note: 'IV ketamine infusion: 99214, plus the self-pay medication' };
+    }
+    if (/ (consult|intake|new|new patient|consulttelepsych) /.test(ev)) return { code: '90792', none: false, medication: false, note: 'New patient or consult' };
+    if (/ (mt|mtr|motor threshold|mapping) /.test(ev) || / tms initial /.test(ev)) return none(`TMS motor threshold (MT / MTR): ${VISIT_NONE_NOTE}`);
+    if (/ (transition|adhd testing review|60 min|60) /.test(ev) && !/ therapy| psychotherapy/.test(ev)) return { code: '99215', none: false, medication: false, note: '60-minute visit' };
+    if (/ adhd testing | therapy | psychotherapy /.test(ev)) return none('Not a plan-year code (testing or psychotherapy)');
+    return { code: '99214', none: false, medication: false, note: '30-minute visit' };
+  }
+
+  const dayMs = 86400000;
+  const pulledMs = (r) => { const t = C.soharTime(r && (str(r['Pulled At']) || str(r['Sohar Date']) || str(r.Started) || str(r['Last Updated']))); return isNaN(t) ? NaN : t; };
+  const isEstimateRow = (r) => !!r && (/^(yes|y|true)$/i.test(str(r.Estimate)) || ['Est 90792', 'Est 99214', 'Est 99215', 'Projected Patient Responsibility', 'Sohar Est Patient'].some((c) => str(r[c])));
+  // The latest anniversary of a month/day on or before a day (UTC-midnight values).
+  const anniversary = (start, day) => {
+    let y = day.getUTCFullYear();
+    let a = new Date(Date.UTC(y, start.getUTCMonth(), start.getUTCDate()));
+    if (a > day) a = new Date(Date.UTC(--y, start.getUTCMonth(), start.getUTCDate()));
+    return a;
+  };
+  const jan1 = (day) => new Date(Date.UTC(day.getUTCFullYear(), 0, 1));
+  const boundaryIn = (a, b, md) => { // a month/day boundary (start's month and day) in (a, b]
+    for (let y = new Date(a).getUTCFullYear(); y <= new Date(b).getUTCFullYear(); y++) {
+      const t = Date.UTC(y, md.getUTCMonth(), md.getUTCDate());
+      if (t > a && t <= b) return true;
+    }
+    return false;
+  };
+  /**
+   * Reset Basis from a policy's verification history: 'Calendar', 'Plan' or 'Unknown'. A coverage start on January 1 is
+   * Calendar. Otherwise two checks in a row show it: the deductible remaining went back up (a reset) across January 1
+   * but not the plan date -> Calendar, across the plan date only -> Plan; and it did not reset across one boundary
+   * (still below the total, no higher than before) -> the other. history: rows with Deductible, Deductible Remaining and
+   * Pulled At (or Sohar Date). A saved Reset Basis other than Unknown wins.
+   */
+  function resetBasisOf(policy, history) {
+    const saved = [policy || {}, ...(history || [])].map((r) => str(r['Reset Basis'])).find((b) => /^(calendar|plan)$/i.test(b));
+    if (saved) return saved[0].toUpperCase() + saved.slice(1).toLowerCase();
+    const start = C.parseDate(policy && policy['Coverage Start']);
+    if (!start) return 'Unknown';
+    if (start.getUTCMonth() === 0 && start.getUTCDate() === 1) return 'Calendar';
+    const pts = (history || []).concat(policy ? [policy] : []).map((r) => ({ t: pulledMs(r), ded: num(r.Deductible), rem: num(r['Deductible Remaining']) }))
+      .filter((p) => !isNaN(p.t) && p.ded != null && p.ded > 0 && p.rem != null).sort((a, b) => a.t - b.t);
+    const JAN = new Date(Date.UTC(2000, 0, 1));
+    let cal = 0, plan = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      const j = boundaryIn(a.t, b.t, JAN), p = boundaryIn(a.t, b.t, start);
+      if (j === p) continue; // neither, or both: says nothing
+      const reset = b.rem > a.rem && b.rem >= b.ded - 0.005;
+      const noReset = a.rem < a.ded - 0.005 && b.rem <= a.rem + 0.005;
+      if (reset) { if (j) cal++; else plan++; } else if (noReset) { if (j) plan++; else cal++; }
+    }
+    return cal > plan ? 'Calendar' : plan > cal ? 'Plan' : 'Unknown';
+  }
+  /**
+   * Is the policy's plan-year estimate due (section 4)? policy: its latest verification (Sohar Status, Coverage Start,
+   * OOP Status / OOP Max / OOP Remaining, Sohar Payer, Plan, Reset Basis). history: the policy's earlier rows
+   * (Verification History, Flow Results: an estimate row has Est columns, Projected Patient Responsibility or Estimate yes).
+   * today: Date. Calendar: once from January 1; Plan: once from the plan date; Unknown: once from each.
+   * Returns {due, basis, since (MM/DD/YYYY: the plan-year start the estimate is for), reason}.
+   */
+  function planYearEstimateDue(policy, history, today) {
+    const p = policy || {};
+    const day = C.parseDate(today instanceof Date ? today : today || new Date()) || C.parseDate(new Date());
+    const basis = resetBasisOf(p, history);
+    const out = (due, reason, since) => ({ due, basis, since: since ? C.fmtDate(since) : '', reason });
+    if (!/^complete\.eligible/i.test(str(p['Sohar Status']))) return out(false, 'not eligible');
+    const payerText = [p['Sohar Payer'], p['NextGen Payer'], p.Plan, p['Primary Payer']].map(str).join(' ');
+    if (NO_ESTIMATE_PAYER_RE.test(payerText)) return out(false, 'VA, TriWest or TRICARE: $0 expected');
+    const oopMax = num(p['OOP Max']), oopRem = num(p['OOP Remaining']);
+    if (/^met$/i.test(str(p['OOP Status'])) || (oopMax != null && oopMax > 0 && oopRem != null && oopRem <= 0)) return out(false, 'OOP max met: $0');
+    const start = C.parseDate(p['Coverage Start']);
+    const marks = [];
+    if (basis !== 'Plan' || !start) marks.push(jan1(day));
+    if (start && basis !== 'Calendar') marks.push(anniversary(start, day));
+    const since = new Date(Math.max(...marks.map((m) => m.getTime())));
+    const last = (history || []).filter(isEstimateRow).map(pulledMs).filter((t) => !isNaN(t)).sort((a, b) => b - a)[0];
+    // An estimate on the boundary day counts (Pacific evenings land on the next UTC day: a day of slack).
+    if (last != null && last >= since.getTime() - dayMs / 3) return out(false, `estimated ${C.fmtDate(C.parseDate(new Date(last)))} for the plan year from ${C.fmtDate(since)}`, since);
+    return out(true, `${basis === 'Unknown' ? 'reset date unknown: ' : ''}no estimate since ${C.fmtDate(since)}`, since);
+  }
+
+  /** "Smith PMHNP, Robert" -> 'NP', "Doe MD, Jamie" -> 'MD', else ''. The fee schedule has MD and NP columns. */
+  function providerLevel(provider) {
+    const p = ` ${str(provider).toUpperCase().replace(/[^A-Z]+/g, ' ')} `;
+    if (/ (PMHNP|NP|FNP|APRN|ARNP|PA|PAC|CNS) /.test(p)) return 'NP';
+    if (/ (MD|DO) /.test(p)) return 'MD';
+    return '';
+  }
+  /**
+   * The Payer Outcomes ledger -> the Sohar payers discovery found most often, per state: Map state -> [{payerId,
+   * payerName, n}] (n per patient), most first. stateOf: (MRN) -> state ('' when unknown: counted under '').
+   */
+  function discoveryPayers(outcomes, stateOf, limit) {
+    const by = new Map();
+    for (const o of outcomes || []) {
+      if (!/discovery/i.test(str(o.Kind)) || !str(o['Returned payerId'])) continue;
+      const st = str(stateOf ? stateOf(str(o.MRN)) : '').toUpperCase();
+      if (!by.has(st)) by.set(st, new Map());
+      const m = by.get(st), id = str(o['Returned payerId']);
+      if (!m.has(id)) m.set(id, { payerId: id, payerName: str(o['Returned Payer']), mrns: new Set() });
+      m.get(id).mrns.add(str(o.MRN) || str(o.Key));
+    }
+    const out = new Map();
+    for (const [st, m] of by) out.set(st, [...m.values()].map((x) => ({ payerId: x.payerId, payerName: x.payerName, n: x.mrns.size }))
+      .sort((a, b) => b.n - a.n || a.payerName.localeCompare(b.payerName)).slice(0, limit || 8));
+    return out;
+  }
+  /**
+   * The Flow's rateTable for one visit: {rateTable: {soharPayerId: [{code, contractedRate}]}, feeTab, level, note}.
+   * Same lookups as the estimates: the fee tab from the visit's location (telehealth: the provider's home clinic, Fee
+   * Locations / Provider Home Clinic), the payer column from the Fee Payer Map (lookupFeePayer; Low confidence is left
+   * out), and the MD or NP rate. A payer missing a rate for any code is left out (no estimate rather than a guess).
+   * v: {location, provider, event}. ctx: {index (feeIndex), locationRows, homeRows, payerMap, teleKeywords, codes,
+   * payers: [{payerId, payerName}] (the chart payer first, then the ones discovery finds for the state)}.
+   */
+  function rateTableFor(v, ctx) {
+    const c = ctx || {};
+    const out = { rateTable: {}, feeTab: '', level: providerLevel(v && v.provider), note: '' };
+    const index = c.index instanceof Map ? c.index : new Map();
+    const tele = isTele(v && v.location, c.teleKeywords) || isTele(v && v.event, c.teleKeywords);
+    let site = str(v && v.location);
+    if (tele) { const h = (c.homeRows || []).find((r) => keyOf(r.Provider) === keyOf(v && v.provider)); site = h ? str(h['Home Location']) : ''; }
+    const loc = (c.locationRows || []).find((r) => keyOf(r['NextGen Location']) === keyOf(site));
+    const tabName = loc ? str(loc['Fee Tab']) : '';
+    const t = index.get(tabName) || [...index.values()].find((x) => keyOf(x.name) === keyOf(tabName));
+    if (!site) { out.note = tele ? 'Telehealth visit: no home clinic for the provider (Provider Home Clinic)' : 'No location on the visit'; return out; }
+    if (!t) { out.note = tabName ? `Fee tab ${tabName} is not in the fee schedule` : `No Fee Locations row for ${site}`; return out; }
+    out.feeTab = t.name;
+    if (!out.level) { out.note = `Provider level (MD or NP) not recognised from "${str(v && v.provider)}"`; return out; }
+    const codes = (c.codes && c.codes.length ? c.codes : PLAN_YEAR_CODES).map((x) => str(x).toUpperCase());
+    const seen = new Set();
+    for (const p of c.payers || []) {
+      const id = str(p.payerId);
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const row = lookupFeePayer(c.payerMap, str(p.payerName), t.name, id);
+      if (!row || /^low$/i.test(str(row.Confidence))) continue;
+      const col = resolvePayerColumn(t, row['Fee Payer']);
+      const rates = col ? t.payers.get(col)[out.level] : null;
+      if (!rates || codes.some((k) => !(rates.get(k) > 0))) continue;
+      out.rateTable[id] = codes.map((k) => ({ code: k, contractedRate: cents(rates.get(k)) }));
+    }
+    if (!Object.keys(out.rateTable).length) out.note = `No contracted rate for ${codes.join(', ')} at ${t.name} (${out.level})`;
+    return out;
+  }
+
   return {
     FEE_CONFIG_ROWS, TOGGLES, TOGGLE_DEFAULTS, feeConfig, pickToggle, STALE_DAYS,
     FEE_COLS, FEE_META_COLS, parseCodes, parseRate, parseLocations, parseFeeSheet, parseFeeSchedule, feeMetaRows, readMeta, feeStatus, feeIndex,
@@ -1565,5 +1748,7 @@
     metaMatches, parseWarnings,
     isCalculatorHtml, parseCalculatorHtml, mergeSchedules, calculatorWins, FEE_SCHEDULE_LOG_COLS, CALC_PLANS, CALC_MODES, CALC_MODE_TOGGLES, calcPlanType, calcModeOf, calcEstimate, calcInputs, calcPatient, calcSeries, calcText,
     DEMO_WORKBOOK, demoSchedule,
+    // v0.31 plan-year estimate
+    PLAN_YEAR_CODES, PLAN_YEAR_CONFIG_ROWS, planYearCodes, visitCode, resetBasisOf, planYearEstimateDue, providerLevel, discoveryPayers, rateTableFor,
   };
 });

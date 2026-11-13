@@ -306,36 +306,110 @@ test('guarantor text always names the patient by LASFIR', () => {
   assert.match(REC.guarantorCheck({ patient: pt, guarantor: { firstName: 'Cy', lastName: 'Moss' } }, { firstName: 'Di', lastName: 'Park' }).text, /patient OKAADA/);
 });
 
-// ---------- Sohar Flow import (v0.21) ----------
-test('Flow import: the header is Sohar\'s "MHS Eligibility - Discovery vs NextGen" CSV template, exactly', () => {
-  // Copied from the template Sohar gives for the Flow (10/30): never rename or reorder.
-  const template = 'id,patient.firstName,patient.lastName,patient.dateOfBirth,patient.state,placeOfServiceCode,specialtyCode,chartPayerId,chartMemberId,tin,providerGroupName';
+// ---------- Sohar Flow import (v0.21; v0.31 columns) ----------
+test('Flow import: the header is the production Flow\'s CSV template (v27), exactly; no tin', () => {
+  // docs/ARCHITECTURE.md section 5, pinned to the production template's input (template-v27.yaml): never rename or reorder.
+  const template = 'id,patient.firstName,patient.lastName,patient.dateOfBirth,patient.state,placeOfServiceCode,specialtyCode,chartPayerId,chartMemberId,providerGroupName,estimate,rateTable';
   assert.equal(REC.FLOW_IMPORT_COLS.join(','), template);
   assert.equal(C.toCSV(REC.FLOW_IMPORT_COLS, []).split(/\r?\n/)[0], template);
   assert.match(REC.flowImportFileName(new Date(2026, 9, 30)), /^Sohar Ready Import - Flow 2026-10-30\.csv$/);
-  assert.deepEqual(REC.FLOW_IMPORT_CONFIG_ROWS.map((r) => r.setting), ['TIN', 'Sohar provider group']);
+  assert.deepEqual(REC.FLOW_IMPORT_CONFIG_ROWS, [], 'the TIN and provider group rows are gone');
+  assert.deepEqual(REC.PROVIDER_GROUPS, { CA: 'MINDFUL HEALTH SOLUTIONS A PROFESSIONAL MEDICAL CORPORATION', TX: 'Mindful Health Solutions TX PA', WA: 'Mindful Health Solutions Wa Pc' });
 });
 
-test('Flow import rows: one per in-scope patient; chart policy only for verification patients; skip window and incomplete rows left out', () => {
+test('Flow import rows: chart policy only for verification patients; provider group by state; estimate and rateTable', () => {
   const p = (o) => ({ 'In Scope': 'Yes', 'First Name': 'Synth', 'Last Name': 'Patient', DOB: '01/02/1980', State: 'CA', POS: '10', Route: 'verification',
     'Sohar payerId': '60054', 'Member ID': 'SYN100', x: { verifyRows: [{ payerId: '60054', memberId: 'SYN100' }] }, ...o });
   const pts = [
     p({ MRN: '730001' }),
-    p({ MRN: '730002', x: { verifyRows: [{ payerId: '60054', memberId: 'SYN200', reverifySkip: true }, { payerId: '94036', memberId: 'SYN201' }] } }),
-    p({ MRN: '730003', Route: 'discovery', 'Sohar payerId': '99999', 'Member ID': 'GUESS1', x: {} }),
+    p({ MRN: '730002', State: 'TX', x: { verifyRows: [{ payerId: '60054', memberId: 'SYN200', reverifySkip: true }, { payerId: '94036', memberId: 'SYN201' }] } }),
+    p({ MRN: '730003', Route: 'discovery', State: 'wa', 'Sohar payerId': '99999', 'Member ID': 'GUESS1', x: {} }),
     p({ MRN: '730004', x: { verifyRows: [{ payerId: '60054', memberId: 'SYN400', reverifySkip: true }] } }),
     p({ MRN: '730005', DOB: '' }),
     p({ MRN: '730006', 'In Scope': 'No' }),
+    p({ MRN: '730008', Route: 'discovery', x: { excluded: { line: 'TMS treatment', reason: 'Config Include in import: TMS treatment is Off' } } }),
+    p({ MRN: '730009', State: 'GA' }),
   ];
-  const out = REC.flowImportRows(pts, { specialty: 'PSY', tin: '000000000', providerGroup: 'Synthetic Group' });
-  assert.deepEqual(out.rows.map((r) => r.id), ['730001', '730002', '730003']);
+  const rates = { 60054: [{ code: '90792', contractedRate: 1.11 }, { code: '99214', contractedRate: 2.11 }, { code: '99215', contractedRate: 3.11 }] };
+  const out = REC.flowImportRows(pts, { specialty: 'PSY', estimateOf: (pt) => (pt.MRN === '730001' ? { due: true } : pt.MRN === '730003' ? 'yes' : false), rateTableOf: (pt) => (pt.MRN === '730001' ? rates : {}) });
+  assert.deepEqual(out.rows.map((r) => r.id), ['730001', '730002', '730003', '730009']);
   assert.deepEqual(out.rows[0], { id: '730001', 'patient.firstName': 'Synth', 'patient.lastName': 'Patient', 'patient.dateOfBirth': '01/02/1980', 'patient.state': 'CA',
-    placeOfServiceCode: '10', specialtyCode: 'PSY', chartPayerId: '60054', chartMemberId: 'SYN100', tin: '000000000', providerGroupName: 'Synthetic Group' });
-  assert.deepEqual([out.rows[1].chartPayerId, out.rows[1].chartMemberId], ['94036', 'SYN201'], 'the first insurance not inside the skip window');
-  assert.deepEqual([out.rows[2].chartPayerId, out.rows[2].chartMemberId], ['', ''], 'discovery patients: a guessed payer is never sent as the chart policy');
-  assert.deepEqual(out.skipped, [{ key: '730004', why: 'verified eligible recently (skip window)' }, { key: '730005', why: 'no name, DOB or state' }]);
+    placeOfServiceCode: '10', specialtyCode: 'PSY', chartPayerId: '60054', chartMemberId: 'SYN100',
+    providerGroupName: 'MINDFUL HEALTH SOLUTIONS A PROFESSIONAL MEDICAL CORPORATION', estimate: 'yes', rateTable: JSON.stringify(rates) });
+  assert.deepEqual(Object.keys(out.rows[0]), REC.FLOW_IMPORT_COLS);
+  assert.deepEqual(JSON.parse(out.rows[0].rateTable)['60054'][1], { code: '99214', contractedRate: 2.11 }, 'a JSON string the Flow can $eval');
+  assert.deepEqual([out.rows[1].chartPayerId, out.rows[1].chartMemberId, out.rows[1].providerGroupName, out.rows[1].estimate, out.rows[1].rateTable],
+    ['94036', 'SYN201', 'Mindful Health Solutions TX PA', 'no', ''], 'the first insurance still due; no estimate, no rates');
+  assert.deepEqual([out.rows[2].chartPayerId, out.rows[2].chartMemberId, out.rows[2].providerGroupName, out.rows[2].rateTable],
+    ['', '', 'Mindful Health Solutions Wa Pc', ''], 'discovery patients: a guessed payer is never sent as the chart policy; an empty rate table is blank');
+  assert.equal(out.rows[3].providerGroupName, '', 'no MHS group in that state');
+  assert.equal(out.estimates, 2);
+  assert.deepEqual(out.skipped, [{ key: '730004', why: 'already covered, or too early to re-verify' }, { key: '730005', why: 'no name, DOB or state' },
+    { key: '730008', why: 'Config Include in import: TMS treatment is Off' }]);
   assert.equal(REC.flowImportRows([p({ MRN: '730007' })], {}).rows[0].specialtyCode, 'PSY');
+  assert.equal(REC.flowImportRows([p({ MRN: '730007' })], {}).rows[0].estimate, 'no');
 });
+
+test('Flow Results v0.31 columns: Source, Policy Key, Reset Basis, Est 90792 / 99214 / 99215; old files still read', () => {
+  for (const c of ['Source', 'Policy Key', 'Reset Basis', 'Est 90792', 'Est 99214', 'Est 99215']) assert.ok(REC.FLOW_COLS.includes(c), c);
+  const old = REC.FLOW_COLS.filter((c) => !['Source', 'Policy Key', 'Reset Basis', 'Est 90792', 'Est 99214', 'Est 99215'].includes(c));
+  const recs = REC.flowRecords([old, old.map((c) => (c === 'MRN' ? '700009' : c === 'Key' ? 'k9' : ''))]);
+  assert.deepEqual([recs[0].Source, recs[0]['Est 99214'], recs[0].MRN], ['Flow', '', '700009']);
+  assert.equal(REC.resetBasisFor([{ 'Policy Key': 'AC1#1234', 'Reset Basis': 'Unknown', 'Last Updated': '2026-01-02' }, { 'Policy Key': 'AC1#1234', 'Reset Basis': 'Plan', 'Last Updated': '2026-08-02' }], 'AC1#1234'), 'Plan');
+});
+
+// ---------- Verification History (v0.31) ----------
+test('policyKey: payerId + # + the member ID\'s last 4; never the full member ID', () => {
+  assert.equal(REC.policyKey('94036', 'syn-00012345'), '94036#2345');
+  assert.equal(REC.policyKey('94036', ''), '94036#');
+  assert.equal(REC.policyKey('', 'X1'), '');
+  assert.deepEqual(REC.VERIFICATION_HISTORY_COLS.slice(-4), ['Policy Key', 'Projected Patient Responsibility', 'Estimate Note', 'Source']);
+  assert.ok(!REC.VERIFICATION_HISTORY_COLS.some((c) => /member id|first name|last name|dob/i.test(c)), 'no member IDs or names on the sheet');
+});
+
+test('Verification History: append-only, a re-read updates fields only, old policies stay, sorted by Pulled At', () => {
+  const r = (o) => row({ MRN: '750001', LASFIR: 'SYNPAT', 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', 'Sohar payerId': '60054', 'Sohar Payer': 'Synth Mutual',
+    'Sohar Member ID': 'SYN-0001', Match: 'MRN', 'Sohar Date': '2026-10-01T17:00:00Z', 'Next Location': 'Harbor Point', ...o });
+  const a = r({ 'Sohar Ref': 'v-a', 'Deductible Remaining': '500' });
+  const first = REC.historyFromResults([a, r({ 'Sohar Ref': 'v-n', Match: 'Name only. Confirm.' }), r({ 'Sohar Ref': '' })]);
+  assert.equal(first.length, 1, 'name-only and ref-less rows are left out');
+  assert.deepEqual([first[0]['Policy Key'], first[0].Source, first[0].Clinic, first[0]['Sohar ID'], first[0]['Pulled At']], ['60054#0001', 'Import', 'Harbor Point', 'v-a', '2026-10-01T17:00:00.000Z']);
+  assert.deepEqual(Object.keys(first[0]), REC.VERIFICATION_HISTORY_COLS);
+  assert.ok(!JSON.stringify(first).includes('SYN-0001'), 'the member ID never goes on the sheet');
+  assert.equal(REC.historyFromResults([r({ 'Sohar Ref': 'v-d', Match: 'Member ID' })])[0].Source, 'Dashboard');
+  // A discovery finds a new policy later: the old one stays.
+  const b = r({ 'Sohar Ref': 'v-b', 'Sohar payerId': '94036', 'Sohar Payer': 'Other Synth', 'Sohar Member ID': 'NEW-9999', 'Sohar Date': '2026-11-02T17:00:00Z' });
+  let m = REC.mergeHistory(first, REC.historyFromResults([b]));
+  assert.deepEqual([m.added, m.updated, m.rows.length], [1, 0, 2]);
+  // An earlier check read later sorts into place; re-reading v-a updates a field and keeps its Source.
+  const c = r({ 'Sohar Ref': 'v-c', 'Sohar Date': '2026-09-01T17:00:00Z' });
+  m = REC.mergeHistory(m.rows, [...REC.historyFromResults([c]), ...REC.historyFromResults([{ ...a, 'Deductible Remaining': '450' }], 'Dashboard')]);
+  assert.deepEqual(m.rows.map((x) => x['Sohar ID']), ['v-c', 'v-a', 'v-b']);
+  assert.deepEqual([m.added, m.updated], [1, 1]);
+  const va = m.rows.find((x) => x['Sohar ID'] === 'v-a');
+  assert.deepEqual([va['Deductible Remaining'], va.Source], ['450', 'Import']);
+  assert.equal(REC.mergeHistory(m.rows, []).rows.length, 3, 'nothing is ever dropped');
+  // Flow results become Flow rows.
+  const flow = REC.historyFromFlow([{ MRN: '750001', LASFIR: 'SYNPAT', Location: 'Harbor Point', 'Estimate Policy': 'NextGen', 'NextGen Policy Status': 'complete.eligible',
+    'NextGen Verification Link': 'https://app.soharhealth.com/verifications/v-f', 'Policy Key': '60054#0001', 'Sohar Est Patient': '45.11', 'Last Updated': '2026-11-05T17:00:00Z' }, { MRN: '750001' }]);
+  assert.deepEqual([flow.length, flow[0].Source, flow[0]['Sohar ID'], flow[0]['Sohar payerId'], flow[0]['Projected Patient Responsibility']], [1, 'Flow', 'v-f', '60054', '45.11']);
+});
+
+test('policyTimeline: one timeline per policy, newest first, merged with the rotation\'s Patient History', () => {
+  const h = (id, at, key, payer, src = 'Import') => ({ ...Object.fromEntries(REC.VERIFICATION_HISTORY_COLS.map((c) => [c, ''])), MRN: '750001', 'Sohar ID': id, 'Pulled At': at,
+    'Policy Key': key, 'Sohar Payer': payer, 'Sohar Status': 'complete.eligible', Kind: 'Verification', Source: src });
+  const vh = [h('v-1', '2026-09-01T17:00:00Z', '60054#0001', 'Synth Mutual'), h('v-2', '2026-10-01T17:00:00Z', '60054#0001', 'Synth Mutual'),
+    h('v-3', '2026-11-02T17:00:00Z', '94036#9999', 'Other Synth', 'Flow'), { ...h('v-x', '2026-11-03', 'X#1', 'Else'), MRN: '750002' }];
+  const ph = [{ 'Row Key': 'v-2', MRN: '0750001', When: '2026-10-01', Kind: 'Verification', Detail: 'complete.eligible · Synth Mutual', Source: 'Rotation', Ref: 'v-2' },
+    { 'Row Key': 'v-4', MRN: '750001', When: '2026-10-15T17:00:00Z', Kind: 'Verification', Detail: 'complete.ineligible · Synth Mutual', Source: 'Rotation', Ref: 'v-4' },
+    { 'Row Key': 'w-5', MRN: '750001', When: '2026-08-01T17:00:00Z', Kind: 'Discovery', Detail: 'No coverage found', Source: 'Webhook', Ref: 'w-5' }];
+  const t = REC.policyTimeline(vh, ph, '0750001');
+  assert.deepEqual(t.map((g) => g.policyKey), ['94036#9999', '60054#0001', '']);
+  assert.deepEqual(t[1].rows.map((r) => r['Sohar ID']), ['v-4', 'v-2', 'v-1'], 'newest first; v-2 once; the rotation row joins by payer');
+  assert.deepEqual([t[1].payerId, t[1].last4, t[1].payer], ['60054', '0001', 'Synth Mutual']);
+  assert.equal(t[2].rows[0].Source, 'Webhook');
+});
+
 
 // ---------- patient view (v0.22): plans, milestones, what changed, projection, action items ----------
 const ver = (o) => row({ 'Sent As': 'Verification', 'Sohar Status': 'complete.eligible', MRN: '740001', 'Per Nbr': '940001', ...o });
