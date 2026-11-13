@@ -2892,6 +2892,41 @@
     const o = opts || {};
     return reverifyDue(pickVerification(policyResults(rows, v, o.per)), o.visit != null ? o.visit : o.nextAppt, o.line, o);
   }
+  /**
+   * v0.31: the Config section (pane Admin tab and full-screen Config tab) as data: the freshness rows, the include
+   * switches and any extra rows (e.g. fees.PLAN_YEAR_CONFIG_ROWS), with the current values and what each does.
+   * raw: Config {Setting: Value}. Returns {skip, windowHours, onFirst, lines: [{line, rule, ruleSetting, include,
+   * includeSetting}], extra: [{setting, value, what}], rows (every editable setting)}.
+   */
+  function configModel(raw, extraRows) {
+    const c = raw || {};
+    const rc = reverifyConfig(c);
+    const whatOf = new Map(REVERIFY_CONFIG_ROWS.map((r) => [r.setting, r.what]));
+    const lines = SERVICE_LINES.map((l) => ({ line: l, rule: rc.lines[l], ruleSetting: `Re-verify: ${l}`, include: rc.include[l], includeSetting: `Include in import: ${l}` }));
+    const extra = (extraRows || []).map((r) => ({ setting: r.setting, value: c[r.setting] == null || String(c[r.setting]).trim() === '' ? r.value : c[r.setting], what: r.what || '' }));
+    const rows = REVERIFY_CONFIG_ROWS.map((r) => r.setting).concat(extra.map((r) => r.setting));
+    return { skip: rc.skip, windowHours: rc.windowHours, onFirst: rc.onFirst, lines, extra, rows, what: Object.fromEntries(whatOf) };
+  }
+  /**
+   * A Config edit from the Config section, checked before it is written: {ok, value, error}. Only the settings the
+   * section shows can be set this way (extra: settings of the extra rows allowed too).
+   */
+  function configEdit(setting, value, extraSettings) {
+    const s = str(setting), v = str(value);
+    const onOff = (x) => (/^(on|yes|y|true|1)$/i.test(x) ? 'On' : /^(off|no|n|false|0)$/i.test(x) ? 'Off' : '');
+    if (s === 'Skip recent verifications' || s === 'Re-verify on the 1st' || /^Include in import: /.test(s)) {
+      if (/^Include in import: /.test(s) && !SERVICE_LINES.includes(s.slice(19))) return { ok: false, error: `Unknown service line in ${s}` };
+      return onOff(v) ? { ok: true, value: onOff(v) } : { ok: false, error: `${s}: On or Off` };
+    }
+    if (s === 'Re-verify window (hours)') { const n = parseFloat(v); return !isNaN(n) && n >= 0 && n <= 24 * 62 ? { ok: true, value: n } : { ok: false, error: 'Re-verify window (hours): a number of hours, 0 to 1488' }; }
+    if (/^Re-verify: /.test(s)) {
+      if (!SERVICE_LINES.includes(s.slice(11))) return { ok: false, error: `Unknown service line in ${s}` };
+      const t = lineRuleText(v);
+      return t ? { ok: true, value: t } : { ok: false, error: `${s}: Window, Weekly or a number of days` };
+    }
+    if ((extraSettings || []).includes(s)) return { ok: true, value: v };
+    return { ok: false, error: `${s || 'That setting'} is not edited here. Change it on the Config sheet.` };
+  }
   /** A built patient's next visit for the freshness rule: {date, time} from Next Appt and its appointment's time. */
   function nextVisitOf(p) {
     const d = str(p && p['Next Appt']);
@@ -3409,7 +3444,7 @@
     PAYER_MAP_LOG_COLS, mapChangeLog, sheetEditLog, DEMOTE_MARK, FLAG_ACK, flagAckNote, groupOutcomes,
     SOHAR_REF_COLS, refsOf, refIndex, appendRefs, noIdentifierReviewRows,
     REVERIFY_DEFAULTS, REVERIFY_CONFIG_ROWS, reverifyConfig, reverifyDue, policyResults, reverifyCheck,
-    SERVICE_LINES, LINE_DEFAULTS, visitLine, visitTime, coverFrom, lineRule, lineRuleText, ptMs, ptDay, reverifyMigration, reverifyConfigRows, nextVisitOf, pickVerification,
+    SERVICE_LINES, LINE_DEFAULTS, configModel, configEdit, visitLine, visitTime, coverFrom, lineRule, lineRuleText, ptMs, ptDay, reverifyMigration, reverifyConfigRows, nextVisitOf, pickVerification,
     REVERIFY_REQUEST_COLS, pruneReverifyRequests, addReverifyRequest, applyReverifySkips, soharDay,
     PER_PREFIX, keyOf, savedKey, perKey, migrateKey, perKeyMap, splitId, searchedAs, idLabel, MAPPING_DISCOVERY_COLS, isMappingCandidate, subscriberFor,
     removeReverifyRequest, mergeClinicRequests, GUARANTOR_REASONS, GUARANTOR_REQUEST_COLS, guarantorCandidates, addGuarantorRequests, pruneGuarantorRequests,

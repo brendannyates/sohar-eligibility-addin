@@ -842,3 +842,14 @@ body:has(> .boot:not([hidden])) { overflow: hidden; }
 .tk-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .tk-group h4 { margin: 0 0 4px; font-size: 13px; }
 .tk-bar { width: 50%; }
+
+/* v0.31 Config section (config-ui.js): pane Admin tab and the full-screen Config tab */
+.cfg h3 { font-size: 13px; margin: 12px 0 4px; }
+.cfg-row { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: center; margin: 4px 0; font-size: 12.5px; }
+.cfg-row input[type="text"] { min-width: 12em; }
+.cfg-switch { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; }
+.cfg-days { width: 5.5em; }
+.cfg-lines select { font-size: 12px; }
+.cfg-lookbar { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin: 4px 0; }
+.cfg-scroll { max-height: 320px; overflow: auto; }
+.cfg-msg.warn { color: var(--warn); }

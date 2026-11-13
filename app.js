@@ -406,6 +406,7 @@
       $('scope').value = state.cfg.scope;
       $('asOf').value = state.cfg.asOf ? state.cfg.asOf.toISOString().slice(0, 10) : '';
       showFeeUi();
+      renderConfig(); // v0.31
       renderDailyList().catch((e) => console.warn('daily NextGen list not shown', e)); // v0.30
     } catch (e) { setStatus(e.message, 'bad'); }
   }
@@ -590,9 +591,10 @@
       .sort((a, b) => (b.needs - a.needs) || (AUTO_ORDER[a.conf] ?? 0) - (AUTO_ORDER[b.conf] ?? 0) || b.n - a.n || a.name.localeCompare(b.name));
     const box = $('payerList');
     box.hidden = !items.length;
-    if (!items.length) { box.innerHTML = ''; return; }
     const isLow = (it) => it.needs;
     const low = items.filter(isLow).length, rest = items.length - low;
+    renderPayerNotice(low);
+    if (!items.length) { box.innerHTML = ''; placePayerList(); return; }
     const keepOpen = box.querySelector('details') && box.querySelector('details').open;
     box.innerHTML = (low ? `<div class="needclass"><p class="warn"><b>${low} insurance name${low === 1 ? '' : 's'} need${low === 1 ? 's' : ''} manual classification.</b> Not matched confidently, labeled Review or with a label the add-in does not know, or Sohar disagrees with the mapping. Unclassified names go to discovery (or to both insurances when the last visit was billed differently). Pick the right Sohar payer once and it is remembered.</p><div class="needrows"></div></div>` : '')
       + (rest ? `<details class="more payerreview"${keepOpen ? ' open' : ''}><summary>Review auto-mapped payers (${rest})</summary>
@@ -676,6 +678,98 @@
       save.addEventListener('click', () => { const c = choices[+sel.value]; if (c.run) c.run(); });
       list.appendChild(wrap);
     }
+    placePayerList();
+  }
+
+  // ---------- v0.31: the Config section (bottom of the Admin tab; the full-screen Config tab draws the same) ----------
+  const CFG_UI = window.SoharConfigUI;
+  const extraConfigRows = () => (F ? F.PLAN_YEAR_CONFIG_ROWS : []);
+  /** Step 1 says how many payer names need a decision; the list itself is in Config > Payer mapping. */
+  function renderPayerNotice(low) {
+    const n = $('payerNotice');
+    if (!n) return;
+    n.hidden = !low;
+    n.innerHTML = low ? `<p class="warn"><b>${low} insurance name${low === 1 ? '' : 's'} need${low === 1 ? 's' : ''} manual classification.</b> <button class="link" id="btnGoPayers">Open Config, Payer mapping</button></p>` : '';
+    const b = $('btnGoPayers');
+    if (b) b.addEventListener('click', () => { const d = $('configSection'); d.open = true; $('payerList').scrollIntoView({ behavior: 'smooth', block: 'start' }); });
+  }
+  /** The payer list lives in the Config section's Payer mapping slot (moved out of the way while the section redraws). */
+  function placePayerList() {
+    const list = $('payerList'), slot = document.querySelector('#configBox [data-cfg-payers]');
+    if (!list || !slot) return;
+    if (list.parentNode !== slot) slot.appendChild(list);
+    let none = slot.querySelector('.cfg-none');
+    if (!none) { none = document.createElement('p'); none.className = 'hint cfg-none'; slot.insertBefore(none, list); }
+    none.textContent = list.hidden ? (state.patients ? 'No payer names need a decision in this report.' : 'Shows after the NextGen report is loaded.') : '';
+    none.hidden = !list.hidden;
+  }
+  /** Fee Payer Map and Estimate Codes rows for the read-only lists (neither has rates). */
+  function configLook() {
+    const f = state.fees;
+    const strip = (rows, cols) => (rows || []).map((r) => Object.fromEntries(cols.map((c) => [c, r[c] == null ? '' : String(r[c])])));
+    const fpm = f ? (PK ? PK.mergeFeePayerMap(f.payerMap || []) : f.payerMap) : [];
+    const codes = f ? (PK ? PK.mergeEstimateCodes(f.codes || [], F.ESTIMATE_CODE_SEEDS) : f.codes) : (F ? F.ESTIMATE_CODE_SEEDS : []);
+    return { feesOn: feesOn(), feePayerMap: strip(fpm, ['Payer', 'Sohar payerId', 'Fee Tab', 'Fee Payer', 'Confidence', 'Source']), estimateCodes: strip(codes, ['Event keyword', 'Codes', 'Note']) };
+  }
+  /** The model and lists the Config section draws (also sent to full screen). */
+  function configPayload() {
+    return { model: C.configModel((state.cfg && state.cfg.raw) || {}, extraConfigRows()), look: configLook(), payers: payerConfigItems() };
+  }
+  function renderConfig() {
+    const box = $('configBox');
+    if (!box || !CFG_UI) return;
+    const list = $('payerList');
+    if (list && box.contains(list)) $('configSection').appendChild(list); // keep it through the redraw
+    const p = configPayload();
+    box.innerHTML = CFG_UI.html(p.model, p.look);
+    CFG_UI.wire(box, (k, v) => guard(async () => { const t = await saveConfig(k, v); CFG_UI.say($('configBox'), t, true); }, 'configBox'), (sheet) => X.activate(sheet));
+    placePayerList();
+  }
+  /** One Config edit (pane or full screen): checked (core.configEdit), written, read back. Returns what was saved. */
+  async function saveConfig(setting, value) {
+    const e = C.configEdit(setting, value, extraConfigRows().map((r) => r.setting));
+    if (!e.ok) throw new Error(e.error);
+    await X.setConfigValue(setting, e.value);
+    const keep = state.cfg ? { scope: state.cfg.scope, asOf: state.cfg.asOf } : {};
+    state.cfg = { ...(await X.readConfig()), ...keep };
+    renderConfig();
+    return `Saved ${setting} = ${e.value}. It applies from the next build (Rebuild in step 1, or upload the report again).`;
+  }
+  /**
+   * The payers the Config section lists, as data for full screen: [{name, n, label, needs, guess, evidence, flag,
+   * choices: [{label, kind ('keep'|'suggest'|'use'|'not'), payerId, payerName}]}]. The same picks as the pane's dropdown.
+   */
+  function payerConfigItems() {
+    if (!state.payerMap || !state.rows) return [];
+    const idx = C.payerMapIndex(state.payerMap || []);
+    const learned = new Map((state.learning || []).map((r) => [r.key, r]));
+    const out = [];
+    for (const [name, pers] of payersInImport()) {
+      const h = idx.get(name.toLowerCase());
+      const conf = h ? String(h.confidence || '').toLowerCase() : '';
+      const lr = learned.get(name.toLowerCase()) || null;
+      const needs = !h || C.needsClassification(h.confidence, h.payerId) || !!(lr && lr.decision === 'flag') || !!(lr && lr.suggestion);
+      if (C.isVip(name) || C.isSelfPay(name) || !(needs || C.isAutoLabel(conf))) continue;
+      const choices = [];
+      if (h && h.payerId) choices.push({ label: `Keep ${h.payerName || h.payerId} (${h.payerId})`, kind: 'keep', payerId: h.payerId, payerName: h.payerName || '' });
+      const sg = lr && lr.suggestion;
+      if (sg) choices.push({ label: `Sohar suggests ${sg.payerName || sg.payerId} (${sg.payerId})`, kind: 'suggest', payerId: sg.payerId, payerName: sg.payerName || '' });
+      for (const c of C.suggestPayers(name, state.soharPayers || [], 8)) if (!choices.some((x) => x.payerId === c.payerId)) choices.push({ label: `${c.payerName} (${c.payerId})`, kind: 'use', payerId: c.payerId, payerName: c.payerName });
+      choices.push({ label: 'Not a payer (self-pay, VIP, a placeholder)', kind: 'not', payerId: '', payerName: '' });
+      out.push({ name, n: pers.size, label: h ? (h.confidence || 'No confidence') : 'Not mapped', needs, guess: h && h.payerId ? `${h.payerName || ''} ${h.payerId}`.trim() : '',
+        evidence: C.learningEvidence(lr) || '', flag: lr && lr.decision === 'flag' ? lr.note : '', choices });
+    }
+    return out.sort((a, b) => (b.needs - a.needs) || b.n - a.n || a.name.localeCompare(b.name));
+  }
+  /** A payer pick from full screen, written like the pane's (Payer Map + Payer Map Log, By Pane, a person's write). */
+  async function applyPayerChoice(name, ch) {
+    if (!name || !ch) throw new Error('Pick a payer first.');
+    const h = C.payerMapIndex(state.payerMap || []).get(String(name).toLowerCase()) || {};
+    const entry = ch.kind === 'not' ? { nextgenPayerName: name, payerId: '', payerName: '', confidence: 'Not a payer', notes: 'Marked in the add-in (full screen)' }
+      : ch.kind === 'keep' ? { nextgenPayerName: name, payerId: h.payerId, payerName: h.payerName, confidence: HUMAN_LABELS.has(String(h.confidence || '').toLowerCase()) ? h.confidence : 'Confirmed', notes: `Confirmed in the add-in (full screen; was ${h.confidence || 'blank'})` }
+      : { nextgenPayerName: name, payerId: ch.payerId, payerName: ch.payerName, confidence: 'Confirmed', notes: ch.kind === 'suggest' ? 'Suggested by Sohar results, confirmed in the add-in (full screen)' : 'Mapped in the add-in (full screen)' };
+    await writeMap([{ entry, evidence: entry.notes }], 'Pane', true);
+    await afterMap();
   }
 
   // ---------- step 3 ----------
@@ -2106,6 +2200,7 @@
     renderFeeStatus();
   }
   function renderFeeStatus() {
+    renderConfig(); // v0.31: the Config section lists Fee Payer Map and Estimate Codes
     const box = $('feeStatus');
     if (!box) return;
     const f = state.fees;
@@ -2861,6 +2956,9 @@
   // ---------- demo adapter (browser preview, synthetic data) ----------
   // Every name, MRN, member ID and auth code below is made up. Dates are relative to today so the demo stays current.
   function demoAdapter() {
+    // v0.31: Config edits from the Config section stay in memory in the browser preview.
+    const demoCfgRaw = {};
+    const demoCfgBase = () => ({ asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', payerTests: C.payerTestConfig({ 'Payer tests': /[?&]tests=1\b/.test(location.search) ? 'On' : 'Off' }), mrnSince: '', learning: C.learningConfig({}), fees: F ? F.feeConfig({ 'Fee estimates': feesDemo ? 'On' : 'Off' }) : { on: false } });
     const docSettings = { [W.USERS_SETTING]: [{ name: 'Sam O.', added: '' }, { name: 'Ana R.', added: '' }, { name: 'Jo K.', added: '' }] };
     const hdr = ['Appointment Pre-Check Complete', 'Res Name', 'Pat Sts', 'Portal Enrollment', 'Pat Name', 'Appt Date', 'Beg Tm', 'Event', 'Details', 'Loc Name',
       'Gender Identity', 'Current Gender', 'Preferred Pronoun', 'MRN', 'Status', 'Dur', 'Birth Dt', 'Rendering', 'End Tm', 'Per Nbr', 'Nxt Appt Dt', 'Nxt Beg Tm',
@@ -3069,7 +3167,7 @@
       INBOX: { sheet: 'Clinic Work Inbox', table: 'tblClinicWorkInbox' },
       async readClinicInbox() { if (inbox === undefined) { const r = inboxFirstRead(); if (r.length) inbox = r; return r; } return inbox; },
       async createClinicInbox() { if (inbox) return false; inbox = []; return true; },
-      async readConfig() { return { asOf: null, scope: 'upcoming', locationState: { 'San Rafael': 'CA', 'Newport Beach': 'CA', 'Mission Viejo': 'CA', 'Castro Street': 'CA' }, defaultState: 'CA', teleKeywords: ['Tele'], posTele: '10', posOffice: '11', specialty: 'PSY', useGuarantorAsSubscriber: false, approachingPct: 0.2, sfhpProviders: ['Stone', 'Reyes'], reverifyDays: 7, reverify: C.reverifyConfig({}), clinicLocation: '', payerTests: C.payerTestConfig({ 'Payer tests': /[?&]tests=1\b/.test(location.search) ? 'On' : 'Off' }), mrnSince: '', learning: C.learningConfig({}), fees: F ? F.feeConfig({ 'Fee estimates': feesDemo ? 'On' : 'Off' }) : { on: false } }; },
+      async readConfig() { return { ...demoCfgBase(), raw: { ...demoCfgRaw }, reverify: C.reverifyConfig(demoCfgRaw) }; },
       async readPayerMap() { return payerMap; },
       async readSoharPayers() { return sohar; },
       async upsertPayerMap(e, o) { return this.upsertPayerMapMany([e], o); },
@@ -3080,7 +3178,7 @@
         }
         return list.length;
       },
-      async replaceTable() {}, async setConfigValue() {}, async activate() {}, async templateCheck() { return []; }, async recoverAll() { return []; }, takeRecovered() { return []; },
+      async replaceTable() {}, async setConfigValue(k, v) { demoCfgRaw[k] = v; }, async activate() {}, async templateCheck() { return []; }, async recoverAll() { return []; }, takeRecovered() { return []; },
       // v0.28: document settings, in memory (made-up names). The demo workbook has one fixed key, so a pick lasts the day here too.
       getDoc(k) { return docSettings[k] ?? null; }, async setDoc(k, v) { if (v == null) delete docSettings[k]; else docSettings[k] = v; return true; },
       async refreshDoc() {}, docUrl() { return 'demo:sohar-eligibility'; },

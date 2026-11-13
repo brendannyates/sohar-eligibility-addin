@@ -486,3 +486,17 @@ test('payer outcomes ledger: a name-only verification adds no agree or payer-err
   const ok = C.mergeSoharResults(IMPORT(), [vfile({ ...rec, id: '201' })], CFG);
   assert.deepEqual(C.payerOutcomes(ok.results, ok.patients, 't').map((o) => [o.MRN, o['Sent payerId'], o.Signal]), [['M201', '62308', 'payer error']], 'an id match still counts');
 });
+
+test('configModel / configEdit: the Config section shows the freshness rows and checks each edit', () => {
+  const m = C.configModel({ 'Re-verify: ESK': '4', 'Include in import: IVK': 'Off', 'Plan-year estimate codes': '' }, [{ setting: 'Plan-year estimate codes', value: '90792; 99214; 99215', what: 'x' }]);
+  assert.deepEqual(m.lines.map((l) => [l.line, l.rule, l.include]), [['Provider', 'Window', true], ['TMS treatment', 'Weekly', true], ['ESK', '4', true], ['IVK', 'Window', false]]);
+  assert.equal(m.extra[0].value, '90792; 99214; 99215', 'a blank row shows the default');
+  assert.deepEqual(C.configEdit('Re-verify: TMS treatment', 'weekly'), { ok: true, value: 'Weekly' });
+  assert.deepEqual(C.configEdit('Include in import: ESK', 'false'), { ok: true, value: 'Off' });
+  assert.deepEqual(C.configEdit('Re-verify window (hours)', '48'), { ok: true, value: 48 });
+  assert.equal(C.configEdit('Re-verify window (hours)', '-1').ok, false);
+  assert.equal(C.configEdit('Re-verify: Dental', 'Window').ok, false);
+  assert.equal(C.configEdit('Re-verify: ESK', 'sometimes').ok, false);
+  assert.equal(C.configEdit('Scope', 'all').ok, false, 'only the section\'s settings');
+  assert.deepEqual(C.configEdit('Plan-year estimate codes', '99214', ['Plan-year estimate codes']), { ok: true, value: '99214' });
+});

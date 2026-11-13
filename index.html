@@ -69,7 +69,7 @@
           <div id="dailyList" class="result" hidden></div>
           <div id="reportWarn" class="callout bad" role="alert" hidden></div>
           <div id="scanResult" class="result" hidden></div>
-          <div id="payerList" class="result" hidden></div>
+          <div id="payerNotice" class="result" hidden></div>
           <div id="buildResult" class="result" hidden></div>
           <details class="more">
             <summary>Options</summary>
@@ -257,6 +257,14 @@
       </div>
       <p class="hint">Messages use LASFIR and MRN only. Send inside Outlook or Teams only.</p>
     </details>
+
+    <!-- v0.31: Config, at the bottom of the Admin tab (the same section is the full-screen Config tab) -->
+    <details class="more section" id="configSection">
+      <summary>Config</summary>
+      <p class="hint">Re-verify rules per service line, what goes in the next import, the plan-year estimate codes, payer mapping and the fee lookups. Each change is saved to the Config sheet at once and used from the next build.</p>
+      <div id="configBox" class="result"></div>
+      <div id="payerList" class="result" hidden></div>
+    </details>
     </section>
   </main>
 
@@ -277,6 +285,7 @@
   <script src="excel.js?v=0.30.0"></script>
   <script src="who.js?v=0.30.0"></script>
   <script src="dev-updates.js?v=0.30.0"></script>
+  <script src="config-ui.js?v=0.30.0"></script>
   <script src="app.js?v=0.30.0"></script>
 </body>
 </html>
